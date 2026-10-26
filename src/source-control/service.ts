@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { mutateReference } from "./refs";
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
@@ -8,7 +9,6 @@ import { deriveChangesetMetadata } from "./derived";
 import { getCanonicalSnapshot } from "./canonical";
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
-const refName = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
 export async function createChangeset(repositoryId: string, actor: SourceActor, body: unknown, retryCount = 0): Promise<ChangesetReceipt> {
   const parsed = changesetInputSchema.safeParse(body);
@@ -133,39 +133,12 @@ export async function approveChangeset(repositoryId: string, id: string, ownerId
   return changed;
 }
 
-export async function advanceReference(repositoryId: string, name: string, changesetId: string, expectedGeneration: number | null, actorId: string) {
-  if (!validPath(name) || !refName.test(name) || name.endsWith(".lock") || name.includes("..")) {
-    throw new SourceControlError(422, "INVALID_REFERENCE", "Invalid reference name");
-  }
-  if (expectedGeneration !== null && (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1)) {
-    throw new SourceControlError(422, "INVALID_GENERATION", "Expected generation must be a positive integer or null");
-  }
-  return db.$transaction(async tx => {
-    const repo = await tx.repository.findUnique({ where: { id: repositoryId } });
-    if (!repo) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Repository not found");
-    const changeset = await tx.sourceChangeset.findFirst({ where: { id: changesetId, repositoryId }, include: { validation: true } });
-    if (!changeset) throw new SourceControlError(404, "CHANGESET_NOT_FOUND", "Changeset not found in this repository");
-    if (changeset.validation?.state !== "SUCCESS") throw new SourceControlError(409, "VALIDATION_REQUIRED", "Integrity validation not successful");
-    if (repo.requireHumanApproval) {
-      const approval = await tx.sourceChangeApproval.findUnique({ where: { changesetId_userId: { changesetId, userId: repo.ownerId } } });
-      if (approval?.decision !== "APPROVED") throw new SourceControlError(403, "HUMAN_APPROVAL_REQUIRED", "Owner approval required before updating a reference");
-    }
-    if (expectedGeneration === null) {
-      const existing = await tx.sourceReference.findUnique({ where: { repositoryId_name: { repositoryId, name } } });
-      if (existing) throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference already exists");
-      await tx.sourceReference.create({ data: { repositoryId, name, changesetId, generation: 1 } });
-    } else {
-      const update = await tx.sourceReference.updateMany({ where: { repositoryId, name, generation: expectedGeneration },
-        data: { changesetId, generation: { increment: 1 } } });
-      if (update.count !== 1) throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference generation changed; read current value");
-    }
-    await tx.auditEvent.create({ data: { repositoryId, actorType: "HUMAN", actorId, action: "reference.advanced", subjectId: changesetId,
-      metadata: { name, previousGeneration: expectedGeneration } } });
-    return tx.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId, name } } });
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }).catch(error => {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference was created concurrently");
-    }
-    throw error;
+// Keep v1 clients compatible while enforcing v2-independent ref CAS and audit.
+export async function advanceReference(repositoryId: string, name: string, changesetId: string,
+  expectedGeneration: number | null, actorId: string) {
+  const result = await mutateReference(repositoryId, actorId, {
+    name, changesetId, expectedGeneration, mutationId: randomUUID(),
+    operation: expectedGeneration === null ? "CREATE" : "UPDATE",
   });
+  return result.ref;
 }
