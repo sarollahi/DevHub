@@ -139,3 +139,21 @@ test('regional cache is populated once and reused by an independent node cache',
   assert.equal(originCalls, 1, 'new node cache must hit warmed regional cache');
   assert.equal(regional.stats.hits, 1);
 });
+
+test('authoritative S3 streaming fallback preserves immutable object verification', { timeout: 30000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'devhub-s3-cache-'));
+  const selected = blob('streamed authority bytes');
+  let jsonReads = 0; let streamingReads = 0;
+  const origin = http.createServer((req, res) => {
+    if (req.url.includes('/api/v2/')) { jsonReads++; res.writeHead(413, { 'content-type': 'application/json' }); res.end('{"error":"STREAM_REQUIRED"}'); return; }
+    if (req.url.includes('/content')) { streamingReads++; res.writeHead(200, { 'content-type': 'application/octet-stream' }); res.end(selected.data); return; }
+    res.writeHead(404); res.end();
+  });
+  const url = await listen(origin); let daemon;
+  t.after(async () => { if (daemon?.child.exitCode === null) await stop(daemon); await new Promise(r => origin.close(r)); await rm(dir, { recursive: true, force: true }); });
+  const socket = join(dir, 'node.sock'); daemon = await start(join(dir, 'data'), socket, url);
+  assert.deepEqual((await getCachedObject({ socketPath: socket, repositoryId: repo, id: selected.id })).data, selected.data);
+  assert.equal(jsonReads, 1); assert.equal(streamingReads, 1);
+  assert.deepEqual((await getCachedObject({ socketPath: socket, repositoryId: repo, id: selected.id })).data, selected.data);
+  assert.equal(streamingReads, 1, 'verified streaming bytes are shared without another request');
+});
