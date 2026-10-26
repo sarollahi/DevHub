@@ -94,6 +94,8 @@ model Repository {
   ingressBuckets        IngressBucket[]
   sourceChangesets      SourceChangeset[]
   sourceReferences      SourceReference[]
+  referencePolicies     SourceReferencePolicy[]
+  referenceMutations    SourceRefMutation[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -293,6 +295,12 @@ model AuditEvent {
 }
 
 
+enum SourceRefKind {
+  BRANCH
+  RELEASE
+  TAG
+}
+
 enum SourceObjectKind {
   BLOB
   TREE
@@ -382,9 +390,50 @@ model SourceReference {
   name         String
   changesetId  String          @db.Char(64)
   generation   Int             @default(1)
+  kind         SourceRefKind   @default(BRANCH)
+  deletedAt    DateTime?
   updatedAt    DateTime        @updatedAt
   repository   Repository      @relation(fields: [repositoryId], references: [id])
   changeset    SourceChangeset @relation(fields: [changesetId], references: [id])
   @@id([repositoryId, name])
   @@index([changesetId])
+}
+
+
+// Per-ref policies do not bypass the default branch's invariant protection.
+model SourceReferencePolicy {
+  repositoryId   String     @db.Uuid
+  name           String
+  protected      Boolean    @default(false)
+  allowForce     Boolean    @default(false)
+  allowDelete    Boolean    @default(true)
+  requireApproval Boolean   @default(false)
+  updatedAt      DateTime   @updatedAt
+  repository     Repository @relation(fields: [repositoryId], references: [id])
+  @@id([repositoryId, name])
+}
+
+// Append-only mutation journal, including deletion tombstones and migration baselines.
+// Mutation IDs make retries idempotent; generation never resets after deletion.
+model SourceRefMutation {
+  id             String        @id @default(uuid()) @db.Uuid
+  repositoryId   String        @db.Uuid
+  name           String
+  mutationId     String        @db.VarChar(128)
+  requestHash    String        @db.Char(64)
+  operation      String        @db.VarChar(20)
+  kind           SourceRefKind
+  oldChangesetId String?       @db.Char(64)
+  newChangesetId String?       @db.Char(64)
+  oldGeneration  Int?
+  newGeneration  Int
+  actorType      String
+  actorId        String
+  forced         Boolean       @default(false)
+  reason         String?
+  createdAt      DateTime      @default(now())
+  repository     Repository    @relation(fields: [repositoryId], references: [id])
+  @@unique([repositoryId, name, mutationId])
+  @@unique([repositoryId, name, newGeneration])
+  @@index([repositoryId, name, createdAt(sort: Desc)])
 }
