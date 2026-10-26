@@ -94,6 +94,7 @@ model Repository {
   ingressBuckets        IngressBucket[]
   sourceChangesets      SourceChangeset[]
   sourceReferences      SourceReference[]
+  queryIndexJobs        SourceQueryIndexJob[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -331,6 +332,8 @@ model SourceChangeset {
   validation   SourceValidation?
   approvals    SourceChangeApproval[]
   references   SourceReference[]
+  queryIndexJob SourceQueryIndexJob?
+  queryPathTouches SourceQueryPathTouch[]
   @@index([repositoryId, createdAt(sort: Desc)])
 }
 
@@ -387,4 +390,35 @@ model SourceReference {
   changeset    SourceChangeset @relation(fields: [changesetId], references: [id])
   @@id([repositoryId, name])
   @@index([changesetId])
+}
+
+ 
+// Durable and recoverable lazy derived-data indexing. All canonical source
+// changesets and their file operations remain the sole source of truth.
+model SourceQueryIndexJob {
+  changesetId  String          @id @db.Char(64)
+  repositoryId String          @db.Uuid
+  state        JobState        @default(QUEUED)
+  generation   Int?
+  attempts     Int             @default(0)
+  nextAttemptAt DateTime       @default(now())
+  leaseUntil   DateTime?
+  lastError    String?
+  indexedAt    DateTime?
+  createdAt    DateTime        @default(now())
+  changeset    SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Cascade)
+  repository   Repository      @relation(fields: [repositoryId], references: [id])
+  @@index([state, nextAttemptAt, leaseUntil])
+  @@index([repositoryId, generation])
+}
+
+// Per-revision path touches include both sides of renames, unlike operations.
+model SourceQueryPathTouch {
+  changesetId    String          @db.Char(64)
+  path           String
+  operationPath  String
+  role           String
+  changeset      SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Cascade)
+  @@id([changesetId, path, operationPath, role])
+  @@index([path, changesetId])
 }
