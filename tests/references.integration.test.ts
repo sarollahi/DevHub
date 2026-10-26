@@ -53,7 +53,6 @@ test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and 
     assert.equal((await mutateReference(repo.id, user.id, input)).replayed, true);
     assert.equal(await db.sourceRefMutation.count({ where: { repositoryId: repo.id, name: "main" } }), 1);
     await assert.rejects(() => mutateReference(repo.id, user.id, { ...input, changesetId: left }), fail("MUTATION_ID_REUSED"));
-    await assert.rejects(() => mutateReference(repo.id, user.id, request("main", "UPDATE", 1, right, "attempt-right")), async () => false).catch(() => {});
     // The first true advance wins; the other must not overwrite it.
     const requests = [
       mutateReference(repo.id, user.id, request("main", "UPDATE", 1, left, "race-left")),
