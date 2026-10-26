@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, symlink, chmod, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, symlink, chmod, rm } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,6 +96,45 @@ test("real repository with merges, symlinks, executable mode and >4 MiB blobs su
     assert.equal(changed.commits, count + 1);
     assert.equal(await db.gitImportCommit.count({ where: { repositoryId: repo.id } }), count + 1);
     assert.equal((await verifyGitImport(job.id)).commits, count + 1);
+
+    // Fail exactly at the immutable publication event. Neither the native
+    // changeset nor its Git mapping may escape an aborted PostgreSQL commit.
+    await writeFile(join(directory, "interrupted.txt"), "recoverable source change");
+    git(directory, "add", "."); git(directory, "commit", "-m", "Interrupted import");
+    const interruptedSha = git(directory, "rev-parse", "HEAD");
+    const functionName = "git_import_abort_" + suffix;
+    const triggerName = "git_import_event_abort_" + suffix;
+    await db.$executeRawUnsafe(`CREATE FUNCTION "${functionName}"() RETURNS TRIGGER LANGUAGE plpgsql AS $
+      BEGIN IF NEW."repositoryId" = '${repo.id}'::uuid THEN
+        RAISE EXCEPTION 'injected Git import publication failure';
+      END IF; RETURN NEW; END $;`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER "${triggerName}" BEFORE INSERT ON "SourceChangesetEvent"
+      FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`);
+    try {
+      await requestGitImport(job.id);
+      await assert.rejects(() => runGitImport(job.id), /injected Git import publication failure/);
+      assert.equal((await db.gitImportJob.findUniqueOrThrow({ where: { id: job.id } })).status, "FAILED");
+      assert.equal(await db.gitImportCommit.findUnique({
+        where: { repositoryId_gitSha: { repositoryId: repo.id, gitSha: interruptedSha } },
+      }), null);
+    } finally {
+      await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${triggerName}" ON "SourceChangesetEvent";`);
+      await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${functionName}"();`);
+    }
+    await requestGitImport(job.id);
+    const resumed = await runGitImport(job.id);
+    assert.equal(resumed.commits, count + 2);
+    assert.equal((await db.gitImportJob.findUniqueOrThrow({ where: { id: job.id } })).status, "COMPLETED");
+
+    // A corrupted original object must invalidate verification, not result
+    // in a misleading COMPLETED verification outcome.
+    const loose = join(directory, ".git", "objects", interruptedSha.slice(0, 2), interruptedSha.slice(2));
+    const originalBytes = await readFile(loose);
+    try {
+      await writeFile(loose, Buffer.from("damaged Git object"));
+      await assert.rejects(() => verifyGitImport(job.id), /fsck|corrupt|invalid|bad/i);
+    } finally { await writeFile(loose, originalBytes); }
+    assert.equal((await verifyGitImport(job.id)).commits, count + 2);
   } finally {
     if (previousRoot === undefined) delete process.env.GIT_IMPORT_ROOT;
     else process.env.GIT_IMPORT_ROOT = previousRoot;
