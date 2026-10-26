@@ -100,6 +100,8 @@ jobs:
         run: timeout --signal=TERM 600s npm run storage:stress
       - name: Source-control DAG benchmark smoke test
         run: npm run bench:source-query -- --depth=900 --width=16 --layers=12
+      - name: Shared object cache cold and warm CI benchmark
+        run: npm run cache:benchmark
       - name: Production build
         run: npm run build
       - name: Start server against real database
