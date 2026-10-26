@@ -152,3 +152,12 @@ The existing contribution ingestion, review inbox and Redis-backed background pr
 The authenticated repository workspace is at `/repositories/{repositoryId}/source`. Agents with `changesets:write` can submit changesets via `POST /api/v1/repositories/{repositoryId}/changesets`; approved administrators can update `PUT /api/v1/repositories/{repositoryId}/refs/{name}` with `expectedGeneration` for conditional writes.
 
 See [architecture decision 0001](docs/architecture/0001-immutable-changesets.md) for identities, storage boundaries, security policies, API examples and migration limits, and [local development](docs/local-development.md) for verified environment commands.
+
+
+### Canonical delta changesets (v2)
+
+The v2 native engine stores only changed-file operation metadata with ordered parent relationships. Full repository trees are reconstructed on demand, not copied into PostgreSQL for every changeset. Immutable SHA-256 blobs may be staged with POST /api/v2/repositories/{repositoryId}/objects and referenced by ADD/MODIFY operations in POST /api/v2/repositories/{repositoryId}/changesets. DELETE, RENAME, COPY and CHMOD are supported, including binary/empty files, executable bits and safe symlinks. Publication requires no branch or reference update.
+
+Publication, parent edges, operation rows, idempotency claims and publication events commit atomically. Readers can use GET /api/v2/repositories/{repositoryId}/changesets/{id}, /tree, /events and /objects/{objectId}. The existing v1 API and reference controls remain available. The v2 JSON object endpoint currently has a 4 MiB raw-object limit; historical snapshot replay is bounded and external event delivery is not yet implemented.
+
+See [architecture decision 0002](docs/architecture/0002-canonical-delta-publication.md) for protocol rules, transaction semantics, tests and limitations.

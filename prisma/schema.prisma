@@ -94,6 +94,9 @@ model Repository {
   ingressBuckets        IngressBucket[]
   sourceChangesets      SourceChangeset[]
   sourceReferences      SourceReference[]
+  sourceObjectGrants    SourceObjectGrant[]
+  sourceEvents          SourceChangesetEvent[]
+  sourcePublicationKeys SourcePublicationKey[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -302,6 +305,11 @@ enum SourceOperationKind {
   PUT
   DELETE
   MOVE
+  ADD
+  MODIFY
+  RENAME
+  COPY
+  CHMOD
 }
 
 // Object IDs are SHA-256 over a type-prefixed byte sequence; payloads are immutable.
@@ -313,24 +321,27 @@ model SourceObject {
   createdAt   DateTime              @default(now())
   trees       SourceChangeset[]     @relation("ChangesetTree")
   operations  SourceFileOperation[] @relation("FileObject")
+  grants      SourceObjectGrant[]
 }
 
 // Content-addressed changesets are never modified when references advance.
 model SourceChangeset {
   id           String                  @id @db.Char(64)
   repositoryId String                  @db.Uuid
-  treeId       String                  @db.Char(64)
+  treeId       String?                 @db.Char(64)
   authorId     String
   message      String
   createdAt    DateTime                @default(now())
   repository   Repository              @relation(fields: [repositoryId], references: [id])
-  tree         SourceObject            @relation("ChangesetTree", fields: [treeId], references: [id])
+  tree         SourceObject?           @relation("ChangesetTree", fields: [treeId], references: [id])
   parents      SourceChangesetParent[] @relation("ChangesetChild")
   children     SourceChangesetParent[] @relation("ChangesetParent")
   operations   SourceFileOperation[]
   validation   SourceValidation?
   approvals    SourceChangeApproval[]
   references   SourceReference[]
+  publicationKeys SourcePublicationKey[]
+  publicationEvent SourceChangesetEvent?
   @@index([repositoryId, createdAt(sort: Desc)])
 }
 
@@ -350,6 +361,8 @@ model SourceFileOperation {
   kind         SourceOperationKind
   previousPath String?
   objectId     String?             @db.Char(64)
+  position     Int                 @default(0)
+  fileMode     String?             @db.VarChar(6)
   changeset    SourceChangeset     @relation(fields: [changesetId], references: [id], onDelete: Cascade)
   object       SourceObject?       @relation("FileObject", fields: [objectId], references: [id])
   @@id([changesetId, path])
@@ -387,4 +400,43 @@ model SourceReference {
   changeset    SourceChangeset @relation(fields: [changesetId], references: [id])
   @@id([repositoryId, name])
   @@index([changesetId])
+}
+
+ 
+// A repository-local grant permits staged blobs to be used in future changesets.
+// Global SHA-256 deduplication never implies cross-repository read authorization.
+model SourceObjectGrant {
+  repositoryId String       @db.Uuid
+  objectId     String       @db.Char(64)
+  createdAt    DateTime     @default(now())
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  object       SourceObject @relation(fields: [objectId], references: [id], onDelete: Restrict)
+  @@id([repositoryId, objectId])
+}
+
+// Retry keys are immutable, scoped to both the repository and submitting actor.
+model SourcePublicationKey {
+  repositoryId String          @db.Uuid
+  authorId     String
+  key          String
+  changesetId  String          @db.Char(64)
+  createdAt    DateTime        @default(now())
+  repository   Repository      @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  changeset    SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Restrict)
+  @@id([repositoryId, authorId, key])
+  @@index([changesetId])
+}
+
+// Recorded in the same PostgreSQL transaction as the complete changeset.
+// Consumers must use idempotent processing; timestamp order is not commit order.
+model SourceChangesetEvent {
+  id           String          @id @default(uuid()) @db.Uuid
+  repositoryId String          @db.Uuid
+  changesetId  String          @unique @db.Char(64)
+  kind         String
+  payload      Json
+  createdAt    DateTime        @default(now())
+  repository   Repository      @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  changeset    SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Restrict)
+  @@index([repositoryId, createdAt])
 }
