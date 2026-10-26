@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireRepositoryAccess, sourceFailure } from "@/source-control/http";
+import { requireRepositoryAccess, sourceFailure, readBoundedJson } from "@/source-control/http";
 import { stageCanonicalBlob } from "@/source-control/canonical";
 export const runtime = "nodejs";
 
@@ -12,7 +12,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (Number(request.headers.get("content-length") || "0") > 6_000_000) {
       return NextResponse.json({ error: "REQUEST_TOO_LARGE" }, { status: 413 });
     }
-    const body: unknown = await request.json().catch(() => null);
+    const body = await readBoundedJson(request, 6_000_000);
     const dataBase64 = body && typeof body === "object" && "dataBase64" in body ? body.dataBase64 : undefined;
     const result = await stageCanonicalBlob(id, dataBase64);
     return NextResponse.json({ apiVersion: 2, ...result }, { status: 201 });
