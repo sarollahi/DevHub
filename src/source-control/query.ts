@@ -1,3 +1,4 @@
+import { ensureIndexJob } from "../workers/query-indexer";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry } from "./contracts";
@@ -20,6 +21,7 @@ export async function resolveRevision(repositoryId: string, revision: string): P
   if (!id || !(await db.sourceChangeset.findFirst({ where: { id, repositoryId }, select: { id: true } }))) {
     throw new SourceControlError(404, "REVISION_NOT_FOUND", "Revision does not exist in this repository");
   }
+  await ensureIndexJob(repositoryId, id);
   return id;
 }
 
