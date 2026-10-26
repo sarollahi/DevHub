@@ -180,20 +180,21 @@ export class ObjectCache {
       await this.remove(victim[0]); this.stats.evictions++;
     }
   }
-  async upstream(url, token, circuit, counter) {
+  async upstream(url, token, circuit, counter, assumedKind) {
     if (!circuit.ready()) throw Object.assign(new Error('Upstream circuit open'), { status: 503 });
     this.stats[counter]++;
     try {
       const response = await fetch(url, { headers: { accept: 'application/octet-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) }, signal: AbortSignal.timeout(this.options.timeoutMs) });
       if (response.status === 404) throw Object.assign(new Error('Object does not exist'), { status: 404, terminal: true });
+      if (response.status === 413) { await response.body?.cancel(); throw Object.assign(new Error('Streaming required'), { status: 413, streamingRequired: true }); }
       if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error(`Upstream returned ${response.status}`); }
-      const kind = response.headers.get('x-devhub-object-kind');
+      const kind = assumedKind || response.headers.get('x-devhub-object-kind');
       if (!KINDS.has(kind)) throw new Error('Missing or invalid object kind');
       const size = Number(response.headers.get('content-length'));
       if (response.headers.get('content-length') && (!Number.isSafeInteger(size) || size > this.options.maxObjectBytes)) throw new Error('Oversized object');
       circuit.success();
       return { response, kind };
-    } catch (error) { if (!error.terminal) circuit.failure(); throw error; }
+    } catch (error) { if (!error.terminal && !error.streamingRequired) circuit.failure(); throw error; }
   }
   async fill(key, repositoryId, id) {
     const release = await this.capacity.acquire().catch(error => { this.stats.rejected++; throw error; });
@@ -209,7 +210,16 @@ export class ObjectCache {
         try { upstream = await this.upstream(`${this.options.regionalUrl.replace(/\/$/, '')}${objectPath}`, this.options.regionalToken, this.regionCircuit, 'regionalRequests'); upstream.fromRegion = true; }
         catch (error) { if (error.terminal) throw error; }
       }
-      if (!upstream) upstream = await this.upstream(`${this.options.originUrl.replace(/\/$/, '')}/api/v2/repositories/${repositoryId}/objects/${id}?format=raw`, this.options.originToken, this.originCircuit, 'upstreamRequests');
+      if (!upstream) {
+        const base = this.options.originUrl.replace(/\/$/, '');
+        try {
+          upstream = await this.upstream(`${base}/api/v2/repositories/${repositoryId}/objects/${id}?format=raw`, this.options.originToken, this.originCircuit, 'upstreamRequests');
+        } catch (error) {
+          if (!error.streamingRequired) throw error;
+          // S3-backed immutable blobs use the authoritative streaming endpoint.
+          upstream = await this.upstream(`${base}/api/v1/repositories/${repositoryId}/objects/${id}/content`, this.options.originToken, this.originCircuit, 'upstreamRequests', 'BLOB');
+        }
+      }
       const p = this.paths(key); await mkdir(p.dir, { recursive: true, mode: 0o700 });
       const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const tempBin = `${p.bin}.part-${nonce}`, tempMeta = `${p.meta}.part-${nonce}`;
