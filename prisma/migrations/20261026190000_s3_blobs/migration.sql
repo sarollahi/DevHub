@@ -44,6 +44,3 @@ ALTER TABLE "SourceObject" ADD CONSTRAINT "SourceObject_externalId_fkey"
 ALTER TABLE "SourceObject" ADD CONSTRAINT "SourceObject_payload_location" CHECK
   (("data" IS NOT NULL AND "externalId" IS NULL)
    OR ("data" IS NULL AND "externalId" = "id" AND "kind" = 'BLOB'));
-ALTER TABLE "SourceFileOperation" ADD COLUMN "fileMode" VARCHAR(6);
-ALTER TABLE "SourceFileOperation" ADD CONSTRAINT "SourceFileOperation_fileMode_check"
-  CHECK ("fileMode" IS NULL OR "fileMode" IN ('100644', '100755', '120000'));

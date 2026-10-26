@@ -75,6 +75,10 @@ async function retain(repositoryId: string, objectId: string) {
       "SELECT id FROM \"StoredBlob\" WHERE id = $1 AND state = 'READY' FOR UPDATE", objectId);
     const ready = await tx.storedBlob.findFirst({ where: { id: objectId, state: "READY" } });
     if (!ready) throw new ObjectStorageError("Object not published", 409);
+    await tx.sourceObject.createMany({ data: [{
+      id: objectId, kind: "BLOB", data: null, externalId: objectId, byteSize: ready.rawBytes,
+    }], skipDuplicates: true });
+    await tx.sourceObjectGrant.createMany({ data: [{ repositoryId, objectId }], skipDuplicates: true });
     await tx.blobLease.upsert({
       where: { repositoryId_objectId: { repositoryId, objectId } },
       create: { repositoryId, objectId, expiresAt: later(RETENTION_MS) },
@@ -273,7 +277,7 @@ export async function cleanupObjects(backend: ObjectBackend = s3(), limit = 30) 
       const references = await tx.sourceFileOperation.count({ where: { objectId: candidate.id } });
       if (leases || references) return;
       await tx.storedBlob.update({ where: { id: candidate.id }, data: { state: "DELETING" } });
-      await tx.sourceObject.deleteMany({ where: { id: candidate.id, operations: { none: {} } } });
+      // Do not remove grants until physical deletion is committed; DELETING blocks new readers.
     });
   }
   const deleting = await db.storedBlob.findMany({ where: { state: "DELETING" }, take: limit });
@@ -283,6 +287,13 @@ export async function cleanupObjects(backend: ObjectBackend = s3(), limit = 30) 
       await backend.delete(record.objectKey);
       await db.$transaction(async tx => {
         await tx.blobLease.deleteMany({ where: { objectId: record.id } });
+        const external = await tx.sourceObject.findFirst({
+          where: { id: record.id, externalId: record.id }, select: { id: true },
+        });
+        if (external) {
+          await tx.sourceObjectGrant.deleteMany({ where: { objectId: record.id } });
+          await tx.sourceObject.delete({ where: { id: record.id } });
+        }
         await tx.storedBlob.delete({ where: { id: record.id, state: "DELETING" } });
       });
       deleted++;

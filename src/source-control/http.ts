@@ -29,3 +29,32 @@ export function sourceFailure(error: unknown) {
   console.error("Source-control request failed", error);
   return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
 }
+
+
+// Read bounded JSON without allowing chunked requests to bypass size limits.
+// Request.json() buffers arbitrary input before schema validation.
+export async function readBoundedJson(request: Request, maxBytes: number): Promise<unknown> {
+  if (!request.body) throw new SourceControlError(400, "INVALID_JSON", "Request body required");
+  const reader = request.body.getReader();
+  const buffers: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new SourceControlError(413, "REQUEST_TOO_LARGE", "Request exceeds JSON input limit");
+      }
+      buffers.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  try {
+    return JSON.parse(Buffer.concat(buffers.map(chunk => Buffer.from(chunk))).toString("utf8")) as unknown;
+  } catch {
+    throw new SourceControlError(400, "INVALID_JSON", "Malformed JSON body");
+  }
+}

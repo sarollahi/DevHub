@@ -30,6 +30,7 @@ test("immutable S3 objects with real PostgreSQL and MinIO", { timeout: 180000 },
     await db.sourceFileOperation.deleteMany({ where: { changesetId: { in: changesets } } });
     await db.sourceChangesetParent.deleteMany({ where: { changesetId: { in: changesets } } });
     await db.sourceChangeset.deleteMany({ where: { id: { in: changesets } } });
+    await db.sourceObjectGrant.deleteMany({ where: { repositoryId: repo.id } });
     await db.sourceObject.deleteMany({ where: { id: { in: [...trees, ...owned] } } });
     await db.auditEvent.deleteMany({ where: { repositoryId: repo.id } });
     await db.blobLease.deleteMany({ where: { repositoryId: repo.id } });
