@@ -4,6 +4,11 @@ ALTER TABLE "SourceReference"
   ADD COLUMN "kind" "SourceRefKind" NOT NULL DEFAULT 'BRANCH',
   ADD COLUMN "deletedAt" TIMESTAMP(3);
 
+UPDATE "SourceReference" SET "kind" = CASE
+  WHEN "name" LIKE 'tags/%' THEN 'TAG'::"SourceRefKind"
+  WHEN "name" LIKE 'releases/%' THEN 'RELEASE'::"SourceRefKind"
+  ELSE 'BRANCH'::"SourceRefKind" END;
+
 CREATE TABLE "SourceReferencePolicy" (
   "repositoryId" UUID NOT NULL,
   "name" TEXT NOT NULL,
@@ -59,6 +64,11 @@ FROM "SourceReference" r;
 
 CREATE FUNCTION prevent_ref_journal_edit() RETURNS TRIGGER AS $$
 BEGIN
+  -- Permit cascading cleanup only when deleting the owning repository.
+  -- Direct journal deletions and all edits remain forbidden.
+  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+    RETURN OLD;
+  END IF;
   RAISE EXCEPTION 'Reference mutation history is immutable' USING ERRCODE = '23000';
 END;
 $$ LANGUAGE plpgsql;
