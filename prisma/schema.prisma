@@ -94,6 +94,8 @@ model Repository {
   ingressBuckets        IngressBucket[]
   sourceChangesets      SourceChangeset[]
   sourceReferences      SourceReference[]
+  sourceReferencePolicies SourceReferencePolicy[]
+  sourceRefMutations    SourceRefMutation[]
   queryIndexJobs        SourceQueryIndexJob[]
   sourceObjectGrants    SourceObjectGrant[]
   sourceEvents          SourceChangesetEvent[]
@@ -302,6 +304,12 @@ enum SourceObjectKind {
   TREE
 }
 
+enum SourceRefKind {
+  BRANCH
+  RELEASE
+  TAG
+}
+
 enum SourceOperationKind {
   PUT
   DELETE
@@ -396,11 +404,14 @@ model SourceChangeApproval {
   @@id([changesetId, userId])
 }
 
+
 model SourceReference {
   repositoryId String          @db.Uuid
   name         String
   changesetId  String          @db.Char(64)
   generation   Int             @default(1)
+  kind         SourceRefKind   @default(BRANCH)
+  deletedAt    DateTime?
   updatedAt    DateTime        @updatedAt
   repository   Repository      @relation(fields: [repositoryId], references: [id])
   changeset    SourceChangeset @relation(fields: [changesetId], references: [id])
@@ -408,7 +419,42 @@ model SourceReference {
   @@index([changesetId])
 }
 
- 
+model SourceReferencePolicy {
+  repositoryId    String      @db.Uuid
+  name            String
+  protected       Boolean     @default(false)
+  allowForce      Boolean     @default(false)
+  allowDelete     Boolean     @default(true)
+  requireApproval Boolean     @default(false)
+  updatedAt       DateTime    @updatedAt
+  repository      Repository  @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@id([repositoryId, name])
+}
+
+model SourceRefMutation {
+  id             String        @id @default(uuid()) @db.Uuid
+  repositoryId   String        @db.Uuid
+  name           String
+  mutationId     String        @db.VarChar(128)
+  requestHash    String        @db.Char(64)
+  operation      String        @db.VarChar(20)
+  kind           SourceRefKind
+  oldChangesetId String?       @db.Char(64)
+  newChangesetId String?       @db.Char(64)
+  oldGeneration  Int?
+  newGeneration  Int
+  actorType      String
+  actorId        String
+  forced         Boolean       @default(false)
+  reason         String?
+  createdAt      DateTime      @default(now())
+  repository     Repository    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@unique([repositoryId, name, mutationId])
+  @@unique([repositoryId, name, newGeneration])
+  @@index([repositoryId, name, createdAt(sort: Desc)])
+}
+
+
 // A repository-local grant permits staged blobs to be used in future changesets.
 // Global SHA-256 deduplication never implies cross-repository read authorization.
 model SourceObjectGrant {
