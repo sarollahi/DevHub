@@ -16,14 +16,14 @@ CREATE TABLE "SourceReferencePolicy" (
   "allowForce" BOOLEAN NOT NULL DEFAULT false,
   "allowDelete" BOOLEAN NOT NULL DEFAULT true,
   "requireApproval" BOOLEAN NOT NULL DEFAULT false,
-  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL,
   CONSTRAINT "SourceReferencePolicy_pkey" PRIMARY KEY ("repositoryId", "name"),
   CONSTRAINT "SourceReferencePolicy_repositoryId_fkey" FOREIGN KEY ("repositoryId")
     REFERENCES "Repository"("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE "SourceRefMutation" (
-  "id" UUID NOT NULL DEFAULT gen_random_uuid(),
+  "id" UUID NOT NULL,
   "repositoryId" UUID NOT NULL,
   "name" TEXT NOT NULL,
   "mutationId" VARCHAR(128) NOT NULL,
@@ -53,10 +53,10 @@ CREATE INDEX "SourceRefMutation_repositoryId_name_createdAt_idx"
 -- Pre-existing refs were not fully journaled. Preserve an explicit current
 -- baseline rather than inventing past operations or actors.
 INSERT INTO "SourceRefMutation"
-  ("repositoryId", "name", "mutationId", "requestHash", "operation", "kind",
+  ("id", "repositoryId", "name", "mutationId", "requestHash", "operation", "kind",
    "oldChangesetId", "newChangesetId", "oldGeneration", "newGeneration",
    "actorType", "actorId", "forced")
-SELECT r."repositoryId", r."name", 'baseline-' || r."generation"::text,
+SELECT gen_random_uuid(), r."repositoryId", r."name", 'baseline-' || r."generation"::text,
        repeat('0', 64), 'BASELINE', r."kind",
        NULL, r."changesetId", NULL, r."generation",
        'SYSTEM', 'migration', false
