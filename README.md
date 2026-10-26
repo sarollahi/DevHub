@@ -152,3 +152,12 @@ The existing contribution ingestion, review inbox and Redis-backed background pr
 The authenticated repository workspace is at `/repositories/{repositoryId}/source`. Agents with `changesets:write` can submit changesets via `POST /api/v1/repositories/{repositoryId}/changesets`; approved administrators can update `PUT /api/v1/repositories/{repositoryId}/refs/{name}` with `expectedGeneration` for conditional writes.
 
 See [architecture decision 0001](docs/architecture/0001-immutable-changesets.md) for identities, storage boundaries, security policies, API examples and migration limits, and [local development](docs/local-development.md) for verified environment commands.
+
+
+## Authoritative reference management
+
+References remain separate from immutable changesets. The v1 reference API now supports compare-and-swap advancement, explicit optimistic generations, durable audit history, tombstoned deletion and restoration, immutable tags, named protection policies, and fast-forward ancestry checks. The configured default branch is always protected from deletion, force moves and silent stale overwrites. Each successful mutation commits a reference update, immutable history, audit entry and durable outbox event in one PostgreSQL transaction.
+
+A dedicated reference-event queue isolates downstream notifications from PR preflight work. Database and queue delivery use at-least-once semantics with stable event IDs. This does **not** imply that executable validation, merge coordination or Git network transport already exist.
+
+See [reference management API](docs/api/reference-management.md) for endpoints, retry rules, permissions, conflict semantics and test instructions. Pre-existing reference history is preserved as a migration baseline because older individual mutations cannot be reconstructed.
