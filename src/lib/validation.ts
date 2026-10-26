@@ -13,4 +13,5 @@ export const createPullRequestInput = z.object({
   targetSha: commitSha,
   changedFiles: z.array(z.string().refine(validPath)).min(1).max(200),
   patch: z.string().min(1).max(65_536),
+  nativeChangesetId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).refine((p) => p.sourceBranch !== p.targetBranch, "Source branch and target branch must differ");

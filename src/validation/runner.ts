@@ -1,0 +1,245 @@
+import { createHash, randomUUID } from "node:crypto";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdtemp, mkdir, writeFile, chmod, symlink, readdir, lstat, readFile, rm } from "node:fs/promises";
+import { tmpdir, hostname } from "node:os";
+import { join, dirname } from "node:path";
+import { Prisma, type ValidationTask } from "@prisma/client";
+import { db } from "../lib/prisma";
+import { validPath } from "../lib/review-logic";
+import { objectId } from "../source-control/storage";
+import { snapshotFor, verifiedBlob, type Entry } from "./snapshot";
+import { digest, signTask, verifyTask } from "./policy";
+import { refreshPipeline } from "./service";
+
+const exec = promisify(execFile);
+const leaseMs = 45_000;
+const maxLog = 4 * 1024 * 1024;
+const maxArtifact = 2 * 1024 * 1024;
+const maxArtifacts = 8 * 1024 * 1024;
+type Claimed = ValidationTask & {
+  oldLeaseToken?: string | null;
+  pipeline: { repositoryId:string; changesetId:string; targetChangesetId:string|null;
+    snapshotDigest:string; dependencyDigest:string };
+};
+type Candidate = { id:string; ownerId:string };
+function containerName(taskId:string, token:string|null|undefined) {
+  return "devhub-val-" + taskId.replaceAll("-","") + "-" + (token || "").replaceAll("-","");
+}
+async function terminateContainer(name:string) {
+  await exec("docker",["rm","-f",name],{timeout:10000}).catch(()=>undefined);
+}
+export async function claimTask():Promise<Claimed|null> {
+  return db.$transaction(async tx => {
+    const candidates = await tx.$queryRawUnsafe<Candidate[]>(
+      "SELECT t.id,r.\"ownerId\" FROM \"ValidationTask\" t "+
+      "JOIN \"ValidationPipeline\" p ON p.id=t.\"pipelineId\" "+
+      "JOIN \"Repository\" r ON r.id=p.\"repositoryId\" "+
+      "WHERE p.state <> 'CANCELLED' AND t.attempt<t.\"maxAttempts\" "+
+      "AND ((t.state='QUEUED' AND t.\"nextAttemptAt\"<=now()) OR "+
+      "(t.state='RUNNING' AND t.\"leaseUntil\"<now())) "+
+      "ORDER BY t.\"createdAt\" FOR UPDATE OF t SKIP LOCKED LIMIT 24");
+    for(const candidate of candidates) {
+      const locked = await tx.$queryRawUnsafe<Array<{id:string}>>(
+        'SELECT id FROM "User" WHERE id=$1::uuid FOR UPDATE SKIP LOCKED',candidate.ownerId);
+      if(!locked.length) continue;
+      const active = await tx.validationTask.count({where:{state:"RUNNING",leaseUntil:{gt:new Date()},
+        pipeline:{repository:{ownerId:candidate.ownerId}}}});
+      const allowed = Math.max(1,Math.min(16,Number(process.env.VALIDATION_TENANT_RUNNING||2)));
+      if(active >= allowed) continue;
+      const before = await tx.validationTask.findUniqueOrThrow({where:{id:candidate.id}});
+      const task = await tx.validationTask.update({where:{id:candidate.id},data:{
+        state:"RUNNING",leaseToken:randomUUID(),leaseUntil:new Date(Date.now()+leaseMs),
+        attempt:{increment:1},startedAt:new Date(),finishedAt:null,signature:null,
+        exitCode:null,summary:null,runnerId:hostname()+":"+process.pid
+      },include:{pipeline:{select:{repositoryId:true,changesetId:true,targetChangesetId:true,
+        snapshotDigest:true,dependencyDigest:true}}}});
+      await tx.validationPipeline.updateMany({where:{id:task.pipelineId,state:"QUEUED"},data:{state:"RUNNING"}});
+      return {...task,oldLeaseToken:before.leaseToken};
+    }
+    return null;
+  },{isolationLevel:Prisma.TransactionIsolationLevel.ReadCommitted,timeout:15000});
+}
+async function materialize(root:string,entries:Entry[],repoId:string) {
+  const links:Array<{path:string;bytes:Buffer}>=[];
+  for(const entry of entries) {
+    if(!validPath(entry.path)) throw new Error("Invalid immutable path");
+    const bytes=await verifiedBlob(entry.objectId,repoId);
+    if(objectId("BLOB",bytes)!==entry.objectId) throw new Error("Blob integrity failure");
+    const path=join(root,entry.path);
+    if(entry.mode==="120000") {links.push({path,bytes});continue;}
+    if(!["100644","100755"].includes(entry.mode)) throw new Error("Invalid file mode");
+    await mkdir(dirname(path),{recursive:true});
+    await writeFile(path,bytes,{flag:"wx",mode:entry.mode==="100755"?0o755:0o644});
+  }
+  for(const link of links) {
+    await mkdir(dirname(link.path),{recursive:true});
+    const target=new TextDecoder("utf-8",{fatal:true}).decode(link.bytes);
+    if(target.startsWith("/")||target.includes("\0")) throw new Error("Unsafe symlink");
+    await symlink(target,link.path);
+  }
+  await chmod(root,0o755);
+}
+async function recordArtifacts(task:Claimed,root:string) {
+  let total=0;
+  const hashes:Array<[string,string]>=[];
+  const pending:Array<{taskId:string;attempt:number;name:string;mediaType:string;digest:string;content:Uint8Array<ArrayBuffer>}>=[];
+  async function visit(dir:string,prefix=""):Promise<void> {
+    for(const name of (await readdir(dir)).sort()) {
+      const relative=prefix?prefix+"/"+name:name;
+      if(!validPath(relative)||relative.length>256) throw new Error("Invalid artifact path");
+      const path=join(dir,name),stat=await lstat(path);
+      if(stat.isDirectory()) {await visit(path,relative);continue;}
+      if(!stat.isFile()||stat.size>maxArtifact||total+stat.size>maxArtifacts)
+        throw new Error("Artifact policy limit exceeded");
+      const bytes=await readFile(path);
+      total+=bytes.length;
+      const hash=digest(bytes);
+      hashes.push([relative,hash]);
+      pending.push({taskId:task.id,attempt:task.attempt,name:relative,mediaType:"application/octet-stream",digest:hash,content:Uint8Array.from(bytes)});
+    }
+  }
+  await visit(root);
+  if(pending.length) await db.validationArtifact.createMany({data:pending});
+  return digest(JSON.stringify(hashes.sort(([a],[b])=>a.localeCompare(b))));
+}
+async function capture(task:Claimed,source:string,artifacts:string,isCancelled:()=>boolean) {
+  const name=containerName(task.id,task.leaseToken);
+  const args=["run","--rm","--pull=never","--name",name,"--network=none","--read-only",
+    "--cap-drop=ALL","--security-opt=no-new-privileges","--pids-limit=128",
+    "--memory=1024m","--cpus=1.5","--user=65534:65534","--init",
+    "--tmpfs","/work:rw,exec,nosuid,nodev,size=640m",
+    "--tmpfs","/tmp:rw,nosuid,nodev,size=96m",
+    "--mount","type=bind,src="+source+",dst=/source,readonly",
+    "--mount","type=bind,src="+artifacts+",dst=/artifacts",
+    "--env","HOME=/tmp","--env","npm_config_cache=/opt/npm-cache",
+    "--entrypoint","/bin/sh",task.image,"-ec",task.command];
+  const child=spawn("docker",args,{stdio:["ignore","pipe","pipe"],env:{
+    PATH:process.env.PATH||"/usr/bin:/bin", NODE_ENV:process.env.NODE_ENV||"production",
+    DOCKER_HOST:process.env.VALIDATION_DOCKER_HOST||"unix:///var/run/docker.sock"
+  }});
+  const hash=createHash("sha256");
+  let length=0,sequence=0,chain=Promise.resolve();
+  function output(chunk:Buffer,label:string) {
+    if(length>=maxLog)return;
+    const content=Buffer.concat([Buffer.from(label),chunk]).subarray(0,maxLog-length).toString("utf8");
+    length+=Buffer.byteLength(content,"utf8");hash.update(content);sequence++;
+    const index=sequence;
+    chain=chain.then(async()=>{
+      const owned=await db.validationTask.count({where:{id:task.id,leaseToken:task.leaseToken,state:"RUNNING"}});
+      if(owned) await db.validationLogChunk.create({data:{taskId:task.id,attempt:task.attempt,sequence:index,content}});
+    });
+  }
+  child.stdout.on("data",(b:Buffer)=>{child.stdout.pause();output(b,"");void chain.finally(()=>child.stdout.resume());});
+  child.stderr.on("data",(b:Buffer)=>{child.stderr.pause();output(b,"[stderr] ");void chain.finally(()=>child.stderr.resume());});
+  let timeout=false,cancelled=false;
+  const started=Date.now();
+  const timer=setInterval(()=>{
+    if(Date.now()-started>task.timeoutSeconds*1000)timeout=true;
+    else if(isCancelled())cancelled=true;
+    if(timeout||cancelled){child.kill("SIGTERM");void terminateContainer(name);}
+  },1000);
+  try {
+    const result=await new Promise<{code:number|null;error:Error|null}>(resolve=>{
+      child.once("close",code=>resolve({code,error:null}));
+      child.once("error",error=>resolve({code:null,error}));
+    });
+    await chain;
+    return {...result,timeout,cancelled,logDigest:hash.digest("hex")};
+  } finally {clearInterval(timer);await terminateContainer(name);}
+}
+export async function executeTask(task:Claimed) {
+  if(task.oldLeaseToken)await terminateContainer(containerName(task.id,task.oldLeaseToken));
+  let root:string|null=null,cancelled=false;
+  let heartbeat:ReturnType<typeof setInterval>|null=null;
+  try {
+    const snapshot=await snapshotFor(task.pipeline.repositoryId,task.pipeline.changesetId,
+      task.pipeline.targetChangesetId);
+    if(snapshot.digest!==task.pipeline.snapshotDigest||
+      snapshot.dependencyDigest!==task.pipeline.dependencyDigest)throw new Error("Snapshot changed");
+    const reusable=await db.validationTask.findFirst({where:{fingerprint:task.fingerprint,
+      state:"PASSED",signature:{not:null},NOT:{id:task.id}},orderBy:{finishedAt:"desc"}});
+    if(reusable&&verifyTask(reusable)) {
+      const [logs,artifacts]=await Promise.all([
+        db.validationLogChunk.findMany({where:{taskId:reusable.id,attempt:reusable.attempt},
+          orderBy:{sequence:"asc"}}),
+        db.validationArtifact.findMany({where:{taskId:reusable.id,attempt:reusable.attempt},
+          orderBy:{name:"asc"}}),
+      ]);
+      const evidenceMatches=digest(logs.map(x=>x.content).join(""))===reusable.logDigest &&
+        digest(JSON.stringify(artifacts.map(x=>[x.name,x.digest])))===reusable.artifactDigest &&
+        artifacts.every(x=>digest(x.content)===x.digest);
+      if(evidenceMatches) {
+        const signed={...task,state:"PASSED" as const,exitCode:0,
+          logDigest:reusable.logDigest,artifactDigest:reusable.artifactDigest,reusedFromId:reusable.id};
+        const signature=signTask(signed);
+        await db.$transaction(async tx=>{
+          const owned=await tx.validationTask.findFirst({where:{
+            id:task.id,state:"RUNNING",leaseToken:task.leaseToken}});
+          if(!owned)return;
+          if(logs.length)await tx.validationLogChunk.createMany({data:logs.map(x=>({
+            taskId:task.id,attempt:task.attempt,sequence:x.sequence,content:x.content
+          }))});
+          if(artifacts.length)await tx.validationArtifact.createMany({data:artifacts.map(x=>({
+            taskId:task.id,attempt:task.attempt,name:x.name,mediaType:x.mediaType,
+            digest:x.digest,content:Uint8Array.from(x.content)
+          }))});
+          await tx.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken},
+            data:{state:"PASSED",signature,exitCode:0,logDigest:reusable.logDigest,
+              artifactDigest:reusable.artifactDigest,reusedFromId:reusable.id,
+              summary:"Reused signed result and verified stored evidence for identical immutable inputs",
+              finishedAt:new Date(),leaseUntil:null,leaseToken:null}});
+        });
+        return;
+      }
+    }
+    root=await mkdtemp(join(tmpdir(),"devhub-validation-"));
+    await chmod(root,0o755);
+    const source=join(root,"source"),artifacts=join(root,"artifacts");
+    await mkdir(source);await mkdir(artifacts,{mode:0o777});await chmod(artifacts,0o777);
+    await materialize(source,snapshot.entries,task.pipeline.repositoryId);
+    heartbeat=setInterval(()=>{
+      void db.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken},
+        data:{leaseUntil:new Date(Date.now()+leaseMs)}})
+        .then(x=>{if(!x.count)cancelled=true;}).catch(()=>{cancelled=true;});
+    },10000);
+    const poll=setInterval(()=>{
+      void db.validationTask.findUnique({where:{id:task.id},select:{state:true,leaseToken:true}})
+        .then(x=>{if(x?.state!=="RUNNING"||x.leaseToken!==task.leaseToken)cancelled=true;})
+        .catch(()=>{cancelled=true;});
+    },1500);
+    let result;
+    try {result=await capture(task,source,artifacts,()=>cancelled);}
+    finally {clearInterval(poll);}
+    if(cancelled||result.cancelled)return;
+    const artifactDigest=await recordArtifacts(task,artifacts);
+    const state=result.timeout?"TIMED_OUT" as const:result.error?"ERRORED" as const:
+      result.code===0?"PASSED" as const:"FAILED" as const;
+    const signed={...task,state,exitCode:result.code,logDigest:result.logDigest,
+      artifactDigest,reusedFromId:null};
+    const signature=signTask(signed);
+    await db.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken},
+      data:{state,signature,exitCode:result.code,logDigest:result.logDigest,
+        artifactDigest,finishedAt:new Date(),leaseUntil:null,leaseToken:null,
+        summary:result.timeout?"Timed out":result.error?.message||
+          (result.code===0?"Passed":"Exit code "+result.code)}});
+  } catch(error) {
+    const exhausted=task.attempt>=task.maxAttempts;
+    await db.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken},
+      data:{state:exhausted?"ERRORED":"QUEUED",leaseToken:null,leaseUntil:null,
+        summary:error instanceof Error?error.message.slice(0,400):"Runner error",
+        nextAttemptAt:new Date(Date.now()+Math.min(60000,1000*2**Math.min(8,task.attempt))),
+        finishedAt:exhausted?new Date():null}});
+  } finally {
+    if(heartbeat)clearInterval(heartbeat);
+    await terminateContainer(containerName(task.id,task.leaseToken));
+    if(root)await rm(root,{recursive:true,force:true});
+    await refreshPipeline(task.pipelineId);
+  }
+}
+export async function runOnce() {
+  const task=await claimTask();
+  if(!task)return false;
+  await executeTask(task);
+  return true;
+}

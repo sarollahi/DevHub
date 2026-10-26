@@ -20,6 +20,7 @@ export default async function SourcePage({ params }: { params: Promise<{ id: str
   const changes = changesets.map(c => ({ id: c.id, message: c.message, approved: c.approvals.some(a => a.userId === repo.ownerId && a.decision === "APPROVED"),
     validation: c.validation?.state ?? "PENDING" }));
   return <WorkspaceShell active="/repositories" title="Source control" description={`${repo.owner.handle}/${repo.slug} · Immutable, server-authoritative changesets`}>
+    <Link href={`/repositories/${id}/validations`} className="text-link">Execution validation, logs and artifacts</Link>
     <Link href="/repositories" className="detail-back">Back to repositories</Link>
     <div className="source-grid">
       <section className="surface-card source-panel">

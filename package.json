@@ -16,6 +16,7 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx scripts/seed.ts",
     "worker": "tsx src/workers/processor.ts",
+    "validation:runner": "tsx src/validation/worker.ts",
     "dispatcher": "tsx src/workers/dispatcher.ts",
     "stress:ingest": "tsx scripts/burst.ts",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
