@@ -75,6 +75,7 @@ model User {
   repositories  Repository[]    @relation("RepoOwner")
   agents        AgentIdentity[] @relation("AgentOwner")
   approvals     Approval[]
+  sourceApprovals SourceChangeApproval[]
 }
 
 model Repository {
@@ -91,6 +92,8 @@ model Repository {
   fingerprints          ChangeFingerprint[]
   mergeGroups           MergeGroup[]
   ingressBuckets        IngressBucket[]
+  sourceChangesets      SourceChangeset[]
+  sourceReferences      SourceReference[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -287,4 +290,101 @@ model AuditEvent {
   occurredAt  DateTime @default(now())
   @@index([repositoryId, occurredAt(sort: Desc)])
   @@index([actorType, actorId, occurredAt(sort: Desc)])
+}
+
+
+enum SourceObjectKind {
+  BLOB
+  TREE
+}
+
+enum SourceOperationKind {
+  PUT
+  DELETE
+  MOVE
+}
+
+// Object IDs are SHA-256 over a type-prefixed byte sequence; payloads are immutable.
+model SourceObject {
+  id          String                @id @db.Char(64)
+  kind        SourceObjectKind
+  data        Bytes                 @db.ByteA
+  byteSize    Int
+  createdAt   DateTime              @default(now())
+  trees       SourceChangeset[]     @relation("ChangesetTree")
+  operations  SourceFileOperation[] @relation("FileObject")
+}
+
+// Content-addressed changesets are never modified when references advance.
+model SourceChangeset {
+  id           String                  @id @db.Char(64)
+  repositoryId String                  @db.Uuid
+  treeId       String                  @db.Char(64)
+  authorId     String
+  message      String
+  createdAt    DateTime                @default(now())
+  repository   Repository              @relation(fields: [repositoryId], references: [id])
+  tree         SourceObject            @relation("ChangesetTree", fields: [treeId], references: [id])
+  parents      SourceChangesetParent[] @relation("ChangesetChild")
+  children     SourceChangesetParent[] @relation("ChangesetParent")
+  operations   SourceFileOperation[]
+  validation   SourceValidation?
+  approvals    SourceChangeApproval[]
+  references   SourceReference[]
+  @@index([repositoryId, createdAt(sort: Desc)])
+}
+
+model SourceChangesetParent {
+  changesetId String          @db.Char(64)
+  parentId    String          @db.Char(64)
+  position    Int
+  child       SourceChangeset @relation("ChangesetChild", fields: [changesetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  parent      SourceChangeset @relation("ChangesetParent", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  @@id([changesetId, parentId])
+  @@unique([changesetId, position])
+}
+
+model SourceFileOperation {
+  changesetId  String              @db.Char(64)
+  path         String
+  kind         SourceOperationKind
+  previousPath String?
+  objectId     String?             @db.Char(64)
+  changeset    SourceChangeset     @relation(fields: [changesetId], references: [id], onDelete: Cascade)
+  object       SourceObject?       @relation("FileObject", fields: [objectId], references: [id])
+  @@id([changesetId, path])
+}
+
+// This is a manifest/integrity check, not a claim that contributed code was executed.
+model SourceValidation {
+  changesetId String          @id @db.Char(64)
+  state       CheckState
+  riskTier    RiskTier
+  riskScore   Int
+  touchedPaths String[]
+  summary     String
+  checkedAt   DateTime        @default(now())
+  changeset   SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Cascade)
+}
+
+model SourceChangeApproval {
+  changesetId String           @db.Char(64)
+  userId      String           @db.Uuid
+  decision    ApprovalDecision
+  createdAt   DateTime         @default(now())
+  changeset   SourceChangeset  @relation(fields: [changesetId], references: [id], onDelete: Cascade)
+  user        User             @relation(fields: [userId], references: [id])
+  @@id([changesetId, userId])
+}
+
+model SourceReference {
+  repositoryId String          @db.Uuid
+  name         String
+  changesetId  String          @db.Char(64)
+  generation   Int             @default(1)
+  updatedAt    DateTime        @updatedAt
+  repository   Repository      @relation(fields: [repositoryId], references: [id])
+  changeset    SourceChangeset @relation(fields: [changesetId], references: [id])
+  @@id([repositoryId, name])
+  @@index([changesetId])
 }

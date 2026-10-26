@@ -14,7 +14,7 @@ async function main() {
     const name = n === 0 ? "seed-agent" : `load-agent-${n}`;
     const raw = n === 0 ? rootToken : createHmac("sha256", rootToken).update(`devhub-load-agent-${n}`).digest("hex");
     const agent = await db.agentIdentity.upsert({ where: { ownerId_name: { ownerId: user.id, name } },
-      create: { ownerId: user.id, name, scopes: ["pull_requests:write"] }, update: {} });
+      create: { ownerId: user.id, name, scopes: ["pull_requests:write", "changesets:write", "changesets:read"] }, update: { scopes: ["pull_requests:write", "changesets:write", "changesets:read"] } });
     await db.agentCredential.upsert({ where: { tokenHash: sha256(raw) }, create: { agentId: agent.id, tokenHash: sha256(raw), label: "seed" }, update: {} });
   }
   console.log(`Seed complete: sarollahi/${repo.slug}, ${agentCount} agent identity(ies). No raw credentials stored.`);

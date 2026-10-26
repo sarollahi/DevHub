@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateAgent, isAdminRequest } from "@/lib/auth";
 import { db } from "@/lib/prisma";
-import { ingestPullRequest, IngestError } from "@/services/ingest";
+import { IngestError } from "@/services/ingest";
+import { ingestLegacyPullRequest } from "@/source-control/compatibility";
 
 export const runtime = "nodejs";
 export async function POST(req: NextRequest) {
@@ -9,7 +10,7 @@ export async function POST(req: NextRequest) {
   if (!agent) return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   const body = await req.json().catch(() => null);
   try {
-    const result = await ingestPullRequest(agent, body, req.headers.get("idempotency-key") ?? "");
+    const result = await ingestLegacyPullRequest(agent, body, req.headers.get("idempotency-key") ?? "");
     return NextResponse.json({ id: result.item.id, state: result.item.state, created: result.created,
       statusUrl: `/api/v1/pull-requests/${result.item.id}` }, { status: result.created ? 202 : 200 });
   } catch (error) {

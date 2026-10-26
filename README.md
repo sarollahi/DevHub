@@ -142,3 +142,13 @@ The interface is deliberately designed as a professional developer tool rather t
 Native Git smart HTTP, trusted commit-derived diffs, CI runner isolation, trusted check provenance, semantic similarity, merge coordination, multi-user authentication, full authorization policy, observability, and formal scalability benchmarks remain planned. Do not make this service publicly reachable before these security boundaries are implemented.
 
 The initial SQL migration is committed under `prisma/migrations/`. Verify it against the Prisma schema with `prisma migrate dev` during first local setup. Generate and commit an npm dependency lockfile during first online setup, before production deployments.
+
+## Native source-control foundation
+
+DevHub's v1 source-control API stores immutable changesets and content-addressed trees in PostgreSQL. Changesets can be created without changing a branch. Repository references are separate, conditionally updated records protected by human approval and generation checks.
+
+The existing contribution ingestion, review inbox and Redis-backed background processing remain available as a compatibility path. Source-control integrity validation confirms the manifest and ancestry, **not** that contributed code has been built or executed. Native source-control merges, network synchronization and Git transport are not claimed as complete.
+
+The authenticated repository workspace is at `/repositories/{repositoryId}/source`. Agents with `changesets:write` can submit changesets via `POST /api/v1/repositories/{repositoryId}/changesets`; approved administrators can update `PUT /api/v1/repositories/{repositoryId}/refs/{name}` with `expectedGeneration` for conditional writes.
+
+See [architecture decision 0001](docs/architecture/0001-immutable-changesets.md) for identities, storage boundaries, security policies, API examples and migration limits, and [local development](docs/local-development.md) for verified environment commands.
