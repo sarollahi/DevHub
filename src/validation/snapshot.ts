@@ -1,6 +1,8 @@
 import { getTree } from "../source-control/service";
 import { db } from "../lib/prisma";
 import { objectId } from "../source-control/storage";
+import { Readable } from "node:stream";
+import { findReadableObject, verifiedBlobStream } from "../object-store/service";
 import { digest } from "./policy";
 import { SourceControlError } from "../source-control/contracts";
 export type Entry = { path: string; objectId: string; mode: string };
@@ -39,12 +41,20 @@ export async function snapshotFor(repositoryId: string, changesetId: string, tar
     dependencyDigest: digest(JSON.stringify(contents.filter(e => locks.test(String(e[0]))))),
   };
 }
-export async function verifiedBlob(objectHash: string, repositoryId: string): Promise<Buffer> {
-  // Object existence alone never grants cross-tenant access.
-  const owned = await db.sourceFileOperation.findFirst({ where: { objectId: objectHash, changeset: { repositoryId } }, select: { objectId: true } });
-  const staged = await db.sourceObjectGrant.findUnique({ where: { repositoryId_objectId: { repositoryId, objectId: objectHash } } });
-  if (!owned && !staged) throw new Error("Blob not granted to repository");
-  const row = await db.sourceObject.findUnique({ where: { id: objectHash } });
-  if (!row || row.kind !== "BLOB" || objectId("BLOB", row.data) !== row.id) throw new Error("Missing or corrupted repository blob");
-  return Buffer.from(row.data);
+export async function verifiedBlobSource(objectHash:string,repositoryId:string):Promise<Readable> {
+  // Source content is globally addressed, but repository visibility is tenant scoped.
+  const [owned,staged]=await Promise.all([
+    db.sourceFileOperation.findFirst({where:{objectId:objectHash,changeset:{repositoryId}},select:{objectId:true}}),
+    db.sourceObjectGrant.findUnique({where:{repositoryId_objectId:{repositoryId,objectId:objectHash}}})
+  ]);
+  if(!owned&&!staged)throw new Error("Blob not granted to repository");
+  const row=await db.sourceObject.findUnique({where:{id:objectHash}});
+  if(!row||row.kind!=="BLOB")throw new Error("Missing immutable blob");
+  if(row.data){
+    if(objectId("BLOB",row.data)!==row.id)throw new Error("Stored object integrity failure");
+    return Readable.from([Buffer.from(row.data)]);
+  }
+  if(row.externalId!==objectHash)throw new Error("Missing external blob identity");
+  const storage=await findReadableObject(repositoryId,objectHash);
+  return verifiedBlobStream(storage);
 }
