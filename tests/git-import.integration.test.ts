@@ -77,7 +77,7 @@ test("real repository with merges, symlinks, executable mode and >4 MiB blobs su
     const binary = await db.sourceObject.findUniqueOrThrow({ where: { id: binaryId } });
     assert.equal(binary.data, null);
     assert.equal(binary.byteSize, BigInt(large.length));
-    await assert.rejects(() => getObject(repo.id, binaryId), /STREAM_REQUIRED|streaming endpoint/);
+    await assert.rejects(() => getObject(repo.id, binaryId), /STREAM_REQUIRED|streaming endpoint|stream large stored blobs/);
     const ref = await db.sourceReference.findUniqueOrThrow({
       where: { repositoryId_name: { repositoryId: repo.id, name: "tags/v1.0.0" } },
     });
