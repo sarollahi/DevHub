@@ -3,6 +3,7 @@ import { createHmac, randomUUID } from "node:crypto";
 async function main() {
   const root = process.env.BOOTSTRAP_AGENT_TOKEN;
   if (!root || root.length < 32) throw new Error("Set BOOTSTRAP_AGENT_TOKEN and seed agents first");
+  const rootToken: string = root;
   const endpoint = (process.env.DEVHUB_URL ?? "http://localhost:3000").replace(/\/$/, "") + "/api/v1/pull-requests";
   const count = Math.min(5000, Math.max(1, Number(process.env.BURST_COUNT ?? 1000)));
   const concurrency = Math.min(100, Math.max(1, Number(process.env.BURST_CONCURRENCY ?? 20)));
@@ -15,7 +16,7 @@ async function main() {
     while (next < count) {
       const index = next++;
       const agentIndex = index % agents;
-      const bearer = agentIndex === 0 ? root : createHmac("sha256", root).update(`devhub-load-agent-${agentIndex}`).digest("hex");
+      const bearer = agentIndex === 0 ? rootToken : createHmac("sha256", rootToken).update(`devhub-load-agent-${agentIndex}`).digest("hex");
       const patch = `diff --git a/docs/load-${index}.md b/docs/load-${index}.md\n+synthetic check ${index}`;
       const body = { repository: "sarollahi/DevHub", title: `Synthetic contribution ${index}`,
         sourceBranch: `load/${runId.slice(0,8)}-${index}`, targetBranch: "main",
