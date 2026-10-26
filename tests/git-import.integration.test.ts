@@ -104,10 +104,10 @@ test("real repository with merges, symlinks, executable mode and >4 MiB blobs su
     const interruptedSha = git(directory, "rev-parse", "HEAD");
     const functionName = "git_import_abort_" + suffix;
     const triggerName = "git_import_event_abort_" + suffix;
-    await db.$executeRawUnsafe(`CREATE FUNCTION "${functionName}"() RETURNS TRIGGER LANGUAGE plpgsql AS $
+    await db.$executeRawUnsafe(`CREATE FUNCTION "${functionName}"() RETURNS TRIGGER LANGUAGE plpgsql AS $migration_import$
       BEGIN IF NEW."repositoryId" = '${repo.id}'::uuid THEN
         RAISE EXCEPTION 'injected Git import publication failure';
-      END IF; RETURN NEW; END $;`);
+      END IF; RETURN NEW; END $migration_import$;`);
     await db.$executeRawUnsafe(`CREATE TRIGGER "${triggerName}" BEFORE INSERT ON "SourceChangesetEvent"
       FOR EACH ROW EXECUTE FUNCTION "${functionName}"();`);
     try {
