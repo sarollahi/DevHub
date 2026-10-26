@@ -34,7 +34,7 @@ export async function GET(req: NextRequest, { params }: {
         result = await treeQuery(id, required("revision"), q.get("path") ?? "", count, q.get("cursor") ?? "");
         break;
       case "diff":
-        result = await diffQuery(id, required("from"), required("to"), count);
+        result = await diffQuery(id, required("from"), required("to"), count, Number(q.get("offset") ?? 0));
         break;
       case "history":
         result = await fileHistory(id, required("revision"), required("path"), q.get("followRenames") !== "false", count);
