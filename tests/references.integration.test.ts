@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { db } from "../src/lib/prisma";
 import { createChangeset, approveChangeset } from "../src/source-control/service";
 import { mutateReference, updateReferencePolicy, referenceHistory } from "../src/source-control/refs";
@@ -42,7 +42,7 @@ test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and 
   const right = await writeChange(root, "right-" + suffix);
   const child = await writeChange(left, "child-" + suffix);
   const request = (name: string, operation: "CREATE" | "UPDATE" | "DELETE" | "RESTORE",
-    expectedGeneration: number | null, changesetId?: string, id = name + "-" + operation + "-" + expectedGeneration) =>
+    expectedGeneration: number | null, changesetId?: string, id = randomUUID()) =>
       ({ name, operation, expectedGeneration, changesetId, mutationId: id });
   const fail = (code: string) => (e: unknown) => e instanceof SourceControlError && e.code === code;
 
