@@ -161,3 +161,7 @@ The v2 native engine stores only changed-file operation metadata with ordered pa
 Publication, parent edges, operation rows, idempotency claims and publication events commit atomically. Readers can use GET /api/v2/repositories/{repositoryId}/changesets/{id}, /tree, /events and /objects/{objectId}. The existing v1 API and reference controls remain available. The v2 JSON object endpoint currently has a 4 MiB raw-object limit; historical snapshot replay is bounded and external event delivery is not yet implemented.
 
 See [architecture decision 0002](docs/architecture/0002-canonical-delta-publication.md) for protocol rules, transaction semantics, tests and limitations.
+
+### Native source-control query service
+
+Versioned DAG ancestry, comparison, trees, diffs, file history, blame, raw-object streaming, and non-mutating merge/rebase previews are documented in [the native query API reference](docs/architecture/0002-native-query-api.md). Start the recoverable path indexer with `npm run worker:source-index`.

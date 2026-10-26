@@ -7,6 +7,7 @@ import { db } from "../src/lib/prisma";
 import { tokenHash } from "../src/lib/auth";
 import { createCanonicalChangeset, stageCanonicalBlob, getCanonicalChangeset, getCanonicalSnapshot, listCanonicalEvents } from "../src/source-control/canonical";
 import { getObject } from "../src/source-control/service";
+import { ancestryQuery, compareQuery, treeQuery, resolvePath, fileHistory, blameQuery, pathImpactQuery } from "../src/source-control/query";
 import { SourceControlError } from "../src/source-control/contracts";
 import { POST as publishApi } from "../src/app/api/v2/repositories/[id]/changesets/route";
 import { POST as blobApi } from "../src/app/api/v2/repositories/[id]/objects/route";
@@ -82,6 +83,23 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     assert.deepEqual((await getCanonicalChangeset(repo.id, merge.id)).parents.map(x => x.parentId), [left.id, right.id]);
     assert.equal(await db.sourceReference.count({ where: { repositoryId: repo.id } }), 0);
     assert.equal((await listCanonicalEvents(repo.id)).length, 4);
+  });
+
+  await t.test("v2 delta changesets are queryable without client checkout", async () => {
+    const ancestry = await ancestryQuery(repo.id, merge.id, right.id);
+    assert.deepEqual(ancestry.mergeBases, [right.id]);
+    const comparison = await compareQuery(repo.id, root.id, left.id);
+    assert.ok(comparison.changes.some(item => item.path === "docs/a.txt" && item.kind === "MODIFY"));
+    const tree = await treeQuery(repo.id, merge.id, "docs", 20);
+    assert.deepEqual(tree.entries.map(item => item.path), ["docs/copy", "docs/renamed"]);
+    const resolved = await resolvePath(repo.id, merge.id, "docs/renamed");
+    assert.equal(resolved.objectId, beta);
+    const history = await fileHistory(repo.id, merge.id, "docs/renamed");
+    assert.deepEqual(history.records.map(row => row.changesetId), [merge.id, left.id, root.id]);
+    const blame = await blameQuery(repo.id, merge.id, "docs/renamed");
+    assert.equal(blame.lines[0].changesetId, left.id);
+    const impact = await pathImpactQuery(repo.id, merge.id, "docs/a.txt");
+    assert.ok(impact.records.some(row => row.changesetId === merge.id && row.role === "source"));
   });
 
   await t.test("reject object unavailability, unknown ancestors and invalid operations without publication", async () => {

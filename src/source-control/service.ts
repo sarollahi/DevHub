@@ -95,6 +95,7 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
       operations: { create: operations.map(op => ({ kind: op.kind, path: op.path, previousPath: op.previousPath, objectId: op.objectId, fileMode: op.fileMode })) },
       validation: { create: { state: "SUCCESS", ...metadata } },
     } });
+    await tx.sourceQueryIndexJob.create({ data: { repositoryId, changesetId: id } });
     await tx.auditEvent.create({ data: { repositoryId, actorType: actor.type, actorId: actor.id,
       action: "changeset.created", subjectId: id, metadata: { treeId, parentCount: input.parents.length, operationCount: operations.length } } });
     return { id, treeId, created: true };
