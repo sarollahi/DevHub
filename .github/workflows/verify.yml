@@ -12,7 +12,7 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 20
     permissions:
       contents: write
     services:
@@ -39,6 +39,11 @@ jobs:
       ADMIN_TOKEN: ci-only-long-admin-testing-secret-123456789
       BOOTSTRAP_AGENT_TOKEN: ci-only-long-agent-testing-secret-123456789
       NEXT_TELEMETRY_DISABLED: "1"
+      OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
+      OBJECT_STORE_BUCKET: devhub-objects
+      OBJECT_STORE_REGION: us-east-1
+      OBJECT_STORE_ACCESS_KEY: devhub-local
+      OBJECT_STORE_SECRET_KEY: devhub-local-password-change-in-production
     steps:
       - uses: actions/checkout@v4
         with:
@@ -79,8 +84,20 @@ jobs:
         run: npm run typecheck
       - name: Unit tests
         run: npm test
-      - name: PostgreSQL and Redis integration tests
-        run: timeout --signal=TERM 110s npm run test:integration
+      - name: Start MinIO and initialize object bucket
+        run: |
+          docker run -d --name devhub-minio \
+            -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER=devhub-local \
+            -e MINIO_ROOT_PASSWORD=devhub-local-password-change-in-production \
+            cgr.dev/chainguard/minio:latest server /data
+          docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c \
+            'until mc alias set local http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing local/devhub-objects'
+      - name: PostgreSQL, Redis and object storage integration tests
+        run: timeout --signal=TERM 300s npm run test:integration
+      - name: Multi-gigabyte streaming and bounded-RSS verification
+        if: github.ref_name == 'feature/immutable-object-storage' || github.head_ref == 'feature/immutable-object-storage'
+        run: timeout --signal=TERM 600s npm run storage:stress
       - name: Source-control DAG benchmark smoke test
         run: npm run bench:source-query -- --depth=900 --width=16 --layers=12
       - name: Production build
@@ -109,4 +126,7 @@ jobs:
           fetch-depth: 0
       - name: Scan committed history for credentials
         run: |
-          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git --log-opts HEAD --no-banner --redact --exit-code 1 /repo
+          # Scope to the checked-out PR merge head and its complete ancestry.
+          # --all would also scan unrelated feature refs fetched by checkout.
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git \
+            --no-banner --redact --exit-code 1 --log-opts="HEAD" /repo

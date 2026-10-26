@@ -22,10 +22,13 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
     if (changedPaths.has(operation.path)) throw new SourceControlError(422, "DUPLICATE_PATH", "Each destination path may be modified once");
     changedPaths.add(operation.path);
     if (operation.kind === "PUT") {
-      const data = decodeBlob(operation.dataBase64);
-      const id = objectId("BLOB", data);
-      writes.set(id, data);
-      operations.push({ kind: "PUT", path: operation.path, objectId: id });
+      if ((operation.dataBase64 === undefined) === (operation.objectId === undefined)) {
+        throw new SourceControlError(422, "INVALID_PUT", "Provide exactly one of dataBase64 or objectId");
+      }
+      const data = operation.dataBase64 === undefined ? undefined : decodeBlob(operation.dataBase64);
+      const id = data === undefined ? operation.objectId! : objectId("BLOB", data);
+      if (data !== undefined) writes.set(id, data);
+      operations.push({ kind: "PUT", path: operation.path, objectId: id, fileMode: operation.fileMode });
     } else if (operation.kind === "MOVE") {
       if (operation.path === operation.previousPath) throw new SourceControlError(422, "INVALID_MOVE", "A move must change its path");
       operations.push({ kind: "MOVE", path: operation.path, previousPath: operation.previousPath });
@@ -45,10 +48,11 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
     }
     const tree = legacyTreeId ? await tx.sourceObject.findUnique({ where: { id: legacyTreeId } }) : null;
     if (tree && tree.kind !== "TREE") throw new Error("Parent references a non-tree object");
-    const manifest = new Map((tree ? decodeTree(tree.data, tree.id) : []).map(e => [e.path, e.objectId]));
+    if (tree && !tree.data) throw new Error("External tree payload is forbidden");
+    const manifest = new Map((tree ? decodeTree(tree.data!, tree.id) : []).map(e => [e.path, e]));
     for (const operation of operations) {
       if (operation.kind === "PUT") {
-        manifest.set(operation.path, operation.objectId!);
+        manifest.set(operation.path, { path: operation.path, objectId: operation.objectId!, ...(operation.fileMode ? { mode: operation.fileMode } : {}) });
       } else if (operation.kind === "DELETE") {
         if (!manifest.delete(operation.path)) throw new SourceControlError(409, "MISSING_SOURCE", `Cannot delete missing path: ${operation.path}`);
       } else {
@@ -56,11 +60,12 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
         if (!source) throw new SourceControlError(409, "MISSING_SOURCE", `Cannot move missing path: ${operation.previousPath}`);
         if (manifest.has(operation.path)) throw new SourceControlError(409, "DESTINATION_EXISTS", `Move destination already exists: ${operation.path}`);
         manifest.delete(operation.previousPath!);
-        manifest.set(operation.path, source);
-        operation.objectId = source;
+        manifest.set(operation.path, { ...source, path: operation.path });
+        operation.objectId = source.objectId;
+        operation.fileMode = source.mode;
       }
     }
-    const treeBytes = encodeTree([...manifest].map(([path, id]) => ({ path, objectId: id })));
+    const treeBytes = encodeTree([...manifest.values()]);
     const treeId = objectId("TREE", treeBytes);
     const id = sha256(JSON.stringify([1, repositoryId, input.parents, treeId, actor.id, input.message, operations]));
     const existing = await tx.sourceChangeset.findUnique({ where: { id } });
@@ -69,12 +74,25 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
       return { id, treeId: existing.treeId, created: false };
     }
     const blobs = [...writes].map(([id, data]) => ({ id, kind: "BLOB" as const, data: Uint8Array.from(data), byteSize: data.length }));
-    await tx.sourceObject.createMany({ data: [...blobs, { id: treeId, kind: "TREE" as const, data: Uint8Array.from(treeBytes), byteSize: treeBytes.length }], skipDuplicates: true });
+    const externalIds = [...new Set(operations.filter(op => op.kind === "PUT" && !writes.has(op.objectId!)).map(op => op.objectId!))];
+    const externalRows = [];
+    for (const externalId of externalIds) {
+      // Lock the blob state against concurrent garbage collection until all FK references commit.
+      await tx.$queryRawUnsafe("SELECT id FROM \"StoredBlob\" WHERE id = $1 AND state = 'READY' FOR UPDATE", externalId);
+      const row = await tx.storedBlob.findFirst({ where: { id: externalId, state: "READY" } });
+      const lease = await tx.blobLease.findFirst({ where: { repositoryId, objectId: externalId, expiresAt: { gt: new Date() } } });
+      const previouslyLinked = await tx.sourceFileOperation.findFirst({ where: { objectId: externalId, changeset: { repositoryId } } });
+      if (!row || (!lease && !previouslyLinked)) throw new SourceControlError(422, "OBJECT_NOT_PUBLISHED", "Upload the object to this repository before referencing it");
+      externalRows.push({ id: externalId, kind: "BLOB" as const, data: null, externalId,
+        byteSize: row.rawBytes });
+    }
+    await tx.sourceObject.createMany({ data: [...blobs, ...externalRows,
+      { id: treeId, kind: "TREE" as const, data: Uint8Array.from(treeBytes), byteSize: treeBytes.length }], skipDuplicates: true });
     const metadata = deriveChangesetMetadata(operations);
     await tx.sourceChangeset.create({ data: {
       id, repositoryId, treeId, authorId: `${actor.type}:${actor.id}`, message: input.message,
       parents: { create: input.parents.map((parentId, position) => ({ parentId, position })) },
-      operations: { create: operations.map(op => ({ kind: op.kind, path: op.path, previousPath: op.previousPath, objectId: op.objectId })) },
+      operations: { create: operations.map(op => ({ kind: op.kind, path: op.path, previousPath: op.previousPath, objectId: op.objectId, fileMode: op.fileMode })) },
       validation: { create: { state: "SUCCESS", ...metadata } },
     } });
     await tx.sourceQueryIndexJob.create({ data: { repositoryId, changesetId: id } });
@@ -107,6 +125,7 @@ export async function getTree(repositoryId: string, changesetId: string) {
     include: { tree: true } });
   if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
   if (!change.treeId || !change.tree) return getCanonicalSnapshot(repositoryId, changesetId);
+  if (!change.tree.data) throw new Error("External tree payload is forbidden");
   return { changesetId: change.id, treeId: change.treeId, entries: decodeTree(change.tree.data, change.treeId) };
 }
 
@@ -116,8 +135,10 @@ export async function getObject(repositoryId: string, id: string) {
   }, select: { id: true } });
   if (!reachable) throw new SourceControlError(404, "NOT_FOUND", "Object not found in repository history");
   const object = await db.sourceObject.findUnique({ where: { id } });
-  if (!object || objectId(object.kind, object.data) !== object.id) throw new Error("Stored object failed integrity verification");
-  return { id: object.id, kind: object.kind, byteSize: object.byteSize, dataBase64: Buffer.from(object.data).toString("base64") };
+  if (!object) throw new Error("Stored object missing");
+  if (!object.data) throw new SourceControlError(413, "STREAM_REQUIRED", "Use /objects/{objectId}/content to stream large stored blobs");
+  if (objectId(object.kind, object.data) !== object.id) throw new Error("Stored object failed integrity verification");
+  return { id: object.id, kind: object.kind, byteSize: Number(object.byteSize), dataBase64: Buffer.from(object.data).toString("base64") };
 }
 
 export async function approveChangeset(repositoryId: string, id: string, ownerId: string) {

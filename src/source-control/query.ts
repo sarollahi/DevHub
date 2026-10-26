@@ -4,6 +4,7 @@ import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry } from "./contracts";
 import { decodeTree, encodeTree, objectId } from "./storage";
 import { getTree as readTree } from "./service";
+import { verifiedBlobStream } from "../object-store/service";
 import { blameLines, compareEntries, mergeEntries, textPatch } from "./query-algorithms";
 
 const digest = /^[a-f0-9]{64}$/;
@@ -124,19 +125,36 @@ export async function compareQuery(repositoryId: string, from: string, to: strin
   return { from: source, to: target, changes: compareEntries(a.entries, b.entries) };
 }
 
-async function verifiedBlobs(ids: string[]): Promise<Map<string, Uint8Array>> {
-  const found = await db.sourceObject.findMany({ where: { id: { in: [...new Set(ids)] } }, select: { id: true, kind: true, data: true } });
-  const result = new Map<string, Uint8Array>();
+async function verifiedBlobs(ids: string[]): Promise<Map<string, Uint8Array | null>> {
+  const found = await db.sourceObject.findMany({
+    where: { id: { in: [...new Set(ids)] } },
+    select: { id: true, kind: true, data: true, externalId: true },
+  });
+  const result = new Map<string, Uint8Array | null>();
   for (const obj of found) {
-    if (obj.kind !== "BLOB" || objectId("BLOB", obj.data) !== obj.id) throw new Error("Corrupt or unexpected content-addressed object");
-    result.set(obj.id, obj.data);
+    if (obj.kind !== "BLOB") throw new Error("Unexpected non-blob query object");
+    if (obj.data) {
+      if (objectId("BLOB", obj.data) !== obj.id) throw new Error("Corrupt content-addressed object");
+      result.set(obj.id, obj.data);
+      continue;
+    }
+    if (obj.externalId !== obj.id) throw new Error("Invalid external blob identity");
+    const stored = await db.storedBlob.findFirst({ where: { id: obj.id, state: "READY" } });
+    if (!stored) throw new SourceControlError(409, "OBJECT_UNAVAILABLE", "Object is not published");
+    if (stored.rawBytes > 4n * 1024n * 1024n) {
+      result.set(obj.id, null);
+      continue;
+    }
+    const parts: Buffer[] = [];
+    for await (const part of await verifiedBlobStream(stored)) parts.push(Buffer.from(part));
+    result.set(obj.id, Buffer.concat(parts));
   }
-  if (result.size !== new Set(ids).size) throw new Error("Missing object referenced by immutable tree");
+  if (result.size !== new Set(ids).size) throw new Error("Missing object in immutable tree");
   return result;
 }
 
-function textOf(bytes: Uint8Array): string | null {
-  if (bytes.includes(0)) return null;
+function textOf(bytes: Uint8Array | null): string | null {
+  if (bytes === null || bytes.includes(0)) return null;
   try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
   catch { return null; }
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "../lib/prisma";
 import { authenticateAgent, isAdminRequest, verifyBrowserOrigin } from "../lib/auth";
 import { SourceControlError, type SourceActor } from "./contracts";
+import { ObjectStorageError } from "../object-store/s3";
 
 export async function requireRepositoryAccess(request: NextRequest, repositoryId: string, scope: string, adminOnly = false):
   Promise<{ actor: SourceActor; ownerId: string }> {
@@ -24,6 +25,7 @@ export async function requireRepositoryAccess(request: NextRequest, repositoryId
 
 export function sourceFailure(error: unknown) {
   if (error instanceof SourceControlError) return NextResponse.json({ error: error.code, message: error.message }, { status: error.status });
+  if (error instanceof ObjectStorageError) return NextResponse.json({ error: "OBJECT_STORAGE_ERROR", message: error.message }, { status: error.status >= 400 && error.status <= 599 ? error.status : 503 });
   console.error("Source-control request failed", error);
   return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
 }

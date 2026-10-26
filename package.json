@@ -20,6 +20,8 @@
     "stress:ingest": "tsx scripts/burst.ts",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "test:integration": "tsx --test tests/*.integration.test.ts",
+    "storage:maintain": "tsx scripts/object-maintain.ts",
+    "storage:stress": "tsx scripts/storage-stress.ts",
     "worker:source-index": "tsx src/workers/query-indexer.ts",
     "bench:source-query": "tsx scripts/bench-source-query.ts",
     "cache:serve": "node src/cache/daemon.mjs",
