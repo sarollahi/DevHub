@@ -20,7 +20,8 @@
     "stress:ingest": "tsx scripts/burst.ts",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "test:integration": "tsx --test tests/*.integration.test.ts",
-    "storage:maintain": "tsx scripts/object-maintain.ts"
+    "storage:maintain": "tsx scripts/object-maintain.ts",
+    "storage:stress": "tsx scripts/storage-stress.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",

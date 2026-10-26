@@ -38,3 +38,8 @@ Production needs private S3 access, HTTPS, bucket backups/versioning, and monito
 
 
 MinIO image distribution changed in September 2026: the retired Docker Hub images can no longer be pulled, and anonymous Quay downloads are also restricted. Local Compose and CI use Chainguard's actively built MinIO and client images. Chainguard's freely accessible tags float; pin an internally mirrored, verified digest when deploying production environments.
+
+
+## Measured streaming checks
+
+Run npm run storage:stress against a local development database and MinIO. The stress script creates a temporary repository and uploads, verifies, then downloads 3 GiB from a constant 64 KiB input buffer; it prints measured wall time, compressed bytes, peak process RSS and peak heap as JSON. It fails if measured peak RSS exceeds 512 MiB. Set STORAGE_STRESS_REPOSITORY_ID to a dedicated existing repository UUID to use that repository instead. The CI feature branch also executes this stress script once; do not interpret CI timing as a production SLA.

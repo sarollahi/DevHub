@@ -120,6 +120,8 @@ export async function uploadBlob(repositoryId: string, readable: Readable,
       fragments.length = 0;
       buffered = 0;
       parts.push(await backend.part(stagingKey, multipartId!, parts.length + 1, bytes));
+      // Refresh durable transfer timestamp to prevent cleanup of an active large upload.
+      await db.blobTransfer.update({ where: { id: transferId }, data: { updatedAt: new Date() } });
     };
     for await (const encoded of gzip) {
       const chunk = Buffer.from(encoded);
@@ -164,19 +166,32 @@ async function publishBlob(record: BlobRecord, owner: string, stagingKey: string
     if (found.state === "READY") {
       if (found.rawBytes !== record.rawBytes || found.rawSha256 !== record.rawSha256)
         throw new ObjectStorageError("SHA-256 identity collision", 500);
+      // A duplicate must never silently accept bytes corrupted after publication.
+      await verifyBlob(found, backend);
       return true;
     }
     if (found.state === "DELETING") throw new ObjectStorageError("Object is being deleted; retry", 409);
     if (found.publisherId === owner) {
-      const bytes = await backend.head(record.objectKey);
-      if (bytes !== Number(record.storedBytes))
-        await backend.copy(stagingKey, record.objectKey, Number(record.storedBytes));
-      await verifyBlob(record, backend);
-      const result = await db.storedBlob.updateMany({ where: {
-        id: record.id, state: "PUBLISHING", publisherId: owner },
-        data: { state: "READY", stagingKey: null, verifiedAt: new Date(), publishLeaseUntil: null } });
-      if (result.count !== 1) throw new ObjectStorageError("Publication lease lost", 409);
-      return false;
+      // Keep long S3 copy + verify operations leased while the request is still alive.
+      const heartbeat = setInterval(() => {
+        void db.storedBlob.updateMany({ where: { id: record.id, state: "PUBLISHING", publisherId: owner },
+          data: { publishLeaseUntil: later(PUBLISH_LEASE_MS) } }).catch(error =>
+          console.error("Object publication heartbeat failed", { id: record.id, error }));
+      }, 30000);
+      heartbeat.unref();
+      try {
+        const bytes = await backend.head(record.objectKey);
+        if (bytes !== Number(record.storedBytes))
+          await backend.copy(stagingKey, record.objectKey, Number(record.storedBytes));
+        await verifyBlob(record, backend);
+        const result = await db.storedBlob.updateMany({ where: {
+          id: record.id, state: "PUBLISHING", publisherId: owner },
+          data: { state: "READY", stagingKey: null, verifiedAt: new Date(), publishLeaseUntil: null } });
+        if (result.count !== 1) throw new ObjectStorageError("Publication lease lost", 409);
+        return false;
+      } finally {
+        clearInterval(heartbeat);
+      }
     }
     if (found.publishLeaseUntil && found.publishLeaseUntil < new Date()) {
       await db.storedBlob.updateMany({ where: { id: record.id, state: "PUBLISHING",

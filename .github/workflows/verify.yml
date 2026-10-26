@@ -95,6 +95,9 @@ jobs:
             'until mc alias set local http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing local/devhub-objects'
       - name: PostgreSQL, Redis and object storage integration tests
         run: timeout --signal=TERM 300s npm run test:integration
+      - name: Multi-gigabyte streaming and bounded-RSS verification
+        if: github.event_name == 'push' && github.ref_name == 'feature/immutable-object-storage'
+        run: timeout --signal=TERM 600s npm run storage:stress
       - name: Production build
         run: npm run build
       - name: Start server against real database
