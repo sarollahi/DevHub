@@ -1,0 +1,38 @@
+{
+  "name": "devhub",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma generate && next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "tsx scripts/seed.ts",
+    "worker": "tsx src/workers/processor.ts",
+    "dispatcher": "tsx src/workers/dispatcher.ts",
+    "stress:ingest": "tsx scripts/burst.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.0",
+    "bullmq": "^5.58.0",
+    "ioredis": "^5.4.2",
+    "next": "16.4.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "prisma": "6.19.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}

@@ -1,0 +1,240 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AgentStatus { ACTIVE SUSPENDED REVOKED }
+enum PullRequestState { QUEUED RUNNING BLOCKED FAILED REVIEW_REQUIRED APPROVED MERGING MERGED CLOSED }
+enum JobState { QUEUED RUNNING SUCCEEDED FAILED CANCELLED }
+enum OutboxState { PENDING PUBLISHED }
+enum CheckState { PENDING RUNNING SUCCESS FAILURE CANCELLED }
+enum ReviewState { QUEUED RUNNING COMPLETED FAILED }
+enum RiskTier { LOW MEDIUM HIGH CRITICAL }
+enum MergeState { PENDING VALIDATING READY MERGING MERGED BLOCKED FAILED }
+enum ApprovalDecision { APPROVED CHANGES_REQUESTED }
+
+model User {
+  id            String          @id @default(uuid()) @db.Uuid
+  handle        String          @unique
+  email         String          @unique
+  createdAt     DateTime        @default(now())
+  repositories  Repository[]    @relation("RepoOwner")
+  agents        AgentIdentity[] @relation("AgentOwner")
+  approvals     Approval[]
+}
+
+model Repository {
+  id                    String              @id @default(uuid()) @db.Uuid
+  ownerId               String              @db.Uuid
+  slug                  String
+  name                  String
+  defaultBranch         String              @default("main")
+  maxActivePullRequests Int                 @default(2000)
+  requireHumanApproval  Boolean             @default(true)
+  createdAt             DateTime            @default(now())
+  owner                 User                @relation("RepoOwner", fields: [ownerId], references: [id])
+  pullRequests          PullRequest[]
+  fingerprints          ChangeFingerprint[]
+  mergeGroups           MergeGroup[]
+  ingressBuckets        IngressBucket[]
+  @@unique([ownerId, slug])
+  @@index([slug])
+}
+
+model AgentIdentity {
+  id           String            @id @default(uuid()) @db.Uuid
+  ownerId      String            @db.Uuid
+  name         String
+  status       AgentStatus       @default(ACTIVE)
+  scopes       String[]
+  createdAt    DateTime          @default(now())
+  owner        User              @relation("AgentOwner", fields: [ownerId], references: [id])
+  credentials  AgentCredential[]
+  pullRequests PullRequest[]
+  ingressBuckets IngressBucket[]
+  @@unique([ownerId, name])
+}
+
+model AgentCredential {
+  id          String        @id @default(uuid()) @db.Uuid
+  agentId     String        @db.Uuid
+  tokenHash   String        @unique @db.Char(64)
+  label       String
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime      @default(now())
+  agent       AgentIdentity @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  @@index([agentId, revokedAt])
+}
+
+model PullRequest {
+  id             String            @id @default(uuid()) @db.Uuid
+  repositoryId   String            @db.Uuid
+  agentId        String            @db.Uuid
+  idempotencyKey String
+  requestHash    String            @db.Char(64)
+  title          String
+  description    String            @default("")
+  sourceBranch   String
+  sourceSha      String            @db.VarChar(40)
+  targetBranch   String
+  targetSha      String            @db.VarChar(40)
+  patch          String            @db.Text
+  changedFiles   String[]
+  state          PullRequestState  @default(QUEUED)
+  riskTier       RiskTier?
+  riskScore      Int?
+  version        Int               @default(1)
+  approvedAt     DateTime?
+  mergedAt       DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  repository     Repository        @relation(fields: [repositoryId], references: [id])
+  agent          AgentIdentity     @relation(fields: [agentId], references: [id])
+  checks         CheckRun[]
+  reviews        ReviewRun[]
+  jobs           QueueJob[]
+  fingerprints   ChangeFingerprint[]
+  approvals      Approval[]
+  mergeGroupItems MergeGroupItem[]
+  @@unique([agentId, idempotencyKey])
+  @@index([repositoryId, state, createdAt(sort: Desc)])
+  @@index([repositoryId, targetBranch, riskScore, createdAt])
+  @@index([state, updatedAt])
+}
+
+model CheckRun {
+  id        String       @id @default(uuid()) @db.Uuid
+  pullId    String       @db.Uuid
+  name      String
+  state     CheckState   @default(PENDING)
+  summary   String?
+  logUri    String?
+  startedAt DateTime?
+  endedAt   DateTime?
+  createdAt DateTime     @default(now())
+  pull      PullRequest  @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  @@index([pullId, name, createdAt])
+}
+
+model ReviewRun {
+  id          String      @id @default(uuid()) @db.Uuid
+  pullId      String      @db.Uuid
+  model       String
+  state       ReviewState @default(QUEUED)
+  findings    Json?
+  costMicros  BigInt      @default(0)
+  startedAt   DateTime?
+  completedAt DateTime?
+  pull        PullRequest @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  @@index([pullId, state])
+}
+
+model QueueJob {
+  id             String       @id @default(uuid()) @db.Uuid
+  pullId         String       @db.Uuid
+  kind           String
+  idempotencyKey String       @unique
+  state          JobState     @default(QUEUED)
+  attempts       Int          @default(0)
+  maxAttempts    Int          @default(5)
+  lastError      String?
+  scheduledAt    DateTime     @default(now())
+  startedAt      DateTime?
+  leaseUntil     DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  pull           PullRequest  @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  @@index([state, scheduledAt])
+}
+
+model ChangeFingerprint {
+  id           String      @id @default(uuid()) @db.Uuid
+  repositoryId String      @db.Uuid
+  pullId       String      @db.Uuid
+  sha256       String      @db.Char(64)
+  fileSetHash  String      @db.Char(64)
+  relatedCount Int         @default(0)
+  createdAt    DateTime    @default(now())
+  repository   Repository  @relation(fields: [repositoryId], references: [id])
+  pull         PullRequest @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  @@unique([pullId])
+  @@index([repositoryId, sha256])
+  @@index([repositoryId, fileSetHash])
+}
+
+model MergeGroup {
+  id           String           @id @default(uuid()) @db.Uuid
+  repositoryId String           @db.Uuid
+  targetBranch String
+  state        MergeState       @default(PENDING)
+  createdAt    DateTime         @default(now())
+  repository   Repository       @relation(fields: [repositoryId], references: [id])
+  items        MergeGroupItem[]
+  @@index([repositoryId, targetBranch, state])
+}
+
+model MergeGroupItem {
+  mergeGroupId String      @db.Uuid
+  pullId       String      @db.Uuid
+  position     Int
+  mergeGroup   MergeGroup  @relation(fields: [mergeGroupId], references: [id], onDelete: Cascade)
+  pull         PullRequest @relation(fields: [pullId], references: [id])
+  @@id([mergeGroupId, pullId])
+  @@unique([mergeGroupId, position])
+}
+
+model Approval {
+  id        String           @id @default(uuid()) @db.Uuid
+  pullId    String           @db.Uuid
+  userId    String           @db.Uuid
+  version   Int
+  decision  ApprovalDecision
+  createdAt DateTime         @default(now())
+  pull      PullRequest      @relation(fields: [pullId], references: [id], onDelete: Cascade)
+  user      User             @relation(fields: [userId], references: [id])
+  @@unique([pullId, userId, version])
+}
+
+model IngressBucket {
+  repositoryId String        @db.Uuid
+  agentId      String        @db.Uuid
+  minute       DateTime
+  count        Int           @default(0)
+  repository   Repository    @relation(fields: [repositoryId], references: [id])
+  agent        AgentIdentity @relation(fields: [agentId], references: [id])
+  @@id([repositoryId, agentId, minute])
+}
+
+model OutboxEvent {
+  id            String      @id @default(uuid()) @db.Uuid
+  aggregateType String
+  aggregateId   String      @db.Uuid
+  kind          String
+  payload       Json
+  state         OutboxState @default(PENDING)
+  attempts      Int         @default(0)
+  nextAttemptAt DateTime    @default(now())
+  lockedUntil   DateTime?
+  publishedAt   DateTime?
+  createdAt     DateTime    @default(now())
+  @@index([state, nextAttemptAt, createdAt])
+  @@index([aggregateType, aggregateId])
+}
+
+model AuditEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  repositoryId String? @db.Uuid
+  actorType   String
+  actorId     String
+  action      String
+  subjectId   String?
+  metadata    Json?
+  occurredAt  DateTime @default(now())
+  @@index([repositoryId, occurredAt(sort: Desc)])
+  @@index([actorType, actorId, occurredAt(sort: Desc)])
+}
