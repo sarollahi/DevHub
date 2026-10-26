@@ -42,6 +42,9 @@ CREATE TABLE "SourceFileOperation" (
 CREATE TABLE "SourceValidation" (
   "changesetId" CHAR(64) PRIMARY KEY REFERENCES "SourceChangeset"("id") ON UPDATE CASCADE ON DELETE CASCADE,
   "state" "CheckState" NOT NULL,
+  "riskTier" "RiskTier" NOT NULL,
+  "riskScore" INTEGER NOT NULL,
+  "touchedPaths" TEXT[] NOT NULL,
   "summary" TEXT NOT NULL,
   "checkedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
