@@ -161,3 +161,12 @@ The v2 native engine stores only changed-file operation metadata with ordered pa
 Publication, parent edges, operation rows, idempotency claims and publication events commit atomically. Readers can use GET /api/v2/repositories/{repositoryId}/changesets/{id}, /tree, /events and /objects/{objectId}. The existing v1 API and reference controls remain available. The v2 JSON object endpoint currently has a 4 MiB raw-object limit; historical snapshot replay is bounded and external event delivery is not yet implemented.
 
 See [architecture decision 0002](docs/architecture/0002-canonical-delta-publication.md) for protocol rules, transaction semantics, tests and limitations.
+
+
+## Authoritative reference management
+
+References remain separate from immutable changesets. The versioned API supports compare-and-swap updates with explicit generations, durable history, tombstoned deletion and restoration, immutable tags, protection policies and fast-forward ancestry checks. The configured default branch cannot be force-moved or deleted and rejects stale writers. Each successful mutation atomically commits the pointer, its append-only journal record, audit event and outbox event.
+
+Reference notifications use a dedicated event queue and never enter the PR preflight queue. Delivery is at least once with stable event IDs. Downstream executable validation and search/index consumers must be implemented separately.
+
+See [reference management API](docs/api/reference-management.md). Migration captures pre-existing ref heads as baseline snapshots without manufacturing historical operations.
