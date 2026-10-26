@@ -7,6 +7,18 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     const { id, objectId } = await params;
     await requireRepositoryAccess(request, id, "changesets:read");
-    return NextResponse.json({ apiVersion: 2, ...(await getObject(id, objectId)) });
+    const object = await getObject(id, objectId);
+    if (request.nextUrl.searchParams.get("format") === "raw") {
+      const content = Buffer.from(object.dataBase64, "base64");
+      return new NextResponse(content, { status: 200, headers: {
+        "content-type": "application/octet-stream",
+        "content-length": String(content.byteLength),
+        "x-devhub-object-kind": object.kind,
+        "x-devhub-object-id": object.id,
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, no-store",
+      } });
+    }
+    return NextResponse.json({ apiVersion: 2, ...object });
   } catch (error) { return sourceFailure(error); }
 }

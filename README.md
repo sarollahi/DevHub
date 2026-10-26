@@ -165,3 +165,9 @@ See [architecture decision 0002](docs/architecture/0002-canonical-delta-publicat
 ### Native source-control query service
 
 Versioned DAG ancestry, comparison, trees, diffs, file history, blame, raw-object streaming, and non-mutating merge/rebase previews are documented in [the native query API reference](docs/architecture/0002-native-query-api.md). Start the recoverable path indexer with `npm run worker:source-index`.
+
+## Shared immutable-object caches
+
+The optional node-local socket daemon and regional cache layer share verified immutable blobs and trees between developers, agents, and CI workers without requiring full-repository cloning. The cache uses the existing typed SHA-256 object identities and adds a raw-byte read option to the authenticated v2 object API. It does not replace authoritative source storage or reference management.
+
+See [cache architecture, configuration, security, recovery, and performance verification](docs/object-cache.md). Run `npm run cache:serve` after configuring the cache environment variables; use `npm run cache:benchmark` for synthetic cold/warm/sparse-workspace measurements.
