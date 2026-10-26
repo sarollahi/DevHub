@@ -94,6 +94,8 @@ model Repository {
   ingressBuckets        IngressBucket[]
   sourceChangesets      SourceChangeset[]
   sourceReferences      SourceReference[]
+  blobLeases            BlobLease[]
+  blobTransfers         BlobTransfer[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -308,7 +310,9 @@ enum SourceOperationKind {
 model SourceObject {
   id          String                @id @db.Char(64)
   kind        SourceObjectKind
-  data        Bytes                 @db.ByteA
+  data        Bytes?                @db.ByteA
+  externalId  String?               @unique @db.Char(64)
+  external    StoredBlob?           @relation(fields: [externalId], references: [id], onDelete: Restrict)
   byteSize    Int
   createdAt   DateTime              @default(now())
   trees       SourceChangeset[]     @relation("ChangesetTree")
@@ -349,6 +353,7 @@ model SourceFileOperation {
   path         String
   kind         SourceOperationKind
   previousPath String?
+  fileMode     String?             @db.VarChar(6)
   objectId     String?             @db.Char(64)
   changeset    SourceChangeset     @relation(fields: [changesetId], references: [id], onDelete: Cascade)
   object       SourceObject?       @relation("FileObject", fields: [objectId], references: [id])
@@ -387,4 +392,58 @@ model SourceReference {
   changeset    SourceChangeset @relation(fields: [changesetId], references: [id])
   @@id([repositoryId, name])
   @@index([changesetId])
+}
+
+
+// Staged S3 publication is separately tracked from immutable source-control trees.
+// No byte payload is stored in these rows. READY means copy and verification finished.
+enum BlobState {
+  PUBLISHING
+  READY
+  DELETING
+}
+enum BlobTransferState {
+  ACTIVE
+  STAGED
+  FINISHED
+  FAILED
+}
+model StoredBlob {
+  id               String        @id @db.Char(64)
+  objectKey        String        @unique
+  state            BlobState     @default(PUBLISHING)
+  encoding         String        @db.VarChar(16)
+  rawSha256        String        @db.Char(64)
+  rawBytes         BigInt
+  storedBytes      BigInt
+  stagingKey       String?
+  publisherId      String?       @db.Uuid
+  publishLeaseUntil DateTime?
+  retainUntil      DateTime
+  createdAt        DateTime      @default(now())
+  verifiedAt       DateTime?
+  sourceObjects    SourceObject[]
+  leases           BlobLease[]
+  @@index([state, publishLeaseUntil])
+  @@index([state, retainUntil])
+}
+model BlobLease {
+  repositoryId String       @db.Uuid
+  objectId     String       @db.Char(64)
+  expiresAt    DateTime
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  object       StoredBlob   @relation(fields: [objectId], references: [id], onDelete: Restrict)
+  @@id([repositoryId, objectId])
+  @@index([objectId, expiresAt])
+}
+model BlobTransfer {
+  id           String             @id @default(uuid()) @db.Uuid
+  repositoryId String             @db.Uuid
+  stagingKey   String             @unique
+  uploadId     String?
+  state        BlobTransferState  @default(ACTIVE)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  repository   Repository         @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  @@index([state, updatedAt])
 }
