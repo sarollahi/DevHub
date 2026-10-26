@@ -103,4 +103,4 @@ jobs:
           fetch-depth: 0
       - name: Scan committed history for credentials
         run: |
-          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git --source /repo --no-banner --redact --exit-code 1
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git --no-banner --redact --exit-code 1 /repo
