@@ -81,6 +81,8 @@ jobs:
         run: npm test
       - name: PostgreSQL and Redis integration tests
         run: timeout --signal=TERM 110s npm run test:integration
+      - name: Source-control DAG benchmark smoke test
+        run: npm run bench:source-query -- --depth=900 --width=16 --layers=12
       - name: Production build
         run: npm run build
       - name: Start server against real database
