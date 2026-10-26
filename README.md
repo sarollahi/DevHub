@@ -154,10 +154,10 @@ The authenticated repository workspace is at `/repositories/{repositoryId}/sourc
 See [architecture decision 0001](docs/architecture/0001-immutable-changesets.md) for identities, storage boundaries, security policies, API examples and migration limits, and [local development](docs/local-development.md) for verified environment commands.
 
 
-## Authoritative reference management
+### Canonical delta changesets (v2)
 
-References remain separate from immutable changesets. The v1 reference API now supports compare-and-swap advancement, explicit optimistic generations, durable audit history, tombstoned deletion and restoration, immutable tags, named protection policies, and fast-forward ancestry checks. The configured default branch is always protected from deletion, force moves and silent stale overwrites. Each successful mutation commits a reference update, immutable history, audit entry and durable outbox event in one PostgreSQL transaction.
+The v2 native engine stores only changed-file operation metadata with ordered parent relationships. Full repository trees are reconstructed on demand, not copied into PostgreSQL for every changeset. Immutable SHA-256 blobs may be staged with POST /api/v2/repositories/{repositoryId}/objects and referenced by ADD/MODIFY operations in POST /api/v2/repositories/{repositoryId}/changesets. DELETE, RENAME, COPY and CHMOD are supported, including binary/empty files, executable bits and safe symlinks. Publication requires no branch or reference update.
 
-A dedicated reference-event queue isolates downstream notifications from PR preflight work. Database and queue delivery use at-least-once semantics with stable event IDs. This does **not** imply that executable validation, merge coordination or Git network transport already exist.
+Publication, parent edges, operation rows, idempotency claims and publication events commit atomically. Readers can use GET /api/v2/repositories/{repositoryId}/changesets/{id}, /tree, /events and /objects/{objectId}. The existing v1 API and reference controls remain available. The v2 JSON object endpoint currently has a 4 MiB raw-object limit; historical snapshot replay is bounded and external event delivery is not yet implemented.
 
-See [reference management API](docs/api/reference-management.md) for endpoints, retry rules, permissions, conflict semantics and test instructions. Pre-existing reference history is preserved as a migration baseline because older individual mutations cannot be reconstructed.
+See [architecture decision 0002](docs/architecture/0002-canonical-delta-publication.md) for protocol rules, transaction semantics, tests and limitations.
