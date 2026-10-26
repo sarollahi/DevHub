@@ -14,6 +14,25 @@ export class SourceWorkspace {
   listRefs() { return this.request<{ records: { name: string; changesetId: string; generation: number }[] }>("/refs"); }
   listChangesets() { return this.request<{ records: { id: string; treeId: string; message: string }[] }>("/changesets"); }
   getTree(id: string) { return this.request<{ treeId: string; entries: TreeEntry[] }>(`/changesets/${id}/tree`); }
+  async uploadObject(body: BodyInit, expectedId?: string) {
+    const response = await fetch(this.baseUrl.replace(/\/$/, "") + "/api/v1/repositories/" +
+      this.repositoryId + "/objects", {
+      method: "POST", body,
+      headers: { authorization: "Bearer " + this.token, "content-type": "application/octet-stream",
+        ...(expectedId ? { "x-expected-object-id": expectedId } : {}) },
+      duplex: "half",
+    } as RequestInit & { duplex: string });
+    if (!response.ok) throw new Error("Object upload failed: " + response.status);
+    return response.json() as Promise<{ id: string; rawBytes: string; storedBytes: string; deduplicated: boolean }>;
+  }
+  async downloadObject(id: string) {
+    const response = await fetch(this.baseUrl.replace(/\/$/, "") + "/api/v1/repositories/" +
+      this.repositoryId + "/objects/" + encodeURIComponent(id) + "/content", {
+      headers: { authorization: "Bearer " + this.token },
+    });
+    if (!response.ok) throw new Error("Object download failed: " + response.status);
+    return response;
+  }
   getObject(id: string) { return this.request<{ kind: "BLOB" | "TREE"; dataBase64: string }>(`/objects/${id}`); }
   createChangeset(input: ChangesetInput) {
     return this.request<ChangesetReceipt>("/changesets", { method: "POST", body: JSON.stringify(input) });

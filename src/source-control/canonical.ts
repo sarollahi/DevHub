@@ -7,6 +7,7 @@ import { validPath } from "../lib/review-logic";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { decodeTree, objectId } from "./storage";
 import { deriveChangesetMetadata } from "./derived";
+import { verifiedBlobStream } from "../object-store/service";
 
 const digest = (data: string) => createHash("sha256").update(data).digest("hex");
 const id = z.string().regex(/^[a-f0-9]{64}$/);
@@ -68,7 +69,7 @@ function apply(state: State, op: { kind: string; path: string; previousPath?: st
     state.set(op.path, { objectId: op.objectId!, mode: (op.fileMode || "100644") as Entry["mode"] });
   } else if (op.kind === "MODIFY" || op.kind === "PUT") {
     if (op.kind === "MODIFY" && !old) throw new SourceControlError(409, "MISSING_SOURCE", op.path);
-    state.set(op.path, { objectId: op.objectId!, mode: old?.mode || "100644" });
+    state.set(op.path, { objectId: op.objectId!, mode: (op.fileMode || old?.mode || "100644") as Entry["mode"] });
   } else if (op.kind === "DELETE") {
     if (!old) throw new SourceControlError(409, "MISSING_SOURCE", op.path);
     state.delete(op.path);
@@ -106,7 +107,9 @@ async function snapshot(tx: Tx, repositoryId: string, head: string | undefined):
     if (change.treeId) {
       const tree = await tx.sourceObject.findUnique({ where: { id: change.treeId } });
       if (!tree || tree.kind !== "TREE") throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing legacy tree");
-      state = new Map(decodeTree(tree.data, tree.id).map(x => [x.path, { objectId: x.objectId, mode: "100644" as const }]));
+      if (!tree.data) throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing legacy tree payload");
+      state = new Map(decodeTree(tree.data, tree.id).map(x =>
+        [x.path, { objectId: x.objectId, mode: x.mode || "100644" }]));
       break;
     }
     chain.push(change);
@@ -119,21 +122,38 @@ async function snapshot(tx: Tx, repositoryId: string, head: string | undefined):
   return state;
 }
 
-async function checkedBlob(tx: Tx, repositoryId: string, blobId: string) {
+async function checkedBlob(tx: Tx, repositoryId: string, blobId: string, asSymlink = false): Promise<Uint8Array> {
   const access = await tx.sourceObjectGrant.findUnique({ where: {
     repositoryId_objectId: { repositoryId, objectId: blobId },
   } });
   if (!access) {
-    // Objects committed before v2 remain usable by the owning repository.
-    const legacy = await tx.sourceFileOperation.findFirst({ where: { objectId: blobId, changeset: { repositoryId } },
-      select: { objectId: true } });
+    const legacy = await tx.sourceFileOperation.findFirst({ where: {
+      objectId: blobId, changeset: { repositoryId },
+    }, select: { objectId: true } });
     if (!legacy) throw new SourceControlError(422, "OBJECT_UNAVAILABLE", "Object has not been staged in this repository");
   }
   const blob = await tx.sourceObject.findUnique({ where: { id: blobId } });
-  if (!blob || blob.kind !== "BLOB" || blob.byteSize !== blob.data.byteLength || objectId("BLOB", blob.data) !== blobId) {
-    throw new SourceControlError(409, "OBJECT_CORRUPT", "Missing or damaged immutable blob");
+  if (!blob || blob.kind !== "BLOB") {
+    throw new SourceControlError(409, "OBJECT_CORRUPT", "Missing immutable object");
   }
-  return blob.data;
+  if (blob.data) {
+    if (blob.byteSize !== BigInt(blob.data.byteLength) || objectId("BLOB", blob.data) !== blobId) {
+      throw new SourceControlError(409, "OBJECT_CORRUPT", "Damaged immutable blob");
+    }
+    return blob.data;
+  }
+  if (blob.externalId !== blobId) throw new SourceControlError(409, "OBJECT_CORRUPT", "Invalid external identity");
+  // Lock against orphan GC until changeset publication completes.
+  await tx.$queryRawUnsafe("SELECT id FROM \"StoredBlob\" WHERE id = $1 AND state = 'READY' FOR UPDATE", blobId);
+  const stored = await tx.storedBlob.findFirst({ where: { id: blobId, state: "READY" } });
+  if (!stored || stored.rawBytes !== blob.byteSize) {
+    throw new SourceControlError(409, "OBJECT_UNAVAILABLE", "External object is not published");
+  }
+  if (!asSymlink) return new Uint8Array(0); // Verified at publication; avoid full-file reads in transactions.
+  if (blob.byteSize > 4096n) throw new SourceControlError(422, "INVALID_SYMLINK", "Symlink target exceeds 4 KiB");
+  const chunks: Buffer[] = [];
+  for await (const part of await verifiedBlobStream(stored)) chunks.push(Buffer.from(part));
+  return Buffer.concat(chunks);
 }
 
 function checkSymlink(path: string, bytes: Uint8Array) {
@@ -170,8 +190,20 @@ export async function stageCanonicalBlob(repositoryId: string, dataBase64: unkno
 
 async function checkedBlobAfterInsert(tx: Tx, blobId: string) {
   const blob = await tx.sourceObject.findUnique({ where: { id: blobId } });
-  if (!blob || blob.kind !== "BLOB" || blob.byteSize !== blob.data.byteLength || objectId("BLOB", blob.data) !== blobId) {
-    throw new SourceControlError(409, "OBJECT_CORRUPT", "Stored object failed integrity verification");
+  if (!blob || blob.kind !== "BLOB") {
+    throw new SourceControlError(409, "OBJECT_CORRUPT", "Stored object missing");
+  }
+  if (blob.data) {
+    if (blob.byteSize !== BigInt(blob.data.byteLength) || objectId("BLOB", blob.data) !== blobId) {
+      throw new SourceControlError(409, "OBJECT_CORRUPT", "Stored object failed integrity verification");
+    }
+  } else {
+    if (blob.externalId !== blobId) throw new SourceControlError(409, "OBJECT_CORRUPT", "Invalid external object ID");
+    await tx.$queryRawUnsafe("SELECT id FROM \"StoredBlob\" WHERE id = $1 AND state = 'READY' FOR UPDATE", blobId);
+    const stored = await tx.storedBlob.findFirst({ where: { id: blobId, state: "READY" } });
+    if (!stored || stored.rawBytes !== blob.byteSize) {
+      throw new SourceControlError(409, "OBJECT_CORRUPT", "External blob is not ready");
+    }
   }
 }
 
@@ -216,11 +248,12 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
           const original = "previousPath" in op ? op.previousPath : null;
           // File modes and referenced contents are validated before any changeset row is inserted.
           if (op.kind === "ADD" || op.kind === "MODIFY") {
-            const bytes = await checkedBlob(tx, repositoryId, objectRef!);
-            if ((op.kind === "ADD" ? requestedMode : old?.mode) === "120000") checkSymlink(op.path, bytes);
+            const isSymlink = (op.kind === "ADD" ? requestedMode : old?.mode) === "120000";
+            const bytes = await checkedBlob(tx, repositoryId, objectRef!, isSymlink);
+            if (isSymlink) checkSymlink(op.path, bytes);
           } else if (op.kind === "COPY" || op.kind === "RENAME") {
             if (source?.mode === "120000") {
-              const bytes = await checkedBlob(tx, repositoryId, source.objectId);
+              const bytes = await checkedBlob(tx, repositoryId, source.objectId, true);
               checkSymlink(op.path, bytes);
             }
           }
