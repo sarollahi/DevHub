@@ -21,6 +21,7 @@ SourceObject holds immutable SHA-256 blobs. SourceObjectGrant gives an individua
 The base URL is /api/v2/repositories/{repositoryId}:
 
 - POST /objects: stage arbitrary bytes, represented by canonical base64; supports empty and binary objects.
+- GET /objects/{objectId}: retrieve a content-addressed object referenced by published repository history.
 - POST /changesets: atomically publish immutable file deltas, returning HTTP 201 for newly created or HTTP 200 for replay.
 - GET /changesets and GET /changesets/{id}: list and retrieve committed metadata.
 - GET /changesets/{id}/tree: transiently reconstruct a complete snapshot from first-parent deltas, without persisting another tree.
