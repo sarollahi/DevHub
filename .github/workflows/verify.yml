@@ -126,13 +126,7 @@ jobs:
           fetch-depth: 0
       - name: Scan committed history for credentials
         run: |
-          set +e
-          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git --no-banner --redact --exit-code 1 \
-            --report-format json --report-path /repo/.gitleaks-diagnostic.json /repo
-          result=$?
-          set -e
-          if [ "$result" -ne 0 ]; then
-            node -e 'const fs=require("node:fs"); const f=".gitleaks-diagnostic.json"; if(fs.existsSync(f)){const a=JSON.parse(fs.readFileSync(f,"utf8")); for(const x of a) console.log(JSON.stringify({rule:x.RuleID,file:x.File,line:x.StartLine,commit:x.Commit,fingerprint:x.Fingerprint}));}'
-          fi
-          rm -f .gitleaks-diagnostic.json
-          exit "$result"
+          # Scope to the checked-out PR merge head and its complete ancestry.
+          # --all would also scan unrelated feature refs fetched by checkout.
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git \
+            --no-banner --redact --exit-code 1 --log-opts="HEAD" /repo
