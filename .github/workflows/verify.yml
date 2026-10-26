@@ -90,8 +90,8 @@ jobs:
             -p 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER=devhub-local \
             -e MINIO_ROOT_PASSWORD=devhub-local-password-change-in-production \
-            minio/minio:latest server /data
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c \
+            cgr.dev/chainguard/minio:latest server /data
+          docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c \
             'until mc alias set local http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing local/devhub-objects'
       - name: PostgreSQL, Redis and object storage integration tests
         run: timeout --signal=TERM 300s npm run test:integration

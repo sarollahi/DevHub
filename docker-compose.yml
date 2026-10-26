@@ -29,7 +29,7 @@ services:
     volumes:
       - redis_data:/data
   minio:
-    image: minio/minio:latest
+    image: cgr.dev/chainguard/minio:latest
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -41,7 +41,7 @@ services:
     volumes:
       - minio_data:/data
   minio-init:
-    image: minio/mc:latest
+    image: cgr.dev/chainguard/minio-client:latest-dev
     depends_on:
       - minio
     entrypoint: ["/bin/sh", "-c"]
