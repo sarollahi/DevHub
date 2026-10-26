@@ -114,12 +114,9 @@ test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and 
     const name = "branches/hot";
     await mutateReference(repo.id, user.id, request(name, "CREATE", null, root));
     const attempts = Array.from({ length: 240 }, (_, i) => request(name, "UPDATE", 1, i % 2 ? left : right, "writer-" + suffix + "-" + i));
-    // Bounded waves avoid exhausting CI's database connection pool, with true
-    // simultaneous CAS contenders in each wave.
-    const outcomes: PromiseSettledResult<unknown>[] = [];
-    for (let n = 0; n < attempts.length; n += 30) {
-      outcomes.push(...await Promise.allSettled(attempts.slice(n, n + 30).map(input => mutateReference(repo.id, user.id, input))));
-    }
+    // Schedule all 240 writers together; the database is responsible for
+    // serialization on the hot row while unrelated refs remain independent.
+    const outcomes = await Promise.allSettled(attempts.map(input => mutateReference(repo.id, user.id, input)));
     assert.equal(outcomes.filter(r => r.status === "fulfilled").length, 1);
     assert.equal(outcomes.filter(r => r.status === "rejected").length, 239);
     assert.equal((await db.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId: repo.id, name } } })).generation, 2);
