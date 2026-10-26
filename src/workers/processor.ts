@@ -50,10 +50,8 @@ export async function processPreflight(message: ProcessMessage) {
   }
 }
 
-async function main() {
-  const connection = redisConnection();
-  const concurrency = Math.min(64, Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 4)));
-  const worker = new Worker<ProcessMessage>(QUEUE_NAME, async (job: Job<ProcessMessage>) => {
+export function createPreflightWorker(connection = redisConnection(), concurrency = Math.min(64, Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 4)))) {
+  return new Worker<ProcessMessage>(QUEUE_NAME, async (job: Job<ProcessMessage>) => {
     try { await processPreflight(job.data); }
     catch (error) {
       if (job.attemptsMade + 1 >= (job.opts.attempts || 1)) {
@@ -68,6 +66,12 @@ async function main() {
       throw error;
     }
   }, { connection, concurrency });
+}
+
+async function main() {
+  const connection = redisConnection();
+  const concurrency = Math.min(64, Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 4)));
+  const worker = createPreflightWorker(connection, concurrency);
   worker.on("failed", (job, error) => console.error("Preflight failed:", job?.id, error.message));
   const shutdown = async () => { await worker.close(); await connection.quit(); await db.$disconnect(); };
   process.once("SIGTERM", () => { void shutdown(); });
