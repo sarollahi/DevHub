@@ -221,6 +221,48 @@ export async function fileHistory(repositoryId: string, revision: string, path: 
   return { revision: id, path, firstParentOnly: true, records, truncated: events.length > selected.length };
 }
 
+// Path-impact search uses durable precomputed touches when available, with
+// canonical operations as a correctness-preserving fallback during indexing.
+export async function pathImpactQuery(repositoryId: string, revision: string, path: string, max = 100) {
+  if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
+  const id = await resolveRevision(repositoryId, revision);
+  const reachable = await ancestors(repositoryId, id);
+  const seen = new Set<string>();
+  const records: { changesetId: string; path: string; operationPath: string; role: string }[] = [];
+  const add = (changesetId: string, operationPath: string, role: string) => {
+    const key = changesetId + ":" + operationPath + ":" + role;
+    if (!seen.has(key)) { seen.add(key); records.push({ changesetId, path, operationPath, role }); }
+  };
+  for (const batch of chunks(reachable)) {
+    const complete = await db.sourceQueryIndexJob.findMany({
+      where: { changesetId: { in: batch }, state: "SUCCEEDED" }, select: { changesetId: true },
+    });
+    const indexedIds = complete.map(e => e.changesetId);
+    const indexed = new Set(indexedIds);
+    if (indexedIds.length) {
+      const touches = await db.sourceQueryPathTouch.findMany({ where: {
+        changesetId: { in: indexedIds }, path,
+      }, select: { changesetId: true, operationPath: true, role: true } });
+      for (const touch of touches) add(touch.changesetId, touch.operationPath, touch.role);
+    }
+    const missing = batch.filter(cid => !indexed.has(cid));
+    if (missing.length) {
+      const raw = await db.sourceFileOperation.findMany({ where: {
+        changesetId: { in: missing }, OR: [{ path }, { previousPath: path }],
+      }, select: { changesetId: true, path: true, previousPath: true } });
+      for (const op of raw) {
+        if (op.path === path) add(op.changesetId, op.path, "destination");
+        if (op.previousPath === path) add(op.changesetId, op.path, "source");
+      }
+    }
+  }
+  const order = new Map(reachable.map((value, index) => [value, index]));
+  records.sort((a, b) => order.get(a.changesetId)! - order.get(b.changesetId)!);
+  const size = limitQuery(max, 1000);
+  return { revision: id, path, records: records.slice(0, size), total: records.length,
+    truncated: records.length > size };
+}
+
 export async function blameQuery(repositoryId: string, revision: string, path: string, maxHistory = 500) {
   const entry = await resolvePath(repositoryId, revision, path);
   if (entry.kind !== "file" || !entry.objectId) throw new SourceControlError(422, "NOT_A_FILE", "Blame requires a file");
