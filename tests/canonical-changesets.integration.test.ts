@@ -87,7 +87,7 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
 
   await t.test("v2 delta changesets are queryable without client checkout", async () => {
     const ancestry = await ancestryQuery(repo.id, merge.id, right.id);
-    assert.deepEqual(ancestry.mergeBases, [root.id]);
+    assert.deepEqual(ancestry.mergeBases, [right.id]);
     const comparison = await compareQuery(repo.id, root.id, left.id);
     assert.ok(comparison.changes.some(item => item.path === "docs/a.txt" && item.kind === "MODIFY"));
     const tree = await treeQuery(repo.id, merge.id, "docs", 20);
