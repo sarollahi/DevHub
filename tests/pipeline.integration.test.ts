@@ -19,7 +19,8 @@ test("real PostgreSQL and Redis: admission, outbox, durable retries and human ap
   const forbiddenAgent = await db.agentIdentity.create({ data: { ownerId: outsider.id, name: "integration", scopes: ["pull_requests:write"] } });
   const secret = randomBytes(32).toString("hex");
   await db.agentCredential.create({ data: { agentId: agent.id, tokenHash: tokenHash(secret), label: "integration" } });
-  const queue = createQueue();
+  const queueConnection = redisConnection();
+  const queue = createQueue(queueConnection);
   let worker: ReturnType<typeof createPreflightWorker> | undefined;
   const workerConnection = redisConnection();
   const ids: string[] = [];
@@ -28,6 +29,7 @@ test("real PostgreSQL and Redis: admission, outbox, durable retries and human ap
     if (worker) await worker.close();
     await queue.obliterate({ force: true });
     await queue.close();
+    await queueConnection.quit();
     await workerConnection.quit();
     await db.outboxEvent.deleteMany({ where: { aggregateId: { in: ids } } });
     await db.auditEvent.deleteMany({ where: { repositoryId: repo.id } });
