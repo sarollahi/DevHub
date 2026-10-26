@@ -25,8 +25,14 @@ export function adminTokenValid(token: string): boolean {
 export async function isAdminRequest(request?: Request): Promise<boolean> {
   const bearer = request?.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1];
   if (bearer) return adminTokenValid(bearer);
-  const session = (await cookies()).get(COOKIE_NAME)?.value;
-  return !!session && constantEqual(session, secureSessionValue());
+  // Direct route handlers may also run in service tests without Next request
+  // async storage. No request context must mean unauthenticated, not HTTP 500.
+  try {
+    const session = (await cookies()).get(COOKIE_NAME)?.value;
+    return !!session && constantEqual(session, secureSessionValue());
+  } catch {
+    return false;
+  }
 }
 export function verifyBrowserOrigin(req: Request): boolean {
   const origin = req.headers.get("origin");
