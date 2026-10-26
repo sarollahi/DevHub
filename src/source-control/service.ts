@@ -5,6 +5,7 @@ import { validPath } from "../lib/review-logic";
 import { changesetInputSchema, SourceControlError, type SourceActor, type FileOperation, type ChangesetReceipt } from "./contracts";
 import { decodeBlob, decodeTree, encodeTree, objectId } from "./storage";
 import { deriveChangesetMetadata } from "./derived";
+import { getCanonicalSnapshot } from "./canonical";
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const refName = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
@@ -38,7 +39,11 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
     const parents = await tx.sourceChangeset.findMany({ where: { id: { in: input.parents }, repositoryId }, select: { id: true, treeId: true } });
     if (parents.length !== input.parents.length) throw new SourceControlError(422, "UNKNOWN_PARENT", "Parent not found in this repository");
     const baseId = input.parents[0];
-    const tree = baseId ? await tx.sourceObject.findUnique({ where: { id: parents.find(p => p.id === baseId)!.treeId } }) : null;
+    const legacyTreeId = baseId ? parents.find(p => p.id === baseId)?.treeId : null;
+    if (baseId && !legacyTreeId) {
+      throw new SourceControlError(409, "PARENT_VERSION_UNSUPPORTED", "The v1 writer cannot extend a v2 delta changeset; use the v2 API");
+    }
+    const tree = legacyTreeId ? await tx.sourceObject.findUnique({ where: { id: legacyTreeId } }) : null;
     if (tree && tree.kind !== "TREE") throw new Error("Parent references a non-tree object");
     const manifest = new Map((tree ? decodeTree(tree.data, tree.id) : []).map(e => [e.path, e.objectId]));
     for (const operation of operations) {
@@ -97,6 +102,7 @@ export async function getTree(repositoryId: string, changesetId: string) {
   const change = await db.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId },
     include: { tree: true } });
   if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
+  if (!change.treeId || !change.tree) return getCanonicalSnapshot(repositoryId, changesetId);
   return { changesetId: change.id, treeId: change.treeId, entries: decodeTree(change.tree.data, change.treeId) };
 }
 
