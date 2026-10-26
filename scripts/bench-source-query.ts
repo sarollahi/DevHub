@@ -43,7 +43,7 @@ const elapsed = async <T>(label: string, task: () => Promise<T>) => {
 };
 
 try {
-  await db.sourceObject.createMany({ data: [{ id: treeId, kind: "TREE", data: treeBytes, byteSize: treeBytes.byteLength }],
+  await db.sourceObject.createMany({ data: [{ id: treeId, kind: "TREE", data: Uint8Array.from(treeBytes), byteSize: treeBytes.byteLength }],
     skipDuplicates: true });
   const root = hash(token + ":root");
   await insertGroup([root]);
