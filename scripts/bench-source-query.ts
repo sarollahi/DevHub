@@ -22,17 +22,21 @@ const commits: string[] = [];
 const parentRows: { changesetId: string; parentId: string; position: number }[] = [];
 
 async function insertGroup(ids: string[]) {
-  for (let i = 0; i < ids.length; i += 500) {
-    await db.sourceChangeset.createMany({ data: ids.slice(i, i + 500).map(id => ({
-      id, repositoryId: repo.id, treeId, authorId: "BENCHMARK", message: "Synthetic ancestry benchmark vertex",
-    })) });
-  }
   commits.push(...ids);
 }
-async function insertEdges() {
-  for (let i = 0; i < parentRows.length; i += 500) {
-    await db.sourceChangesetParent.createMany({ data: parentRows.slice(i, i + 500) });
-  }
+// Immutable detail rows must be published by the *same transaction* as their
+// changeset headers. This benchmark intentionally exercises that constraint.
+async function insertGraph() {
+  await db.$transaction(async tx => {
+    for (let i = 0; i < commits.length; i += 400) {
+      await tx.sourceChangeset.createMany({ data: commits.slice(i, i + 400).map(id => ({
+        id, repositoryId: repo.id, treeId, authorId: "BENCHMARK", message: "Synthetic ancestry benchmark vertex",
+      })) });
+    }
+    for (let i = 0; i < parentRows.length; i += 400) {
+      await tx.sourceChangesetParent.createMany({ data: parentRows.slice(i, i + 400) });
+    }
+  }, { timeout: 120000, maxWait: 15000 });
 }
 const elapsed = async <T>(label: string, task: () => Promise<T>) => {
   const start = performance.now();
@@ -48,13 +52,13 @@ try {
   const root = hash(token + ":root");
   await insertGroup([root]);
   const deepIds = Array.from({ length: depth }, (_, i) => hash(token + ":deep:" + i));
-  await elapsed("build deep DAG", async () => {
+  await elapsed("prepare deep DAG", async () => {
     await insertGroup(deepIds);
     deepIds.forEach((id, i) => parentRows.push({ changesetId: id, parentId: i ? deepIds[i - 1] : root, position: 0 }));
   });
   let previous = [root];
   const wideLayers: string[][] = [];
-  await elapsed("build wide DAG", async () => {
+  await elapsed("prepare wide DAG", async () => {
     for (let layer = 0; layer < layers; layer++) {
       const current = Array.from({ length: width }, (_, i) => hash(token + ":wide:" + layer + ":" + i));
       await insertGroup(current);
@@ -65,8 +69,8 @@ try {
       wideLayers.push(current);
       previous = current;
     }
-    await insertEdges();
   });
+  await elapsed("publish benchmark DAG", () => insertGraph());
   const deep = await elapsed("deep ancestry", () => ancestors(repo.id, deepIds.at(-1)!));
   if (deep.length !== depth + 1) throw new Error("Incorrect deep ancestry cardinality");
   const wide = await elapsed("wide ancestry", () => ancestors(repo.id, wideLayers.at(-1)![0]));
