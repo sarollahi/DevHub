@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
+import { gzipSync } from "node:zlib";
 import { db } from "../src/lib/prisma";
-import { uploadBlob, verifiedBlobStream, verifyBlob, cleanupObjects } from "../src/object-store/service";
+import { uploadBlob, verifiedBlobStream, verifyBlob, cleanupObjects, recoverPublications } from "../src/object-store/service";
 import { s3, objectKey } from "../src/object-store/s3";
 import { createChangeset, getTree } from "../src/source-control/service";
 
@@ -105,6 +106,41 @@ test("immutable S3 objects with real PostgreSQL and MinIO", { timeout: 180000 },
     const cleaned = await cleanupObjects(backend);
     assert.ok(cleaned.deleted > 0);
     assert.equal(await db.storedBlob.findUnique({ where: { id: receipt.id } }), null);
+  });
+
+  await t.test("expired publication is recovered from real staged bytes", async () => {
+    const bytes = randomBytes(2048);
+    const objectId = idOf(bytes);
+    const staging = "staging/" + repo.id + "/" + randomUUID();
+    const compressed = gzipSync(bytes);
+    const multipart = await backend.initiate(staging);
+    const part = await backend.part(staging, multipart, 1, compressed);
+    await backend.complete(staging, multipart, [part]);
+    owned.push(objectId);
+    try {
+      await db.storedBlob.create({ data: {
+        id: objectId,
+        objectKey: objectKey(objectId),
+        state: "PUBLISHING",
+        stagingKey: staging,
+        publisherId: randomUUID(),
+        publishLeaseUntil: expired(),
+        retainUntil: new Date(Date.now() + 86400000),
+        encoding: "gzip",
+        rawSha256: createHash("sha256").update(bytes).digest("hex"),
+        rawBytes: BigInt(bytes.length),
+        storedBytes: BigInt(compressed.length),
+      } });
+      assert.equal(await recoverPublications(backend), 1);
+      const published = await db.storedBlob.findUniqueOrThrow({ where: { id: objectId } });
+      assert.equal(published.state, "READY");
+      await verifyBlob(published, backend);
+      const received: Buffer[] = [];
+      for await (const chunk of await verifiedBlobStream(published, backend)) received.push(Buffer.from(chunk));
+      assert.deepEqual(Buffer.concat(received), bytes);
+    } finally {
+      await backend.delete(staging);
+    }
   });
 
   await t.test("interrupted multipart transfers remain durable and are later aborted", async () => {

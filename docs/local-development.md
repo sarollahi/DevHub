@@ -42,4 +42,21 @@ MinIO image distribution changed in September 2026: the retired Docker Hub image
 
 ## Measured streaming checks
 
-Run npm run storage:stress against a local development database and MinIO. The stress script creates a temporary repository and uploads, verifies, then downloads 3 GiB from a constant 64 KiB input buffer; it prints measured wall time, compressed bytes, peak process RSS and peak heap as JSON. It fails if measured peak RSS exceeds 512 MiB. Set STORAGE_STRESS_REPOSITORY_ID to a dedicated existing repository UUID to use that repository instead. The CI feature branch also executes this stress script once; do not interpret CI timing as a production SLA.
+Run npm run storage:stress against a local development database and MinIO. The stress script creates a temporary repository and uploads, verifies, then downloads 3 GiB from a constant 64 KiB input buffer; it prints measured wall time, compressed bytes, peak process RSS and peak heap as JSON. It fails if measured peak RSS exceeds 512 MiB. Set STORAGE_STRESS_REPOSITORY_ID to a dedicated existing repository UUID to use that repository instead. The feature-branch PR verification executes this stress script; do not interpret CI timing as a production SLA.
+
+
+## Verified CI measurements (26 October 2026)
+
+Observed on a GitHub Actions Ubuntu 24.04 runner, Node.js 22.18, PostgreSQL 16 and an ephemeral MinIO container (workflow Verify, run 40383375730):
+
+| Operation | Measured result |
+| --- | --- |
+| Raw binary streamed and re-read | 3,221,225,472 bytes (3 GiB) |
+| Gzip bytes physically stored | 3,222,208,547 bytes (essentially incompressible sample) |
+| Combined upload + verified download wall time | 158,345 ms |
+| Peak Node process RSS | 226,992,128 bytes (216.5 MiB) |
+| Peak Node process heap | 15,885,520 bytes (15.2 MiB) |
+| Maximum multipart upload buffer | 16,777,216 bytes (16 MiB) |
+| Final SHA-256 check and cleanup | Passed |
+
+These are observations for one CI run, not an SLA or a guarantee of throughput in other deployments. Peak RSS does not include PostgreSQL or MinIO processes, OS filesystem cache, or other containers. The larger test uses a repeated cryptographically random 64 KiB chunk, which is not highly compressible over the 32 KiB deflate window. It measures network/storage pipeline buffering rather than independent random bytes for all 3 GiB.
