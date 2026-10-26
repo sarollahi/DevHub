@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, chmod, symlink, readdir, lstat, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, chmod, symlink, readdir, lstat, readFile, rm } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { tmpdir, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { Prisma, type ValidationTask } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
-import { objectId } from "../source-control/storage";
-import { snapshotFor, verifiedBlob, type Entry } from "./snapshot";
+import { snapshotFor, verifiedBlobSource, type Entry } from "./snapshot";
 import { digest, signTask, verifyTask } from "./policy";
 import { refreshPipeline } from "./service";
 
@@ -62,20 +63,34 @@ export async function claimTask():Promise<Claimed|null> {
 }
 async function materialize(root:string,entries:Entry[],repoId:string) {
   const links:Array<{path:string;bytes:Buffer}>=[];
+  let count=0;
   for(const entry of entries) {
-    if(!validPath(entry.path)) throw new Error("Invalid immutable path");
-    const bytes=await verifiedBlob(entry.objectId,repoId);
-    if(objectId("BLOB",bytes)!==entry.objectId) throw new Error("Blob integrity failure");
+    if(!validPath(entry.path))throw new Error("Invalid immutable path");
+    if(++count>250000)throw new Error("Workspace has too many files");
     const path=join(root,entry.path);
-    if(entry.mode==="120000") {links.push({path,bytes});continue;}
-    if(!["100644","100755"].includes(entry.mode)) throw new Error("Invalid file mode");
+    const contents=await verifiedBlobSource(entry.objectId,repoId);
+    if(entry.mode==="120000"){
+      let total=0;const chunks:Buffer[]=[];
+      for await(const chunk of contents) {
+        const part=Buffer.from(chunk);
+        total+=part.length;
+        if(total>4096)throw new Error("Symlink target exceeds maximum size");
+        chunks.push(part);
+      }
+      links.push({path,bytes:Buffer.concat(chunks)});
+      continue;
+    }
+    if(!["100644","100755"].includes(entry.mode))throw new Error("Unsupported immutable file mode");
     await mkdir(dirname(path),{recursive:true});
-    await writeFile(path,bytes,{flag:"wx",mode:entry.mode==="100755"?0o755:0o644});
+    // VerifiedBlobStream fails closed on corrupt or truncated remote objects.
+    await pipeline(contents,createWriteStream(path,{flags:"wx",
+      mode:entry.mode==="100755"?0o755:0o644}));
   }
-  for(const link of links) {
+  // Link creation follows writes so no source materialization traverses untrusted links.
+  for(const link of links){
     await mkdir(dirname(link.path),{recursive:true});
     const target=new TextDecoder("utf-8",{fatal:true}).decode(link.bytes);
-    if(target.startsWith("/")||target.includes("\0")) throw new Error("Unsafe symlink");
+    if(target.startsWith("/")||target.includes("\0"))throw new Error("Unsafe symlink");
     await symlink(target,link.path);
   }
   await chmod(root,0o755);
