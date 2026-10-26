@@ -113,6 +113,10 @@ test("native indexed query APIs agree with independent DAG reference and Git fix
     assert.equal(good.clean, true);
     assert.ok(good.entries.some(e => e.path === "src/new.ts"));
     assert.equal((await mergeQuery(repository.id, left, other)).clean, false);
+    const id = objectId("BLOB", Buffer.from("same"));
+    const original = [{ path: "old", objectId: id }];
+    assert.equal(mergeEntries(original, [{ path: "left", objectId: id }], [{ path: "right", objectId: id }]).conflicts.length, 1);
+    assert.equal(mergeEntries(original, [{ path: "left", objectId: id }], []).conflicts.length, 1);
     const rebased = await rebaseQuery(repository.id, left, right);
     assert.equal(rebased.clean, true);
     assert.equal(rebased.published, false);
