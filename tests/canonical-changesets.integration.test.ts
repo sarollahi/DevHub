@@ -191,6 +191,11 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
       authorization: "Bearer " + token,
     } }), { params: Promise.resolve({ id: repo.id, changesetId: made.id }) });
     assert.equal(read.status, 200);
+    const oversized = await blobApi(new NextRequest(uri + "/objects", { method: "POST",
+      headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+      body: JSON.stringify({ dataBase64: "A".repeat(6_100_000) }),
+    }), params);
+    assert.equal(oversized.status, 413);
     const uploaded = await blobApi(new NextRequest(uri + "/objects", { method: "POST",
       headers: { authorization: "Bearer " + token, "content-type": "application/json" },
       body: JSON.stringify({ dataBase64: encode("HTTP payload") }),
