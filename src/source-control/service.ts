@@ -9,7 +9,7 @@ import { deriveChangesetMetadata } from "./derived";
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const refName = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
-export async function createChangeset(repositoryId: string, actor: SourceActor, body: unknown): Promise<ChangesetReceipt> {
+export async function createChangeset(repositoryId: string, actor: SourceActor, body: unknown, retryCount = 0): Promise<ChangesetReceipt> {
   const parsed = changesetInputSchema.safeParse(body);
   if (!parsed.success) throw new SourceControlError(422, "INVALID_INPUT", parsed.error.issues.map(i => i.message).join("; "));
   const input = parsed.data;
@@ -73,12 +73,10 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
       action: "changeset.created", subjectId: id, metadata: { treeId, parentCount: input.parents.length, operationCount: operations.length } } });
     return { id, treeId, created: true };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout: 20000, maxWait: 15000 }).catch(async error => {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      // Concurrent delivery of an identical immutable changeset is an idempotent replay.
-      // Its descriptor contains all author, parent, tree and operation inputs.
-      const known = await db.sourceChangeset.findMany({ where: { repositoryId }, orderBy: { createdAt: "desc" }, take: 20 });
-      // Unrelated unique collisions must propagate instead of masquerading as success.
-      if (known.length) throw new SourceControlError(409, "RETRY_SAME_CHANGESET", "Concurrent insert conflict; retry the identical request");
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002" && retryCount < 2) {
+      // A concurrent writer can win a content-addressed insert; retry reads
+      // its immutable result instead of creating a second record.
+      return createChangeset(repositoryId, actor, body, retryCount + 1);
     }
     throw error;
   });
@@ -155,5 +153,10 @@ export async function advanceReference(repositoryId: string, name: string, chang
     await tx.auditEvent.create({ data: { repositoryId, actorType: "HUMAN", actorId, action: "reference.advanced", subjectId: changesetId,
       metadata: { name, previousGeneration: expectedGeneration } } });
     return tx.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId, name } } });
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }).catch(error => {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference was created concurrently");
+    }
+    throw error;
+  });
 }
