@@ -55,6 +55,23 @@ export function mergeEntries(base: TreeEntry[], ours: TreeEntry[], theirs: TreeE
     }
     if (selected !== undefined) result.set(path, selected);
   }
+  // Object-level comparison alone would incorrectly treat rename/rename and
+  // rename/delete as two independent paths. Never preview those as clean.
+  const movedA = new Map(compareEntries(base, ours).filter(x => x.kind === "RENAME")
+    .map(x => [x.previousPath!, x.path]));
+  const movedC = new Map(compareEntries(base, theirs).filter(x => x.kind === "RENAME")
+    .map(x => [x.previousPath!, x.path]));
+  for (const source of new Set([...movedA.keys(), ...movedC.keys()])) {
+    const leftMove = movedA.get(source);
+    const rightMove = movedC.get(source);
+    const conflictingMoves = leftMove && rightMove && leftMove !== rightMove;
+    const moveVsDelete = (leftMove && !rightMove && !c.has(source)) ||
+      (rightMove && !leftMove && !a.has(source));
+    if (conflictingMoves || moveVsDelete) {
+      conflicts.push({ path: source, base: b.get(source) ?? null,
+        ours: a.get(source) ?? null, theirs: c.get(source) ?? null });
+    }
+  }
   return { entries: [...result].map(([path, objectId]) => ({ path, objectId })).sort((x, y) => x.path.localeCompare(y.path)), conflicts };
 }
 
