@@ -359,6 +359,9 @@ model SourceFileOperation {
 model SourceValidation {
   changesetId String          @id @db.Char(64)
   state       CheckState
+  riskTier    RiskTier
+  riskScore   Int
+  touchedPaths String[]
   summary     String
   checkedAt   DateTime        @default(now())
   changeset   SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Cascade)
