@@ -256,11 +256,10 @@ export async function startFromEnvironment() {
     originToken: env.DEVHUB_ORIGIN_TOKEN,
     regionalUrl: env.DEVHUB_REGIONAL_URL,
     regionalToken: env.DEVHUB_REGIONAL_TOKEN,
-    maxDiskBytes: env.DEVHUB_CACHE_DISK_BYTES ? Number(env.DEVHUB_CACHE_DISK_BYTES) : undefined,
-    maxObjectBytes: env.DEVHUB_CACHE_OBJECT_BYTES ? Number(env.DEVHUB_CACHE_OBJECT_BYTES) : undefined,
+    ...(env.DEVHUB_CACHE_DISK_BYTES ? { maxDiskBytes: Number(env.DEVHUB_CACHE_DISK_BYTES) } : {}),
+    ...(env.DEVHUB_CACHE_OBJECT_BYTES ? { maxObjectBytes: Number(env.DEVHUB_CACHE_OBJECT_BYTES) } : {}),
     allowedRepositories: env.DEVHUB_CACHE_REPOSITORIES?.split(',').filter(Boolean),
   });
-  for (const key of ['maxDiskBytes', 'maxObjectBytes']) if (cache.options[key] === undefined) cache.options[key] = key === 'maxDiskBytes' ? 512 * 1024 * 1024 : 16 * 1024 * 1024;
   await cache.start();
   const shutdown = async () => { await cache.close(); process.exit(0); };
   process.once('SIGTERM', shutdown); process.once('SIGINT', shutdown);
