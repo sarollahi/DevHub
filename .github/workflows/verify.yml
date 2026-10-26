@@ -126,4 +126,13 @@ jobs:
           fetch-depth: 0
       - name: Scan committed history for credentials
         run: |
-          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git --no-banner --redact --exit-code 1 /repo
+          set +e
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git --no-banner --redact --exit-code 1 \
+            --report-format json --report-path /repo/.gitleaks-diagnostic.json /repo
+          result=$?
+          set -e
+          if [ "$result" -ne 0 ]; then
+            node -e 'const fs=require("node:fs"); const f=".gitleaks-diagnostic.json"; if(fs.existsSync(f)){const a=JSON.parse(fs.readFileSync(f,"utf8")); for(const x of a) console.log(JSON.stringify({rule:x.RuleID,file:x.File,line:x.StartLine,commit:x.Commit,fingerprint:x.Fingerprint}));}'
+          fi
+          rm -f .gitleaks-diagnostic.json
+          exit "$result"
