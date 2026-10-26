@@ -67,3 +67,34 @@ CREATE TRIGGER "SourcePublicationKey_immutable" BEFORE UPDATE OR DELETE ON "Sour
   FOR EACH ROW EXECUTE FUNCTION "reject_source_mutation"();
 CREATE TRIGGER "SourceChangesetEvent_immutable" BEFORE UPDATE OR DELETE ON "SourceChangesetEvent"
   FOR EACH ROW EXECUTE FUNCTION "reject_source_mutation"();
+
+-- Detail rows must be inserted in the same transaction that creates their
+-- immutable header. Otherwise a later INSERT could silently rewrite history
+-- without performing an UPDATE against an immutable row.
+CREATE FUNCTION "check_source_detail_publication"() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+  header_repo UUID;
+  header_tx TEXT;
+BEGIN
+  SELECT c."repositoryId", c.xmin::text INTO header_repo, header_tx
+  FROM "SourceChangeset" c WHERE c.id = NEW."changesetId";
+  IF header_tx IS NULL OR header_tx <> (txid_current() % 4294967296)::text THEN
+    RAISE EXCEPTION 'Immutable changeset details may only be inserted in the publication transaction';
+  END IF;
+  IF TG_TABLE_NAME = 'SourceChangesetParent' AND NOT EXISTS (
+    SELECT 1 FROM "SourceChangeset" p WHERE p.id = NEW."parentId" AND p."repositoryId" = header_repo
+  ) THEN
+    RAISE EXCEPTION 'Parent must be committed in the same repository';
+  END IF;
+  IF TG_TABLE_NAME = 'SourceChangesetEvent' AND NEW."repositoryId" <> header_repo THEN
+    RAISE EXCEPTION 'Publication event repository mismatch';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER "SourceFileOperation_publication_only" BEFORE INSERT ON "SourceFileOperation"
+  FOR EACH ROW EXECUTE FUNCTION "check_source_detail_publication"();
+CREATE TRIGGER "SourceChangesetParent_publication_only" BEFORE INSERT ON "SourceChangesetParent"
+  FOR EACH ROW EXECUTE FUNCTION "check_source_detail_publication"();
+CREATE TRIGGER "SourceChangesetEvent_publication_only" BEFORE INSERT ON "SourceChangesetEvent"
+  FOR EACH ROW EXECUTE FUNCTION "check_source_detail_publication"();
