@@ -12,7 +12,7 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: write
     services:
@@ -96,7 +96,7 @@ jobs:
       - name: PostgreSQL, Redis and object storage integration tests
         run: timeout --signal=TERM 300s npm run test:integration
       - name: Multi-gigabyte streaming and bounded-RSS verification
-        if: github.event_name == 'push' && github.ref_name == 'feature/immutable-object-storage'
+        if: github.ref_name == 'feature/immutable-object-storage' || github.head_ref == 'feature/immutable-object-storage'
         run: timeout --signal=TERM 600s npm run storage:stress
       - name: Production build
         run: npm run build

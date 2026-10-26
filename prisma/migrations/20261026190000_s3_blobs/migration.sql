@@ -37,6 +37,7 @@ CREATE TABLE "BlobTransfer" (
 );
 CREATE INDEX "BlobTransfer_state_updatedAt_idx" ON "BlobTransfer"("state", "updatedAt");
 ALTER TABLE "SourceObject" ALTER COLUMN "data" DROP NOT NULL;
+ALTER TABLE "SourceObject" ALTER COLUMN "byteSize" TYPE BIGINT;
 ALTER TABLE "SourceObject" ADD COLUMN "externalId" CHAR(64) UNIQUE;
 ALTER TABLE "SourceObject" ADD CONSTRAINT "SourceObject_externalId_fkey"
   FOREIGN KEY ("externalId") REFERENCES "StoredBlob"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

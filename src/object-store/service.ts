@@ -91,6 +91,7 @@ export async function uploadBlob(repositoryId: string, readable: Readable,
   await db.blobTransfer.create({ data: { id: transferId, repositoryId, stagingKey } });
   let multipartId: string | undefined;
   let complete = false;
+  let compressed: ReturnType<typeof createGzip> | undefined;
   const started = Date.now();
   try {
     multipartId = await backend.initiate(stagingKey);
@@ -107,6 +108,7 @@ export async function uploadBlob(repositoryId: string, readable: Readable,
       },
     });
     const gzip = createGzip({ level: 6 });
+    compressed = gzip;
     readable.pipe(hashInput).pipe(gzip);
     readable.on("error", error => hashInput.destroy(error));
     hashInput.on("error", error => gzip.destroy(error));
@@ -150,6 +152,8 @@ export async function uploadBlob(repositoryId: string, readable: Readable,
     metric("uploaded", { rawBytes, storedBytes, deduplicated: String(deduplicated), latencyMs: Date.now() - started });
     return { id: objectId, rawBytes: String(rawBytes), storedBytes: String(storedBytes), deduplicated };
   } catch (error) {
+    readable.destroy();
+    compressed?.destroy();
     metric("upload_failed", { latencyMs: Date.now() - started });
     if (!complete && multipartId) await backend.abort(stagingKey, multipartId).catch(() => {});
     await db.blobTransfer.update({ where: { id: transferId }, data: { state: "FAILED" } }).catch(() => {});

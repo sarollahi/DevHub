@@ -76,7 +76,7 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
       const previouslyLinked = await tx.sourceFileOperation.findFirst({ where: { objectId: externalId, changeset: { repositoryId } } });
       if (!row || (!lease && !previouslyLinked)) throw new SourceControlError(422, "OBJECT_NOT_PUBLISHED", "Upload the object to this repository before referencing it");
       externalRows.push({ id: externalId, kind: "BLOB" as const, data: null, externalId,
-        byteSize: Math.min(Number(row.rawBytes), 2147483647) });
+        byteSize: row.rawBytes });
     }
     await tx.sourceObject.createMany({ data: [...blobs, ...externalRows,
       { id: treeId, kind: "TREE" as const, data: Uint8Array.from(treeBytes), byteSize: treeBytes.length }], skipDuplicates: true });
@@ -128,7 +128,7 @@ export async function getObject(repositoryId: string, id: string) {
   if (!object) throw new Error("Stored object missing");
   if (!object.data) throw new SourceControlError(413, "STREAM_REQUIRED", "Use /objects/{objectId}/content to stream large stored blobs");
   if (objectId(object.kind, object.data) !== object.id) throw new Error("Stored object failed integrity verification");
-  return { id: object.id, kind: object.kind, byteSize: object.byteSize, dataBase64: Buffer.from(object.data).toString("base64") };
+  return { id: object.id, kind: object.kind, byteSize: Number(object.byteSize), dataBase64: Buffer.from(object.data).toString("base64") };
 }
 
 export async function approveChangeset(repositoryId: string, id: string, ownerId: string) {

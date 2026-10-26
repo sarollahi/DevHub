@@ -313,7 +313,7 @@ model SourceObject {
   data        Bytes?                @db.ByteA
   externalId  String?               @unique @db.Char(64)
   external    StoredBlob?           @relation(fields: [externalId], references: [id], onDelete: Restrict)
-  byteSize    Int
+  byteSize    BigInt
   createdAt   DateTime              @default(now())
   trees       SourceChangeset[]     @relation("ChangesetTree")
   operations  SourceFileOperation[] @relation("FileObject")
