@@ -1,31 +1,106 @@
 name: Verify
 on:
   push:
-    branches: [main, develop]
+    branches: [develop, "feature/**"]
   pull_request:
+    branches: [develop]
+permissions:
+  contents: read
 jobs:
   checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: devhub
+          POSTGRES_PASSWORD: devhub
+          POSTGRES_DB: devhub
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U devhub -d devhub"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      REDIS_URL: redis://localhost:6379
+      APP_SECRET: ci-only-long-random-testing-secret-123456789
+      ADMIN_TOKEN: ci-only-long-admin-testing-secret-123456789
+      BOOTSTRAP_AGENT_TOKEN: ci-only-long-agent-testing-secret-123456789
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'push' && github.ref_name || '' }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+      # The initial source snapshot predates its lockfile. Bootstrap exactly once
+      # on the isolated feature branch; all subsequent runs install from the lock.
+      - name: Bootstrap lockfile on foundation branch
+        if: github.event_name == 'push' && github.ref_name == 'feature/phase-1-baseline'
+        run: |
+          if [ ! -f package-lock.json ]; then
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+            git config user.name "Seyed Ahmad Sarollahi"
+            git config user.email "ahmad.sarollahi@gmail.com"
+            git add package-lock.json
+            git commit -m "build: add reproducible npm dependency lock"
+            git push origin HEAD:feature/phase-1-baseline
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install from lockfile
+        run: npm ci --no-audit --no-fund
+      - name: Validate database schema
+        run: npx prisma validate
+      - name: Generate database client
+        run: npm run db:generate
+      - name: Apply checked-in migrations
+        run: npm run db:deploy
+      - name: Verify migration status
+        run: npx prisma migrate status
+      - name: Type-check
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: PostgreSQL and Redis integration tests
+        run: npm run test:integration
+      - name: Production build
+        run: npm run build
+      - name: Start server against real database
+        run: |
+          npm run start -- -p 3000 > /tmp/devhub-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:3000/api/health >/tmp/devhub-health.json; then
+              cat /tmp/devhub-health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/devhub-server.log
+          exit 1
+  credential-scan:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: '22.18'
-          cache: npm
-      # A lockfile should be generated and committed once package registry access is available.
-      - run: npm install --no-audit --no-fund
-      - run: npx prisma validate
-        env:
-          DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub
-      - run: npm run db:generate
-        env:
-          DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-        env:
-          DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub
-          APP_SECRET: ci-only-long-random-testing-secret-123456789
-          ADMIN_TOKEN: ci-only-long-admin-testing-secret-123456789
+          fetch-depth: 0
+      - name: Scan committed history for credentials
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git --source /repo --no-banner --redact --exit-code 1
