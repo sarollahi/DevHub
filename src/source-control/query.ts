@@ -3,13 +3,28 @@ import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry } from "./contracts";
 import { decodeTree, encodeTree, objectId } from "./storage";
-import { getTree } from "./service";
+import { getTree as readTree } from "./service";
 import { blameLines, compareEntries, mergeEntries, textPatch } from "./query-algorithms";
 
 const digest = /^[a-f0-9]{64}$/;
 const chunks = <T>(values: T[], size = 800): T[][] =>
   Array.from({ length: Math.ceil(values.length / size) }, (_, i) => values.slice(i * size, (i + 1) * size));
 const limitQuery = (number: number, max = 200) => Number.isSafeInteger(number) && number > 0 ? Math.min(max, number) : 50;
+
+// Immutable revisions are safe to cache after repository authorization.
+// LRU bound prevents unbounded server memory growth across repositories.
+type TreeResult = Awaited<ReturnType<typeof readTree>>;
+const treeCache = new Map<string, TreeResult>();
+async function cachedTree(repositoryId: string, id: string): Promise<TreeResult> {
+  const key = repositoryId + ":" + id;
+  const cached = treeCache.get(key);
+  if (cached) { treeCache.delete(key); treeCache.set(key, cached); return cached; }
+  const value = await readTree(repositoryId, id);
+  treeCache.set(key, value);
+  if (treeCache.size > 24) treeCache.delete(treeCache.keys().next().value!);
+  return value;
+}
+
 
 export async function resolveRevision(repositoryId: string, revision: string): Promise<string> {
   if (!revision || revision.length > 200) throw new SourceControlError(422, "INVALID_REVISION", "A revision digest or reference name is required");
@@ -75,7 +90,7 @@ export async function ancestryQuery(repositoryId: string, revision: string, othe
 export async function treeQuery(repositoryId: string, revision: string, directory = "", max = 200, cursor = "") {
   if (directory && !validPath(directory)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
-  const tree = await getTree(repositoryId, id);
+  const tree = await cachedTree(repositoryId, id);
   const prefix = directory ? directory + "/" : "";
   const descendants = tree.entries.filter(e => e.path.startsWith(prefix));
   const children = new Map<string, { path: string; kind: "file" | "directory"; objectId?: string }>();
@@ -96,7 +111,7 @@ export async function treeQuery(repositoryId: string, revision: string, director
 export async function resolvePath(repositoryId: string, revision: string, path: string) {
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
-  const tree = await getTree(repositoryId, id);
+  const tree = await cachedTree(repositoryId, id);
   const entry = tree.entries.find(e => e.path === path);
   if (entry) return { revision: id, path, kind: "file", objectId: entry.objectId };
   if (tree.entries.some(e => e.path.startsWith(path + "/"))) return { revision: id, path, kind: "directory" };
@@ -105,7 +120,7 @@ export async function resolvePath(repositoryId: string, revision: string, path: 
 
 export async function compareQuery(repositoryId: string, from: string, to: string) {
   const [source, target] = await Promise.all([resolveRevision(repositoryId, from), resolveRevision(repositoryId, to)]);
-  const [a, b] = await Promise.all([getTree(repositoryId, source), getTree(repositoryId, target)]);
+  const [a, b] = await Promise.all([cachedTree(repositoryId, source), cachedTree(repositoryId, target)]);
   return { from: source, to: target, changes: compareEntries(a.entries, b.entries) };
 }
 
@@ -126,10 +141,11 @@ function textOf(bytes: Uint8Array): string | null {
   catch { return null; }
 }
 
-export async function diffQuery(repositoryId: string, from: string, to: string, max = 50) {
+export async function diffQuery(repositoryId: string, from: string, to: string, max = 50, offset = 0) {
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new SourceControlError(422, "INVALID_OFFSET", "Offset must be a nonnegative integer");
   const comparison = await compareQuery(repositoryId, from, to);
   const size = limitQuery(max, 100);
-  const relevant = comparison.changes.slice(0, size);
+  const relevant = comparison.changes.slice(offset, offset + size);
   const blobs = await verifiedBlobs(relevant.flatMap(c => [c.before, c.after].filter((x): x is string => !!x)));
   const files = relevant.map(change => {
     const before = change.before ? textOf(blobs.get(change.before)!) : "";
@@ -138,7 +154,7 @@ export async function diffQuery(repositoryId: string, from: string, to: string, 
     return { ...change, binary, ...(binary ? { patch: null, truncated: false } : textPatch(before, after)) };
   });
   return { from: comparison.from, to: comparison.to, files, totalFiles: comparison.changes.length,
-    nextOffset: comparison.changes.length > size ? size : null };
+    nextOffset: comparison.changes.length > offset + size ? offset + size : null };
 }
 
 type HistoryNode = { id: string; depth: number };
@@ -226,8 +242,8 @@ export async function mergeQuery(repositoryId: string, ours: string, theirs: str
   const bases = await mergeBases(repositoryId, left, right);
   if (bases.length > 1) throw new SourceControlError(409, "MULTIPLE_MERGE_BASES", "Criss-cross history requires explicit base selection");
   const [original, oursTree, theirsTree] = await Promise.all([
-    bases.length ? getTree(repositoryId, bases[0]) : Promise.resolve({ entries: [] as TreeEntry[] }),
-    getTree(repositoryId, left), getTree(repositoryId, right),
+    bases.length ? cachedTree(repositoryId, bases[0]) : Promise.resolve({ entries: [] as TreeEntry[] }),
+    cachedTree(repositoryId, left), cachedTree(repositoryId, right),
   ]);
   const preview = mergeEntries(original.entries, oursTree.entries, theirsTree.entries);
   return { ours: left, theirs: right, mergeBases: bases, ...preview,
@@ -243,24 +259,26 @@ export async function rebaseQuery(repositoryId: string, tip: string, onto: strin
   if (end < 0) throw new SourceControlError(409, "NONLINEAR_REBASE", "Merge base is not on source first-parent history");
   if (end > 200) throw new SourceControlError(413, "REBASE_LIMIT", "Preview supports at most 200 source changesets");
   const revisionIds = chain.slice(0, end).map(n => n.id).reverse();
-  const [sourceBase, targetTree] = await Promise.all([getTree(repositoryId, bases[0]), getTree(repositoryId, target)]);
+  const [sourceBase, targetTree] = await Promise.all([cachedTree(repositoryId, bases[0]), cachedTree(repositoryId, target)]);
   let sourceEntries = sourceBase.entries;
   let rebased = new Map(targetTree.entries.map(e => [e.path, e.objectId]));
   const conflicts: { changesetId: string; path: string; expected: string | null; actual: string | null }[] = [];
   for (const id of revisionIds) {
     const parents = await db.sourceChangesetParent.findMany({ where: { changesetId: id } });
     if (parents.length !== 1) throw new SourceControlError(409, "MERGE_REBASE_UNSUPPORTED", "Rebase of merge changesets requires an explicit strategy");
-    const next = (await getTree(repositoryId, id)).entries;
+    const next = (await cachedTree(repositoryId, id)).entries;
     const operations = compareEntries(sourceEntries, next);
     for (const op of operations) {
       const oldPath = op.previousPath ?? op.path;
       const expected = sourceEntries.find(e => e.path === oldPath)?.objectId ?? null;
       const actual = rebased.get(oldPath) ?? null;
-      if (actual !== expected || (op.previousPath && rebased.has(op.path))) {
+      const destinationOccupied = rebased.has(op.path) && op.previousPath !== undefined;
+      if (actual !== expected || destinationOccupied) {
         conflicts.push({ changesetId: id, path: op.path, expected, actual });
         continue;
       }
-      if (op.previousPath) rebased.delete(op.previousPath);
+      // Copies keep the source; renames remove it. Neither changes an actual ref.
+      if (op.kind === "RENAME") rebased.delete(op.previousPath!);
       if (op.after) rebased.set(op.path, op.after);
       else rebased.delete(op.path);
     }
