@@ -243,6 +243,7 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
           })) },
           validation: { create: { state: "SUCCESS", ...meta } },
         } });
+        await tx.sourceQueryIndexJob.create({ data: { repositoryId, changesetId } });
         await tx.sourceChangesetEvent.create({ data: {
           repositoryId, changesetId, kind: "changeset.published",
           payload: { apiVersion: 2, changesetId, parents: input.parents, authorId, operationCount: persisted.length },

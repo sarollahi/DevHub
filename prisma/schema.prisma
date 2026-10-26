@@ -94,6 +94,9 @@ model Repository {
   ingressBuckets        IngressBucket[]
   sourceChangesets      SourceChangeset[]
   sourceReferences      SourceReference[]
+  sourceReferencePolicies SourceReferencePolicy[]
+  sourceRefMutations    SourceRefMutation[]
+  queryIndexJobs        SourceQueryIndexJob[]
   sourceObjectGrants    SourceObjectGrant[]
   sourceEvents          SourceChangesetEvent[]
   sourcePublicationKeys SourcePublicationKey[]
@@ -301,6 +304,12 @@ enum SourceObjectKind {
   TREE
 }
 
+enum SourceRefKind {
+  BRANCH
+  RELEASE
+  TAG
+}
+
 enum SourceOperationKind {
   PUT
   DELETE
@@ -342,6 +351,8 @@ model SourceChangeset {
   references   SourceReference[]
   publicationKeys SourcePublicationKey[]
   publicationEvent SourceChangesetEvent?
+  queryIndexJob SourceQueryIndexJob?
+  queryPathTouches SourceQueryPathTouch[]
   @@index([repositoryId, createdAt(sort: Desc)])
 }
 
@@ -353,6 +364,7 @@ model SourceChangesetParent {
   parent      SourceChangeset @relation("ChangesetParent", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   @@id([changesetId, parentId])
   @@unique([changesetId, position])
+  @@index([parentId])
 }
 
 model SourceFileOperation {
@@ -366,6 +378,8 @@ model SourceFileOperation {
   changeset    SourceChangeset     @relation(fields: [changesetId], references: [id], onDelete: Cascade)
   object       SourceObject?       @relation("FileObject", fields: [objectId], references: [id])
   @@id([changesetId, path])
+  @@index([path])
+  @@index([previousPath])
 }
 
 // This is a manifest/integrity check, not a claim that contributed code was executed.
@@ -390,11 +404,14 @@ model SourceChangeApproval {
   @@id([changesetId, userId])
 }
 
+
 model SourceReference {
   repositoryId String          @db.Uuid
   name         String
   changesetId  String          @db.Char(64)
   generation   Int             @default(1)
+  kind         SourceRefKind   @default(BRANCH)
+  deletedAt    DateTime?
   updatedAt    DateTime        @updatedAt
   repository   Repository      @relation(fields: [repositoryId], references: [id])
   changeset    SourceChangeset @relation(fields: [changesetId], references: [id])
@@ -402,7 +419,42 @@ model SourceReference {
   @@index([changesetId])
 }
 
- 
+model SourceReferencePolicy {
+  repositoryId    String      @db.Uuid
+  name            String
+  protected       Boolean     @default(false)
+  allowForce      Boolean     @default(false)
+  allowDelete     Boolean     @default(true)
+  requireApproval Boolean     @default(false)
+  updatedAt       DateTime    @updatedAt
+  repository      Repository  @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@id([repositoryId, name])
+}
+
+model SourceRefMutation {
+  id             String        @id @default(uuid()) @db.Uuid
+  repositoryId   String        @db.Uuid
+  name           String
+  mutationId     String        @db.VarChar(128)
+  requestHash    String        @db.Char(64)
+  operation      String        @db.VarChar(20)
+  kind           SourceRefKind
+  oldChangesetId String?       @db.Char(64)
+  newChangesetId String?       @db.Char(64)
+  oldGeneration  Int?
+  newGeneration  Int
+  actorType      String
+  actorId        String
+  forced         Boolean       @default(false)
+  reason         String?
+  createdAt      DateTime      @default(now())
+  repository     Repository    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@unique([repositoryId, name, mutationId])
+  @@unique([repositoryId, name, newGeneration])
+  @@index([repositoryId, name, createdAt(sort: Desc)])
+}
+
+
 // A repository-local grant permits staged blobs to be used in future changesets.
 // Global SHA-256 deduplication never implies cross-repository read authorization.
 model SourceObjectGrant {
@@ -439,4 +491,34 @@ model SourceChangesetEvent {
   repository   Repository      @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
   changeset    SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Restrict)
   @@index([repositoryId, createdAt])
+}
+
+// Durable and recoverable lazy derived-data indexing. All canonical source
+// changesets and their file operations remain the sole source of truth.
+model SourceQueryIndexJob {
+  changesetId  String          @id @db.Char(64)
+  repositoryId String          @db.Uuid
+  state        JobState        @default(QUEUED)
+  generation   Int?
+  attempts     Int             @default(0)
+  nextAttemptAt DateTime       @default(now())
+  leaseUntil   DateTime?
+  lastError    String?
+  indexedAt    DateTime?
+  createdAt    DateTime        @default(now())
+  changeset    SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Cascade)
+  repository   Repository      @relation(fields: [repositoryId], references: [id])
+  @@index([state, nextAttemptAt, leaseUntil])
+  @@index([repositoryId, generation])
+}
+
+// Per-revision path touches include both sides of renames, unlike operations.
+model SourceQueryPathTouch {
+  changesetId    String          @db.Char(64)
+  path           String
+  operationPath  String
+  role           String
+  changeset      SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Cascade)
+  @@id([changesetId, path, operationPath, role])
+  @@index([path, changesetId])
 }
