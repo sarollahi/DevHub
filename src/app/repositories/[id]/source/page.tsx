@@ -11,8 +11,9 @@ export default async function SourcePage({ params }: { params: Promise<{ id: str
   const { id } = await params;
   const repo = await db.repository.findUnique({ where: { id }, include: { owner: true } });
   if (!repo) notFound();
-  const [refs, changesets] = await Promise.all([
+  const [refs, refHistory, changesets] = await Promise.all([
     db.sourceReference.findMany({ where: { repositoryId: id }, orderBy: { name: "asc" } }),
+    db.sourceRefMutation.findMany({ where: { repositoryId: id }, orderBy: { createdAt: "desc" }, take: 15 }),
     db.sourceChangeset.findMany({ where: { repositoryId: id }, orderBy: { createdAt: "desc" }, take: 50,
       include: { validation: true, approvals: { select: { userId: true, decision: true } }, _count: { select: { operations: true, parents: true } } } }),
   ]);
@@ -22,17 +23,24 @@ export default async function SourcePage({ params }: { params: Promise<{ id: str
     <Link href="/repositories" className="detail-back">Back to repositories</Link>
     <div className="source-grid">
       <section className="surface-card source-panel">
-        <div className="source-panel-heading"><div><h2>References</h2><p>Each move requires the current generation and repository approval policy.</p></div><span className="source-count">{refs.length}</span></div>
+        <div className="source-panel-heading"><div><h2>References</h2><p>References are lightweight pointers. Every move is version-checked and recorded.</p></div><span className="source-count">{refs.filter(ref => !ref.deletedAt).length} active</span></div>
         {refs.length === 0 ? <p className="source-empty">No source references yet. Changesets can be stored independently without creating a branch.</p> :
           <div className="source-list">{refs.map(ref => <div key={ref.name} className="source-ref">
-            <div><strong>{ref.name}</strong><small>Generation {ref.generation}</small></div><code title={ref.changesetId}>{ref.changesetId.slice(0, 12)}</code>
+            <div><strong>{ref.name}</strong><small>{ref.kind.toLowerCase()} · generation {ref.generation}{ref.deletedAt ? " · deleted" : ""}{ref.name === repo.defaultBranch ? " · protected default" : ""}</small></div><code title={ref.changesetId}>{ref.deletedAt ? "Tombstone" : ref.changesetId.slice(0, 12)}</code>
           </div>)}</div>}
       </section>
       <section className="surface-card source-panel">
         <div className="source-panel-heading"><div><h2>Review and reference control</h2><p>Approval is recorded independently of reference movement.</p></div></div>
-        <SourceControls repositoryId={id} changesets={changes} refs={refs.map(ref => ({ name: ref.name, generation: ref.generation, changesetId: ref.changesetId }))}/>
+        <SourceControls repositoryId={id} changesets={changes} refs={refs.map(ref => ({ name: ref.name, generation: ref.generation, changesetId: ref.changesetId, deleted: Boolean(ref.deletedAt), kind: ref.kind }))} defaultBranch={repo.defaultBranch}/>
       </section>
     </div>
+    <section className="surface-card source-panel source-history">
+      <div className="source-panel-heading"><div><h2>Reference audit history</h2><p>Durable record of pointer changes, including deletes, restores and forced moves.</p></div><span className="source-count">{refHistory.length} recent</span></div>
+      {refHistory.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Reference</th><th>Operation</th><th>Generation</th><th>Actor</th><th>Time</th></tr></thead><tbody>
+        {refHistory.map(event => <tr key={event.id}><td><strong>{event.name}</strong></td><td>{event.operation}{event.forced ? " (forced)" : ""}</td><td>{event.oldGeneration ?? "—"} → {event.newGeneration}</td>
+          <td>{event.actorType === "SYSTEM" ? "Migration baseline" : event.actorType.toLowerCase()}</td><td>{event.createdAt.toLocaleString("en-GB")}</td></tr>)}
+      </tbody></table></div> : <p className="source-empty">No reference mutations recorded.</p>}
+    </section>
     <section className="surface-card source-panel source-history">
       <div className="source-panel-heading"><div><h2>Immutable history</h2><p>Each digest identifies stored file operations, parent changesets and a canonical tree.</p></div><span className="source-count">{changesets.length}</span></div>
       {changesets.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Changeset</th><th>Content ID</th><th>Files</th><th>Validation</th><th>Approval</th><th>Created</th></tr></thead>

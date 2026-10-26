@@ -11,7 +11,7 @@ export interface ChangesetStore {
 }
 export interface ImmutableObjectStore {
   read(repositoryId: string, objectId: string): Promise<{ id: string; kind: "BLOB" | "TREE"; byteSize: number; dataBase64: string }>;
-  tree(repositoryId: string, changesetId: string): Promise<{ changesetId: string; treeId: string; entries: TreeEntry[] }>;
+  tree(repositoryId: string, changesetId: string): Promise<{ changesetId: string; treeId: string | null; entries: (TreeEntry & { mode?: string })[] }>;
 }
 export interface ReferenceManager {
   compareAndSwap(repositoryId: string, name: string, changesetId: string, expectedGeneration: number | null, actorId: string):

@@ -201,7 +201,7 @@ export async function fileHistory(repositoryId: string, revision: string, path: 
       if (position < offset) continue;
       if (change.path !== current) continue; // MOVE source is represented at destination.
       events.push(change);
-      if (followRenames && change.kind === "MOVE" && change.previousPath) {
+      if (followRenames && (change.kind === "MOVE" || change.kind === "RENAME") && change.previousPath) {
         current = change.previousPath;
         offset = position + 1;
         renamed = true;

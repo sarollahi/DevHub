@@ -22,7 +22,7 @@ Base: `GET /api/v1/repositories/:id/query/:operation`
 For raw stored content use:
 `GET /api/v1/repositories/:id/objects/:objectId/raw`.
 
-This is authenticated binary response streaming in 64 KiB chunks, with an integrity-verified SHA-256 identity and ETag. The currently shipped native writer has a 256 KiB blob limit and PostgreSQL BYTEA backing. The endpoint is chunked but **not** end-to-end bounded-memory multi-gigabyte object streaming; that requires the independent object-storage replacement.
+This is authenticated binary response streaming in 64 KiB chunks, with an integrity-verified SHA-256 identity and ETag. The legacy v1 writer has a 256 KiB blob limit; v2 staging supports up to 4 MiB and PostgreSQL BYTEA backing. The endpoint is chunked but **not** end-to-end bounded-memory multi-gigabyte object streaming; that requires the independent object-storage replacement.
 
 ## Indexing and recovery
 
@@ -46,8 +46,8 @@ Canonical operations are always available as a fallback while indexing is pendin
 - Rebase preview supports 200 first-parent non-merge changesets. A conflict prevents publication; previews are not persisted.
 - Text patches and attribution use a bounded exact line-correspondence algorithm (1.5 million comparison cells). Oversized comparisons report truncation.
 - Ancestry and first-parent queries cap traversal at 100,000 revisions. Diff pages cap at 100 files; tree pages at 500 entries; blame defaults to 50 relevant changes.
-- The legacy immutable tree manifest remains the authoritative tree representation, and tree/diff queries read those stored manifests rather than replay every ancestor. This does **not** replace the storage layer with sparse trees. Reference-only metadata walks do not materialize repository snapshots.
-- No file-mode or symlink metadata can be reconstructed unless captured by the canonical changeset model. Existing PUT/MOVE/DELETE operations and stored bytes are honored.
+- Legacy revisions use immutable stored tree manifests. Canonical v2 revisions resolve deltas on demand from the first-parent history. Tree, diff, merge, and blame on v2 can reconstruct full trees; metadata-only ancestry queries do not. Persistent sparse-tree acceleration remains unimplemented.
+- Canonical v2 captures file modes, symlinks, and explicit COPY/RENAME/CHMOD operations; current comparison and merge previews focus on content digests and do not provide full mode-aware merge semantics. Existing v1 PUT/MOVE/DELETE operations remain supported.
 
 ## Verification and benchmarks
 

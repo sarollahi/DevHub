@@ -19,10 +19,34 @@ export class SourceWorkspace {
     return this.request<ChangesetReceipt>("/changesets", { method: "POST", body: JSON.stringify(input) });
   }
   approve(id: string) { return this.request<{ approved: boolean }>(`/changesets/${id}/approve`, { method: "POST" }); }
-  updateRef(name: string, changesetId: string, expectedGeneration: number | null) {
-    return this.request<{ ref: { name: string; generation: number; changesetId: string } }>(
+  // Pass the same mutationId across network retries. A different ID denotes a
+  // new intention and must carry a freshly observed generation.
+  updateRef(name: string, changesetId: string, expectedGeneration: number | null, mutationId: string,
+    options: { expectedChangesetId?: string; force?: boolean; reason?: string } = {}) {
+    return this.request<{ ref: { name: string; generation: number; changesetId: string | null }; replayed: boolean; eventId: string }>(
       `/refs/${name.split("/").map(encodeURIComponent).join("/")}`,
-      { method: "PUT", body: JSON.stringify({ changesetId, expectedGeneration }) },
+      { method: "PUT", body: JSON.stringify({ changesetId, expectedGeneration, mutationId, ...options }) },
     );
+  }
+  deleteRef(name: string, expectedGeneration: number, mutationId: string, expectedChangesetId?: string) {
+    return this.request<{ ref: { name: string; generation: number; deleted: boolean }; eventId: string }>(
+      `/refs/${name.split("/").map(encodeURIComponent).join("/")}`,
+      { method: "DELETE", body: JSON.stringify({ expectedGeneration, expectedChangesetId, mutationId }) },
+    );
+  }
+  restoreRef(name: string, changesetId: string, expectedGeneration: number, mutationId: string) {
+    return this.request<{ ref: { name: string; generation: number; deleted: boolean }; eventId: string }>(
+      "/refs", { method: "POST", body: JSON.stringify({ name, changesetId, expectedGeneration, mutationId }) },
+    );
+  }
+  refHistory(name: string, beforeGeneration?: number) {
+    const params = new URLSearchParams({ name });
+    if (beforeGeneration) params.set("beforeGeneration", String(beforeGeneration));
+    return this.request<{ records: { mutationId: string; operation: string; newGeneration: number }[] }>(
+      `/refs/history?${params.toString()}`);
+  }
+  refEvents() { return this.request<{ records: { id: string; name: string; operation: string }[] }>("/refs/events"); }
+  setRefPolicy(settings: { name: string; protected: boolean; allowForce: boolean; allowDelete: boolean; requireApproval: boolean }) {
+    return this.request<{ policy: typeof settings }>("/refs/policy", { method: "PUT", body: JSON.stringify(settings) });
   }
 }
