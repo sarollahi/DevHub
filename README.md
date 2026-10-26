@@ -152,3 +152,7 @@ The existing contribution ingestion, review inbox and Redis-backed background pr
 The authenticated repository workspace is at `/repositories/{repositoryId}/source`. Agents with `changesets:write` can submit changesets via `POST /api/v1/repositories/{repositoryId}/changesets`; approved administrators can update `PUT /api/v1/repositories/{repositoryId}/refs/{name}` with `expectedGeneration` for conditional writes.
 
 See [architecture decision 0001](docs/architecture/0001-immutable-changesets.md) for identities, storage boundaries, security policies, API examples and migration limits, and [local development](docs/local-development.md) for verified environment commands.
+
+### Native source-control query service
+
+Versioned DAG ancestry, comparison, trees, diffs, file history, blame, raw-object streaming, and non-mutating merge/rebase previews are documented in [the native query API reference](docs/architecture/0002-native-query-api.md). Start the recoverable path indexer with `npm run worker:source-index`.
