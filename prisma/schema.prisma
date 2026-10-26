@@ -345,6 +345,7 @@ model SourceChangesetParent {
   parent      SourceChangeset @relation("ChangesetParent", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   @@id([changesetId, parentId])
   @@unique([changesetId, position])
+  @@index([parentId])
 }
 
 model SourceFileOperation {
@@ -356,6 +357,8 @@ model SourceFileOperation {
   changeset    SourceChangeset     @relation(fields: [changesetId], references: [id], onDelete: Cascade)
   object       SourceObject?       @relation("FileObject", fields: [objectId], references: [id])
   @@id([changesetId, path])
+  @@index([path])
+  @@index([previousPath])
 }
 
 // This is a manifest/integrity check, not a claim that contributed code was executed.
