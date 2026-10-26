@@ -81,13 +81,16 @@ BEGIN
   IF header_tx IS NULL OR header_tx <> (txid_current() % 4294967296)::text THEN
     RAISE EXCEPTION 'Immutable changeset details may only be inserted in the publication transaction';
   END IF;
-  IF TG_TABLE_NAME = 'SourceChangesetParent' AND NOT EXISTS (
-    SELECT 1 FROM "SourceChangeset" p WHERE p.id = NEW."parentId" AND p."repositoryId" = header_repo
-  ) THEN
-    RAISE EXCEPTION 'Parent must be committed in the same repository';
-  END IF;
-  IF TG_TABLE_NAME = 'SourceChangesetEvent' AND NEW."repositoryId" <> header_repo THEN
-    RAISE EXCEPTION 'Publication event repository mismatch';
+  IF TG_TABLE_NAME = 'SourceChangesetParent' THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM "SourceChangeset" p WHERE p.id = NEW."parentId" AND p."repositoryId" = header_repo
+    ) THEN
+      RAISE EXCEPTION 'Parent must be committed in the same repository';
+    END IF;
+  ELSIF TG_TABLE_NAME = 'SourceChangesetEvent' THEN
+    IF NEW."repositoryId" <> header_repo THEN
+      RAISE EXCEPTION 'Publication event repository mismatch';
+    END IF;
   END IF;
   RETURN NEW;
 END;
