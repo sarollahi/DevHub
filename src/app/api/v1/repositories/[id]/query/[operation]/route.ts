@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireRepositoryAccess, sourceFailure } from "@/source-control/http";
 import {
   ancestryQuery, compareQuery, treeQuery, diffQuery, fileHistory,
-  blameQuery, resolvePath, mergeQuery, rebaseQuery,
+  blameQuery, resolvePath, mergeQuery, rebaseQuery, pathImpactQuery,
 } from "@/source-control/query";
 import { SourceControlError } from "@/source-control/contracts";
 
@@ -38,6 +38,9 @@ export async function GET(req: NextRequest, { params }: {
         break;
       case "history":
         result = await fileHistory(id, required("revision"), required("path"), q.get("followRenames") !== "false", count);
+        break;
+      case "impact":
+        result = await pathImpactQuery(id, required("revision"), required("path"), count);
         break;
       case "blame":
         result = await blameQuery(id, required("revision"), required("path"), count);
