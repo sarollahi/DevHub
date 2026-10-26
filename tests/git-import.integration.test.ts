@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, symlink, chmod, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, symlink, chmod, rm, stat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -130,10 +130,15 @@ test("real repository with merges, symlinks, executable mode and >4 MiB blobs su
     // in a misleading COMPLETED verification outcome.
     const loose = join(directory, ".git", "objects", interruptedSha.slice(0, 2), interruptedSha.slice(2));
     const originalBytes = await readFile(loose);
+    const originalMode = (await stat(loose)).mode & 0o777;
+    await chmod(loose, 0o600);
     try {
       await writeFile(loose, Buffer.from("damaged Git object"));
       await assert.rejects(() => verifyGitImport(job.id), /fsck|corrupt|invalid|bad/i);
-    } finally { await writeFile(loose, originalBytes); }
+    } finally {
+      await writeFile(loose, originalBytes);
+      await chmod(loose, originalMode);
+    }
     assert.equal((await verifyGitImport(job.id)).commits, count + 2);
   } finally {
     if (previousRoot === undefined) delete process.env.GIT_IMPORT_ROOT;
