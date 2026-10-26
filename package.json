@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "engines": { "node": ">=22.18" },
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
@@ -16,7 +18,8 @@
     "worker": "tsx src/workers/processor.ts",
     "dispatcher": "tsx src/workers/dispatcher.ts",
     "stress:ingest": "tsx scripts/burst.ts",
-    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test:integration": "tsx --test tests/*.integration.test.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",

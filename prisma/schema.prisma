@@ -7,15 +7,65 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum AgentStatus { ACTIVE SUSPENDED REVOKED }
-enum PullRequestState { QUEUED RUNNING BLOCKED FAILED REVIEW_REQUIRED APPROVED MERGING MERGED CLOSED }
-enum JobState { QUEUED RUNNING SUCCEEDED FAILED CANCELLED }
-enum OutboxState { PENDING PUBLISHED }
-enum CheckState { PENDING RUNNING SUCCESS FAILURE CANCELLED }
-enum ReviewState { QUEUED RUNNING COMPLETED FAILED }
-enum RiskTier { LOW MEDIUM HIGH CRITICAL }
-enum MergeState { PENDING VALIDATING READY MERGING MERGED BLOCKED FAILED }
-enum ApprovalDecision { APPROVED CHANGES_REQUESTED }
+enum AgentStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+enum PullRequestState {
+  QUEUED
+  RUNNING
+  BLOCKED
+  FAILED
+  REVIEW_REQUIRED
+  APPROVED
+  MERGING
+  MERGED
+  CLOSED
+}
+enum JobState {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+enum OutboxState {
+  PENDING
+  PUBLISHED
+}
+enum CheckState {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILURE
+  CANCELLED
+}
+enum ReviewState {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+enum RiskTier {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+enum MergeState {
+  PENDING
+  VALIDATING
+  READY
+  MERGING
+  MERGED
+  BLOCKED
+  FAILED
+}
+enum ApprovalDecision {
+  APPROVED
+  CHANGES_REQUESTED
+}
 
 model User {
   id            String          @id @default(uuid()) @db.Uuid
