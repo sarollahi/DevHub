@@ -94,6 +94,8 @@ model Repository {
   ingressBuckets        IngressBucket[]
   sourceChangesets      SourceChangeset[]
   sourceReferences      SourceReference[]
+  sourceReferencePolicies SourceReferencePolicy[]
+  sourceRefMutations    SourceRefMutation[]
   blobLeases            BlobLease[]
   blobTransfers         BlobTransfer[]
   sourceObjectGrants    SourceObjectGrant[]
@@ -398,6 +400,8 @@ model SourceReference {
   repositoryId String          @db.Uuid
   name         String
   changesetId  String          @db.Char(64)
+  kind         SourceRefKind   @default(BRANCH)
+  deletedAt    DateTime?
   generation   Int             @default(1)
   updatedAt    DateTime        @updatedAt
   repository   Repository      @relation(fields: [repositoryId], references: [id])
@@ -496,4 +500,48 @@ model BlobTransfer {
   updatedAt    DateTime           @updatedAt
   repository   Repository         @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
   @@index([state, updatedAt])
+}
+
+
+// Match the append-only reference authority migration. Reference mutations retain
+// previous and new targets as audit fields, independent of mutable pointers.
+enum SourceRefKind {
+  BRANCH
+  RELEASE
+  TAG
+}
+
+model SourceReferencePolicy {
+  repositoryId   String      @db.Uuid
+  name           String
+  protected      Boolean     @default(false)
+  allowForce     Boolean     @default(false)
+  allowDelete    Boolean     @default(true)
+  requireApproval Boolean    @default(false)
+  updatedAt      DateTime    @updatedAt
+  repository     Repository  @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@id([repositoryId, name])
+}
+
+model SourceRefMutation {
+  id                String        @id @default(uuid()) @db.Uuid
+  repositoryId      String        @db.Uuid
+  name              String
+  mutationId        String        @db.VarChar(128)
+  requestHash       String        @db.Char(64)
+  operation         String        @db.VarChar(20)
+  kind              SourceRefKind
+  oldChangesetId    String?       @db.Char(64)
+  newChangesetId    String?       @db.Char(64)
+  oldGeneration     Int?
+  newGeneration     Int
+  actorType         String
+  actorId           String
+  forced            Boolean       @default(false)
+  reason            String?
+  createdAt         DateTime      @default(now())
+  repository        Repository    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@unique([repositoryId, name, mutationId])
+  @@unique([repositoryId, name, newGeneration])
+  @@index([repositoryId, name, createdAt(sort: Desc)])
 }
