@@ -94,8 +94,9 @@ model Repository {
   ingressBuckets        IngressBucket[]
   sourceChangesets      SourceChangeset[]
   sourceReferences      SourceReference[]
-  referencePolicies     SourceReferencePolicy[]
-  referenceMutations    SourceRefMutation[]
+  sourceObjectGrants    SourceObjectGrant[]
+  sourceEvents          SourceChangesetEvent[]
+  sourcePublicationKeys SourcePublicationKey[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -295,12 +296,6 @@ model AuditEvent {
 }
 
 
-enum SourceRefKind {
-  BRANCH
-  RELEASE
-  TAG
-}
-
 enum SourceObjectKind {
   BLOB
   TREE
@@ -310,6 +305,11 @@ enum SourceOperationKind {
   PUT
   DELETE
   MOVE
+  ADD
+  MODIFY
+  RENAME
+  COPY
+  CHMOD
 }
 
 // Object IDs are SHA-256 over a type-prefixed byte sequence; payloads are immutable.
@@ -321,24 +321,27 @@ model SourceObject {
   createdAt   DateTime              @default(now())
   trees       SourceChangeset[]     @relation("ChangesetTree")
   operations  SourceFileOperation[] @relation("FileObject")
+  grants      SourceObjectGrant[]
 }
 
 // Content-addressed changesets are never modified when references advance.
 model SourceChangeset {
   id           String                  @id @db.Char(64)
   repositoryId String                  @db.Uuid
-  treeId       String                  @db.Char(64)
+  treeId       String?                 @db.Char(64)
   authorId     String
   message      String
   createdAt    DateTime                @default(now())
   repository   Repository              @relation(fields: [repositoryId], references: [id])
-  tree         SourceObject            @relation("ChangesetTree", fields: [treeId], references: [id])
+  tree         SourceObject?           @relation("ChangesetTree", fields: [treeId], references: [id])
   parents      SourceChangesetParent[] @relation("ChangesetChild")
   children     SourceChangesetParent[] @relation("ChangesetParent")
   operations   SourceFileOperation[]
   validation   SourceValidation?
   approvals    SourceChangeApproval[]
   references   SourceReference[]
+  publicationKeys SourcePublicationKey[]
+  publicationEvent SourceChangesetEvent?
   @@index([repositoryId, createdAt(sort: Desc)])
 }
 
@@ -358,6 +361,8 @@ model SourceFileOperation {
   kind         SourceOperationKind
   previousPath String?
   objectId     String?             @db.Char(64)
+  position     Int                 @default(0)
+  fileMode     String?             @db.VarChar(6)
   changeset    SourceChangeset     @relation(fields: [changesetId], references: [id], onDelete: Cascade)
   object       SourceObject?       @relation("FileObject", fields: [objectId], references: [id])
   @@id([changesetId, path])
@@ -390,8 +395,6 @@ model SourceReference {
   name         String
   changesetId  String          @db.Char(64)
   generation   Int             @default(1)
-  kind         SourceRefKind   @default(BRANCH)
-  deletedAt    DateTime?
   updatedAt    DateTime        @updatedAt
   repository   Repository      @relation(fields: [repositoryId], references: [id])
   changeset    SourceChangeset @relation(fields: [changesetId], references: [id])
@@ -399,41 +402,41 @@ model SourceReference {
   @@index([changesetId])
 }
 
-
-// Per-ref policies do not bypass the default branch's invariant protection.
-model SourceReferencePolicy {
-  repositoryId   String     @db.Uuid
-  name           String
-  protected      Boolean    @default(false)
-  allowForce     Boolean    @default(false)
-  allowDelete    Boolean    @default(true)
-  requireApproval Boolean   @default(false)
-  updatedAt      DateTime   @updatedAt
-  repository     Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
-  @@id([repositoryId, name])
+ 
+// A repository-local grant permits staged blobs to be used in future changesets.
+// Global SHA-256 deduplication never implies cross-repository read authorization.
+model SourceObjectGrant {
+  repositoryId String       @db.Uuid
+  objectId     String       @db.Char(64)
+  createdAt    DateTime     @default(now())
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  object       SourceObject @relation(fields: [objectId], references: [id], onDelete: Restrict)
+  @@id([repositoryId, objectId])
 }
 
-// Append-only mutation journal, including deletion tombstones and migration baselines.
-// Mutation IDs make retries idempotent; generation never resets after deletion.
-model SourceRefMutation {
-  id             String        @id @default(uuid()) @db.Uuid
-  repositoryId   String        @db.Uuid
-  name           String
-  mutationId     String        @db.VarChar(128)
-  requestHash    String        @db.Char(64)
-  operation      String        @db.VarChar(20)
-  kind           SourceRefKind
-  oldChangesetId String?       @db.Char(64)
-  newChangesetId String?       @db.Char(64)
-  oldGeneration  Int?
-  newGeneration  Int
-  actorType      String
-  actorId        String
-  forced         Boolean       @default(false)
-  reason         String?
-  createdAt      DateTime      @default(now())
-  repository     Repository    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
-  @@unique([repositoryId, name, mutationId])
-  @@unique([repositoryId, name, newGeneration])
-  @@index([repositoryId, name, createdAt(sort: Desc)])
+// Retry keys are immutable, scoped to both the repository and submitting actor.
+model SourcePublicationKey {
+  repositoryId String          @db.Uuid
+  authorId     String
+  key          String
+  changesetId  String          @db.Char(64)
+  createdAt    DateTime        @default(now())
+  repository   Repository      @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  changeset    SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Restrict)
+  @@id([repositoryId, authorId, key])
+  @@index([changesetId])
+}
+
+// Recorded in the same PostgreSQL transaction as the complete changeset.
+// Consumers must use idempotent processing; timestamp order is not commit order.
+model SourceChangesetEvent {
+  id           String          @id @default(uuid()) @db.Uuid
+  repositoryId String          @db.Uuid
+  changesetId  String          @unique @db.Char(64)
+  kind         String
+  payload      Json
+  createdAt    DateTime        @default(now())
+  repository   Repository      @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  changeset    SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Restrict)
+  @@index([repositoryId, createdAt])
 }
