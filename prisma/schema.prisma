@@ -409,7 +409,7 @@ model SourceReferencePolicy {
   allowDelete    Boolean    @default(true)
   requireApproval Boolean   @default(false)
   updatedAt      DateTime   @updatedAt
-  repository     Repository @relation(fields: [repositoryId], references: [id])
+  repository     Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
   @@id([repositoryId, name])
 }
 
@@ -432,7 +432,7 @@ model SourceRefMutation {
   forced         Boolean       @default(false)
   reason         String?
   createdAt      DateTime      @default(now())
-  repository     Repository    @relation(fields: [repositoryId], references: [id])
+  repository     Repository    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
   @@unique([repositoryId, name, mutationId])
   @@unique([repositoryId, name, newGeneration])
   @@index([repositoryId, name, createdAt(sort: Desc)])
