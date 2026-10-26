@@ -165,3 +165,7 @@ See [architecture decision 0002](docs/architecture/0002-canonical-delta-publicat
 ### Native source-control query service
 
 Versioned DAG ancestry, comparison, trees, diffs, file history, blame, raw-object streaming, and non-mutating merge/rebase previews are documented in [the native query API reference](docs/architecture/0002-native-query-api.md). Start the recoverable path indexer with `npm run worker:source-index`.
+
+## Native intelligent review
+
+Native changeset publication enqueues a PostgreSQL-backed analysis job, independent of the legacy patch inbox. Run `npm run worker:review` and open `/reviews` to inspect grouped changes, overlap, exact duplicates, deterministic security flags, persisted metrics and human decisions bound to immutable revision hashes. Optional provider-backed summaries and embeddings are advisory and cannot authorize a reference update. See [native review documentation](docs/native-review.md) for boundaries and deployment.

@@ -21,7 +21,8 @@
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "test:integration": "tsx --test tests/*.integration.test.ts",
     "worker:source-index": "tsx src/workers/query-indexer.ts",
-    "bench:source-query": "tsx scripts/bench-source-query.ts"
+    "bench:source-query": "tsx scripts/bench-source-query.ts",
+    "worker:review": "tsx src/review/source-review.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",

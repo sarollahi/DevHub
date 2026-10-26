@@ -76,6 +76,7 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
       parents: { create: input.parents.map((parentId, position) => ({ parentId, position })) },
       operations: { create: operations.map(op => ({ kind: op.kind, path: op.path, previousPath: op.previousPath, objectId: op.objectId })) },
       validation: { create: { state: "SUCCESS", ...metadata } },
+      review: { create: { repositoryId } },
     } });
     await tx.sourceQueryIndexJob.create({ data: { repositoryId, changesetId: id } });
     await tx.auditEvent.create({ data: { repositoryId, actorType: actor.type, actorId: actor.id,

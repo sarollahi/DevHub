@@ -1,0 +1,181 @@
+import { Prisma } from "@prisma/client";
+import { db } from "../lib/prisma";
+import { getCanonicalSnapshot } from "../source-control/canonical";
+import { objectId } from "../source-control/storage";
+import { assessNativeChangeset, cosineSimilarity, regionOverlap, type Entry, type Region } from "./analysis";
+import { createReviewProvider } from "./provider";
+
+const maxAttempts = 4;
+type Link = { changesetId: string; kind: "DUPLICATE" | "REGION" | "FILE" | "SIMILAR"; score: number };
+const jsonArray = <T>(input: Prisma.JsonValue | null): T[] =>
+  Array.isArray(input) ? input as T[] : [];
+const embedding = (input: Prisma.JsonValue | null): number[] =>
+  Array.isArray(input) && input.every(x => typeof x === "number" && Number.isFinite(x)) ? input as number[] : [];
+
+export async function processReview(changesetId: string, lease: Date, attempt: number) {
+  const started = Date.now();
+  try {
+    const change = await db.sourceChangeset.findUniqueOrThrow({
+      where: { id: changesetId }, include: {
+        operations: { orderBy: { position: "asc" } },
+        parents: { orderBy: { position: "asc" } },
+      },
+    });
+    const parentIds = change.parents.map(p => p.parentId);
+    const [base, target] = await Promise.all([
+      parentIds[0] ? getCanonicalSnapshot(change.repositoryId, parentIds[0]) : Promise.resolve({ entries: [] }),
+      getCanonicalSnapshot(change.repositoryId, changesetId),
+    ]);
+    const before = new Map<string, Entry>(base.entries.map(e => [e.path, e]));
+    const after = new Map<string, Entry>(target.entries.map(e => [e.path, e]));
+    const touched = [...new Set(change.operations.flatMap(op => [op.path, ...(op.previousPath ? [op.previousPath] : [])]))];
+    const ids = new Set<string>();
+    for (const path of touched) {
+      const old = before.get(path); const next = after.get(path);
+      if (old) ids.add(old.objectId);
+      if (next) ids.add(next.objectId);
+    }
+    const bytes = new Map<string, Uint8Array>();
+    // Fetch only objects touched by the changeset. A bounded batch avoids a repository-wide blob load.
+    const requested = [...ids];
+    for (let i = 0; i < requested.length; i += 4) {
+      const batch = await db.sourceObject.findMany({ where: { id: { in: requested.slice(i, i + 4) } } });
+      for (const blob of batch) {
+        if (blob.kind !== "BLOB" || objectId("BLOB", blob.data) !== blob.id || blob.data.byteLength !== blob.byteSize)
+          throw new Error("Stored source object did not pass content-integrity verification");
+        bytes.set(blob.id, blob.data);
+      }
+    }
+    if (bytes.size !== ids.size) throw new Error("Review cannot locate all authoritative objects");
+    const assessed = assessNativeChangeset({
+      parents: parentIds, description: change.message, operations: change.operations,
+      before, after, bytes,
+    });
+    const candidates = await db.sourceReview.findMany({
+      where: { repositoryId: change.repositoryId, state: "COMPLETED", changesetId: { not: changesetId },
+        OR: [{ fingerprint: assessed.fingerprint }, { groupKey: assessed.groupKey },
+          { paths: { hasSome: assessed.paths } }],
+      },
+      orderBy: { createdAt: "desc" }, take: 120,
+      select: { changesetId: true, fingerprint: true, paths: true, regions: true,
+        embedding: true, groupKey: true },
+    });
+    let summary = assessed.summary;
+    let findings = assessed.findings;
+    let model: string | null = null;
+    let provider: string | null = null;
+    let confidence: number | null = null;
+    let embeddingVector: number[] | null = null;
+    let costMicros = 0n;
+    const configured = createReviewProvider();
+    if (configured) {
+      const result = await configured.analyze(
+        "Description: " + change.message + "\nOperations: " +
+        JSON.stringify(change.operations.map(op => ({ kind: op.kind, path: op.path, previousPath: op.previousPath }))) +
+        "\nDeterministic assessment: " + assessed.summary,
+        assessed.excerpt,
+      );
+      summary += "\nModel summary (advisory): " + result.summary;
+      findings = [...findings, ...result.findings];
+      model = result.model; provider = result.provider; confidence = result.confidence;
+      embeddingVector = result.embedding; costMicros = result.costMicros;
+    }
+    const relations: Link[] = candidates.flatMap((candidate): Link[] => {
+      if (candidate.fingerprint === assessed.fingerprint) return [{
+        changesetId: candidate.changesetId, kind: "DUPLICATE" as const, score: 1,
+      }];
+      const overlap = regionOverlap(assessed.regions, jsonArray<Region>(candidate.regions));
+      if (overlap !== "NONE") return [{
+        changesetId: candidate.changesetId, kind: overlap, score: overlap === "REGION" ? .95 : .65,
+      }];
+      const similarity = cosineSimilarity(embeddingVector ?? [], embedding(candidate.embedding));
+      return similarity >= .82 ? [{
+        changesetId: candidate.changesetId, kind: "SIMILAR" as const, score: similarity,
+      }] : [];
+    }).sort((a,b) => b.score - a.score).slice(0, 24);
+    const duplicate = relations.find(link => link.kind === "DUPLICATE")?.changesetId ?? null;
+    const groupKey = duplicate
+      ? candidates.find(x => x.changesetId === duplicate)?.groupKey || assessed.groupKey
+      : assessed.groupKey;
+    const elapsed = Date.now() - started;
+    await db.$transaction(async tx => {
+      const updated = await tx.sourceReview.updateMany({ where: {
+        changesetId, state: "RUNNING", attempts: attempt, leaseUntil: lease,
+      }, data: {
+        state: "COMPLETED", leaseUntil: null, error: null, completedAt: new Date(),
+        fingerprint: assessed.fingerprint, paths: assessed.paths,
+        regions: assessed.regions as unknown as Prisma.InputJsonValue,
+        findings: findings as unknown as Prisma.InputJsonValue,
+        related: relations as unknown as Prisma.InputJsonValue,
+        summary, groupKey, exactDuplicateOf: duplicate,
+        riskTier: assessed.riskTier, riskScore: assessed.riskScore,
+        costMicros, latencyMs: elapsed, confidence, provider, model,
+        ...(embeddingVector ? { embedding: embeddingVector as Prisma.InputJsonValue } : {}),
+      } });
+      if (updated.count !== 1) throw new Error("Review lease expired; ignoring stale model results");
+      await tx.auditEvent.create({ data: { repositoryId: change.repositoryId,
+        actorType: "SYSTEM", actorId: "native-review-worker", action: "changeset.review.completed",
+        subjectId: changesetId, metadata: {
+          exactDuplicateOf: duplicate, relatedCount: relations.length,
+          deterministicRisk: assessed.riskTier, riskScore: assessed.riskScore,
+          provider: provider ?? "disabled", latencyMs: elapsed, costMicros: costMicros.toString(),
+        },
+      } });
+    });
+    return { changesetId, state: "COMPLETED" as const, relatedCount: relations.length };
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : "Unknown review failure").slice(0, 800);
+    await db.sourceReview.updateMany({ where: {
+      changesetId, state: "RUNNING", attempts: attempt, leaseUntil: lease,
+    }, data: {
+      state: attempt >= maxAttempts ? "FAILED" : "QUEUED",
+      leaseUntil: null, error: message,
+      nextAttemptAt: new Date(Date.now() + Math.min(60000, 1000 * 2 ** attempt)),
+    } });
+    throw error;
+  }
+}
+
+export async function processNextReview(): Promise<boolean> {
+  const now = new Date();
+  const next = await db.sourceReview.findFirst({ where: {
+    attempts: { lt: maxAttempts },
+    OR: [
+      { state: "QUEUED", nextAttemptAt: { lte: now } },
+      { state: "RUNNING", leaseUntil: { lt: now } },
+    ],
+  }, orderBy: [{ nextAttemptAt: "asc" }, { changesetId: "asc" }],
+  select: { changesetId: true, attempts: true, state: true, leaseUntil: true } });
+  if (!next) return false;
+  const lease = new Date(Date.now() + 120_000);
+  const claimed = await db.sourceReview.updateMany({ where: {
+    changesetId: next.changesetId, state: next.state, attempts: next.attempts,
+    ...(next.state === "RUNNING" ? { leaseUntil: { lt: now } } : { nextAttemptAt: { lte: now } }),
+  }, data: {
+    state: "RUNNING", attempts: { increment: 1 },
+    leaseUntil: lease, startedAt: new Date(), error: null,
+  } });
+  if (claimed.count === 0) return true;
+  await processReview(next.changesetId, lease, next.attempts + 1);
+  return true;
+}
+
+async function main() {
+  let stopping = false;
+  process.on("SIGINT", () => { stopping = true; });
+  process.on("SIGTERM", () => { stopping = true; });
+  const concurrency = Math.min(16, Math.max(1, Number(process.env.DEVHUB_REVIEW_CONCURRENCY ?? "4") || 4));
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (!stopping) {
+      try {
+        if (await processNextReview()) continue;
+      } catch (error) { console.error("Review job failed:", error); }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  });
+  await Promise.all(workers);
+  await db.$disconnect();
+}
+if (process.argv[1]?.endsWith("source-review.ts")) {
+  main().catch(error => { console.error(error); process.exitCode = 1; });
+}
