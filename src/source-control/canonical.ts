@@ -50,10 +50,13 @@ function canonicalId(repositoryId: string, authorId: string, input: CanonicalInp
 
 function validState(state: State) {
   if (state.size > limits.maxPaths) throw new SourceControlError(413, "TOO_MANY_PATHS", "Repository snapshot exceeds 10,000 paths");
-  const paths = [...state.keys()].sort();
-  for (let i = 0; i < paths.length; i++) {
-    if (!validPath(paths[i]) || (i && paths[i].startsWith(paths[i - 1] + "/"))) {
-      throw new SourceControlError(422, "INVALID_PATH_GRAPH", "A file cannot contain other files");
+  for (const path of state.keys()) {
+    if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH_GRAPH", "Invalid stored path");
+    const parts = path.split("/");
+    for (let n = 1; n < parts.length; n++) {
+      if (state.has(parts.slice(0, n).join("/"))) {
+        throw new SourceControlError(422, "INVALID_PATH_GRAPH", "A file cannot contain other files");
+      }
     }
   }
 }
