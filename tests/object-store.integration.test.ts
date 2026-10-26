@@ -31,13 +31,25 @@ test("immutable S3 objects with real PostgreSQL and MinIO", { timeout: 180000 },
     await db.sourceChangesetParent.deleteMany({ where: { changesetId: { in: changesets } } });
     await db.sourceChangeset.deleteMany({ where: { id: { in: changesets } } });
     await db.sourceObjectGrant.deleteMany({ where: { repositoryId: repo.id } });
-    await db.sourceObject.deleteMany({ where: { id: { in: [...trees, ...owned] } } });
     await db.auditEvent.deleteMany({ where: { repositoryId: repo.id } });
     await db.blobLease.deleteMany({ where: { repositoryId: repo.id } });
     await db.blobTransfer.deleteMany({ where: { repositoryId: repo.id } });
     await db.repository.delete({ where: { id: repo.id } });
     await db.user.delete({ where: { id: user.id } });
-    for (const objectId of owned) {
+    // Objects have globally deduplicated identities. Other test repositories
+    // may own the same content concurrently; never destroy their references.
+    await db.sourceObject.deleteMany({ where: {
+      id: { in: trees }, trees: { none: {} }, operations: { none: {} }, grants: { none: {} },
+    } });
+    for (const objectId of new Set(owned)) {
+      const sharing = await db.sourceObject.findFirst({ where: {
+        id: objectId, OR: [{ operations: { some: {} } }, { grants: { some: {} } }],
+      } });
+      const leased = await db.blobLease.count({ where: { objectId } });
+      if (sharing || leased) continue;
+      await db.sourceObject.deleteMany({ where: {
+        id: objectId, operations: { none: {} }, grants: { none: {} },
+      } });
       await backend.delete(objectKey(objectId)).catch(() => {});
       await db.storedBlob.deleteMany({ where: { id: objectId } });
     }
