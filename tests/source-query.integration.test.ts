@@ -12,7 +12,7 @@ import { createChangeset } from "../src/source-control/service";
 import { compareEntries, mergeEntries, matchingLines } from "../src/source-control/query-algorithms";
 import {
   ancestryQuery, mergeBases, compareQuery, treeQuery, resolvePath, diffQuery,
-  fileHistory, blameQuery, mergeQuery, rebaseQuery,
+  fileHistory, blameQuery, mergeQuery, rebaseQuery, pathImpactQuery,
 } from "../src/source-control/query";
 import { GET as queryRoute } from "../src/app/api/v1/repositories/[id]/query/[operation]/route";
 import { GET as rawRoute } from "../src/app/api/v1/repositories/[id]/objects/[objectId]/raw/route";
@@ -136,6 +136,7 @@ test("native indexed query APIs agree with independent DAG reference and Git fix
     assert.equal(await raw.text(), "one\nTWO\n");
   });
   await t.test("worker retries expired leases and builds durable path indexes", async () => {
+    const before = await pathImpactQuery(repository.id, left, "docs/a.txt");
     const { indexChangeset } = await import("../src/workers/query-indexer");
     const start = await db.sourceQueryIndexJob.findUniqueOrThrow({ where: { changesetId: root } });
     assert.equal(start.state, "QUEUED");
@@ -149,6 +150,8 @@ test("native indexed query APIs agree with independent DAG reference and Git fix
     assert.equal(job.state, "SUCCEEDED");
     const touch = await db.sourceQueryPathTouch.findMany({ where: { changesetId: moved } });
     assert.deepEqual(touch.map(e => e.path).sort(), ["docs/a.txt", "docs/b.txt"]);
+    const after = await pathImpactQuery(repository.id, left, "docs/a.txt");
+    assert.deepEqual(after.records, before.records);
   });
 
   await t.test("Git rename and merge-base oracle", async () => {
