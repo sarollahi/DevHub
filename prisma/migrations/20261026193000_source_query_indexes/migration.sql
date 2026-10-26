@@ -43,4 +43,4 @@ CREATE INDEX IF NOT EXISTS "SourceChangesetParent_parentId_idx"
 CREATE INDEX IF NOT EXISTS "SourceFileOperation_path_idx"
   ON "SourceFileOperation"("path");
 CREATE INDEX IF NOT EXISTS "SourceFileOperation_previousPath_idx"
-  ON "SourceFileOperation"("previousPath") WHERE "previousPath" IS NOT NULL;
+  ON "SourceFileOperation"("previousPath");
