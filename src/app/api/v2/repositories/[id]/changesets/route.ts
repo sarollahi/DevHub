@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireRepositoryAccess, sourceFailure } from "@/source-control/http";
+import { requireRepositoryAccess, sourceFailure, readBoundedJson } from "@/source-control/http";
 import { createCanonicalChangeset, listCanonicalChangesets } from "@/source-control/canonical";
 export const runtime = "nodejs";
 
@@ -7,7 +7,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const { id } = await params;
     const { actor } = await requireRepositoryAccess(request, id, "changesets:write");
-    const body = await request.json().catch(() => null);
+    const body = await readBoundedJson(request, 512_000);
     const result = await createCanonicalChangeset(id, actor, body);
     return NextResponse.json({ apiVersion: 2, ...result }, { status: result.created ? 201 : 200 });
   } catch (error) { return sourceFailure(error); }
