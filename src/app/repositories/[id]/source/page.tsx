@@ -11,7 +11,7 @@ export default async function SourcePage({ params }: { params: Promise<{ id: str
   const { id } = await params;
   const repo = await db.repository.findUnique({ where: { id }, include: { owner: true } });
   if (!repo) notFound();
-  const [refs, changesets, refHistory] = await Promise.all([
+  const [refs, refHistory, changesets] = await Promise.all([
     db.sourceReference.findMany({ where: { repositoryId: id }, orderBy: { name: "asc" } }),
     db.sourceRefMutation.findMany({ where: { repositoryId: id }, orderBy: { createdAt: "desc" }, take: 15 }),
     db.sourceChangeset.findMany({ where: { repositoryId: id }, orderBy: { createdAt: "desc" }, take: 50,
