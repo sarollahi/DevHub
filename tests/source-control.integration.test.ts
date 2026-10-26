@@ -18,7 +18,7 @@ test("native source control against real PostgreSQL, with immutable branchless h
   const repo = await db.repository.create({ data: { ownerId: user.id, name: "Native Repository", slug: "native", requireHumanApproval: true } });
   const otherRepo = await db.repository.create({ data: { ownerId: outsider.id, name: "Foreign Repository", slug: "foreign" } });
   const agent = await db.agentIdentity.create({ data: { ownerId: user.id, name: "writer", scopes: ["changesets:write", "changesets:read"] } });
-  const foreignAgent = await db.agentIdentity.create({ data: { ownerId: outsider.id, name: "writer", scopes: ["changesets:write"] } });
+  const foreignAgent = await db.agentIdentity.create({ data: { ownerId: outsider.id, name: "writer", scopes: ["changesets:write", "changesets:read"] } });
   const secret = randomBytes(32).toString("hex");
   const foreignSecret = randomBytes(32).toString("hex");
   await db.agentCredential.createMany({ data: [
