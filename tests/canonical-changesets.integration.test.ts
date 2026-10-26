@@ -126,18 +126,53 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     assert.equal(await db.sourceChangesetEvent.count({ where: { changesetId: duplicate[0].id } }), 1);
   });
 
-  await t.test("deterministic property-style generated branching histories preserve state", async () => {
+  await t.test("seeded property exploration checks branching deltas against independent file-state oracle", async () => {
     let seed = 1731;
     const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed; };
+    type Entry = { objectId: string; mode: string };
+    const starting = await getCanonicalSnapshot(repo.id, root.id);
+    const states = new Map<string, Map<string, Entry>>([[root.id, new Map(starting.entries.map(e =>
+      [e.path, { objectId: e.objectId, mode: e.mode }]))]]);
     const history: string[] = [];
-    for (let i = 0; i < 18; i++) {
+    for (let i = 0; i < 28; i++) {
       const parent = i < 2 ? root.id : history[random() % history.length];
-      const key = "generated/" + i;
-      const created = await make("generated " + i, [parent], [{ kind: "ADD", path: key, objectId: i % 2 ? binary : empty }]);
+      const state = new Map(states.get(parent)!);
+      const names = [...state.keys()].sort();
+      const candidate = "generated/" + i;
+      const variant = random() % 6;
+      const source = names.length ? names[random() % names.length] : undefined;
+      let action: { kind: string; path: string; objectId?: string; previousPath?: string; mode?: string };
+      if (!source || variant === 0) {
+        const object = random() % 2 ? binary : empty;
+        action = { kind: "ADD", path: candidate, objectId: object };
+        state.set(candidate, { objectId: object, mode: "100644" });
+      } else if (variant === 1) {
+        const object = random() % 2 ? alpha : beta;
+        action = { kind: "MODIFY", path: source, objectId: object };
+        state.set(source, { objectId: object, mode: state.get(source)!.mode });
+      } else if (variant === 2) {
+        action = { kind: "RENAME", path: candidate, previousPath: source };
+        state.set(candidate, state.get(source)!);
+        state.delete(source);
+      } else if (variant === 3) {
+        action = { kind: "COPY", path: candidate, previousPath: source };
+        state.set(candidate, state.get(source)!);
+      } else if (variant === 4) {
+        action = { kind: "DELETE", path: source };
+        state.delete(source);
+      } else {
+        const next = state.get(source)!.mode === "100644" ? "100755" : "100644";
+        action = { kind: "CHMOD", path: source, mode: next };
+        state.set(source, { ...state.get(source)!, mode: next });
+      }
+      const created = await make("generated property " + i, [parent], [action]);
       history.push(created.id);
-      const state = await getCanonicalSnapshot(repo.id, created.id);
-      assert.ok(state.entries.some(x => x.path === key));
-      assert.equal(new Set(state.entries.map(x => x.path)).size, state.entries.length);
+      states.set(created.id, state);
+      const actual = (await getCanonicalSnapshot(repo.id, created.id)).entries
+        .map(e => [e.path, e.objectId, e.mode]);
+      const expected = [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
+        .map(([path, entry]) => [path, entry.objectId, entry.mode]);
+      assert.deepEqual(actual, expected, "seed " + seed + ", case " + i + ", operation " + action.kind);
       assert.equal((await getCanonicalChangeset(repo.id, created.id)).treeId, null);
     }
   });
