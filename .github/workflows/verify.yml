@@ -6,9 +6,13 @@ on:
     branches: [develop]
 permissions:
   contents: read
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     permissions:
       contents: write
     services:
@@ -76,7 +80,7 @@ jobs:
       - name: Unit tests
         run: npm test
       - name: PostgreSQL and Redis integration tests
-        run: npm run test:integration
+        run: timeout --signal=TERM 110s npm run test:integration
       - name: Production build
         run: npm run build
       - name: Start server against real database
