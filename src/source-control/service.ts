@@ -1,13 +1,14 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mutateReference } from "./refs";
+import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { changesetInputSchema, SourceControlError, type SourceActor, type FileOperation, type ChangesetReceipt } from "./contracts";
 import { decodeBlob, decodeTree, encodeTree, objectId } from "./storage";
 import { deriveChangesetMetadata } from "./derived";
+import { getCanonicalSnapshot } from "./canonical";
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+const refName = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
 export async function createChangeset(repositoryId: string, actor: SourceActor, body: unknown, retryCount = 0): Promise<ChangesetReceipt> {
   const parsed = changesetInputSchema.safeParse(body);
@@ -38,7 +39,11 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
     const parents = await tx.sourceChangeset.findMany({ where: { id: { in: input.parents }, repositoryId }, select: { id: true, treeId: true } });
     if (parents.length !== input.parents.length) throw new SourceControlError(422, "UNKNOWN_PARENT", "Parent not found in this repository");
     const baseId = input.parents[0];
-    const tree = baseId ? await tx.sourceObject.findUnique({ where: { id: parents.find(p => p.id === baseId)!.treeId } }) : null;
+    const legacyTreeId = baseId ? parents.find(p => p.id === baseId)?.treeId : null;
+    if (baseId && !legacyTreeId) {
+      throw new SourceControlError(409, "PARENT_VERSION_UNSUPPORTED", "The v1 writer cannot extend a v2 delta changeset; use the v2 API");
+    }
+    const tree = legacyTreeId ? await tx.sourceObject.findUnique({ where: { id: legacyTreeId } }) : null;
     if (tree && tree.kind !== "TREE") throw new Error("Parent references a non-tree object");
     const manifest = new Map((tree ? decodeTree(tree.data, tree.id) : []).map(e => [e.path, e.objectId]));
     for (const operation of operations) {
@@ -59,7 +64,10 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
     const treeId = objectId("TREE", treeBytes);
     const id = sha256(JSON.stringify([1, repositoryId, input.parents, treeId, actor.id, input.message, operations]));
     const existing = await tx.sourceChangeset.findUnique({ where: { id } });
-    if (existing) return { id, treeId: existing.treeId, created: false };
+    if (existing) {
+      if (!existing.treeId) throw new SourceControlError(409, "IDENTITY_CONFLICT", "Legacy content ID unexpectedly points to a delta changeset");
+      return { id, treeId: existing.treeId, created: false };
+    }
     const blobs = [...writes].map(([id, data]) => ({ id, kind: "BLOB" as const, data: Uint8Array.from(data), byteSize: data.length }));
     await tx.sourceObject.createMany({ data: [...blobs, { id: treeId, kind: "TREE" as const, data: Uint8Array.from(treeBytes), byteSize: treeBytes.length }], skipDuplicates: true });
     const metadata = deriveChangesetMetadata(operations);
@@ -97,6 +105,7 @@ export async function getTree(repositoryId: string, changesetId: string) {
   const change = await db.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId },
     include: { tree: true } });
   if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
+  if (!change.treeId || !change.tree) return getCanonicalSnapshot(repositoryId, changesetId);
   return { changesetId: change.id, treeId: change.treeId, entries: decodeTree(change.tree.data, change.treeId) };
 }
 
@@ -124,12 +133,39 @@ export async function approveChangeset(repositoryId: string, id: string, ownerId
   return changed;
 }
 
-// Backward-compatible entry point. All writes use the authoritative CAS manager.
-export async function advanceReference(repositoryId: string, name: string, changesetId: string,
-  expectedGeneration: number | null, actorId: string) {
-  const result = await mutateReference(repositoryId, actorId, {
-    name, changesetId, expectedGeneration, mutationId: randomUUID(),
-    operation: expectedGeneration === null ? "CREATE" : "UPDATE",
+export async function advanceReference(repositoryId: string, name: string, changesetId: string, expectedGeneration: number | null, actorId: string) {
+  if (!validPath(name) || !refName.test(name) || name.endsWith(".lock") || name.includes("..")) {
+    throw new SourceControlError(422, "INVALID_REFERENCE", "Invalid reference name");
+  }
+  if (expectedGeneration !== null && (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1)) {
+    throw new SourceControlError(422, "INVALID_GENERATION", "Expected generation must be a positive integer or null");
+  }
+  return db.$transaction(async tx => {
+    const repo = await tx.repository.findUnique({ where: { id: repositoryId } });
+    if (!repo) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Repository not found");
+    const changeset = await tx.sourceChangeset.findFirst({ where: { id: changesetId, repositoryId }, include: { validation: true } });
+    if (!changeset) throw new SourceControlError(404, "CHANGESET_NOT_FOUND", "Changeset not found in this repository");
+    if (changeset.validation?.state !== "SUCCESS") throw new SourceControlError(409, "VALIDATION_REQUIRED", "Integrity validation not successful");
+    if (repo.requireHumanApproval) {
+      const approval = await tx.sourceChangeApproval.findUnique({ where: { changesetId_userId: { changesetId, userId: repo.ownerId } } });
+      if (approval?.decision !== "APPROVED") throw new SourceControlError(403, "HUMAN_APPROVAL_REQUIRED", "Owner approval required before updating a reference");
+    }
+    if (expectedGeneration === null) {
+      const existing = await tx.sourceReference.findUnique({ where: { repositoryId_name: { repositoryId, name } } });
+      if (existing) throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference already exists");
+      await tx.sourceReference.create({ data: { repositoryId, name, changesetId, generation: 1 } });
+    } else {
+      const update = await tx.sourceReference.updateMany({ where: { repositoryId, name, generation: expectedGeneration },
+        data: { changesetId, generation: { increment: 1 } } });
+      if (update.count !== 1) throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference generation changed; read current value");
+    }
+    await tx.auditEvent.create({ data: { repositoryId, actorType: "HUMAN", actorId, action: "reference.advanced", subjectId: changesetId,
+      metadata: { name, previousGeneration: expectedGeneration } } });
+    return tx.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId, name } } });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }).catch(error => {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference was created concurrently");
+    }
+    throw error;
   });
-  return result.ref;
 }
