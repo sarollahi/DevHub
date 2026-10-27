@@ -55,7 +55,7 @@ test("protected bootstrap is fail-closed for direct creation, missing checks, in
    id:pipelineId,repositoryId:repo.id,changesetId:root.id,targetChangesetId:null,
    idempotencyKey:"bootstrap-evidence-"+suffix,requestedBy:"HUMAN:"+user.id,
    snapshotDigest:snapshot.digest,dependencyDigest:snapshot.dependencyDigest,
-   configurationDigest:configurationDigest(policy),state:"PASSED",tasks:{create:tasks},
+   configurationDigest:configurationDigest(policy),state:"PASSED",tasks:{create:tasks.map(({pipelineId: _pipelineId,...task})=>task)},
   }});
   await db.validationTask.update({where:{id:tasks[0].id},data:{signature:"invalid"}});
   await assert.rejects(()=>bootstrapProtectedBranch(repo.id,actor,request),fail("CHECKS_NOT_READY"));
