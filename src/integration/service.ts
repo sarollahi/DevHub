@@ -137,8 +137,14 @@ async function ensureStage(job: Integration, actor: SourceActor, stage: Stage): 
     await submitValidation(job.repositoryId, stage.subject, stage.target, key, actor);
     return false;
   }
-  return pipeline.state === "PASSED" &&
-    await hasVerifiedChecks(job.repositoryId, stage.subject, stage.target);
+  if (["FAILED", "ERRORED", "TIMED_OUT", "CANCELLED"].includes(pipeline.state)) {
+    throw new SourceControlError(409, "VALIDATION_FAILED", "Integration stage " + stage.name + " failed execution validation");
+  }
+  if (pipeline.state !== "PASSED") return false;
+  if (!await hasVerifiedChecks(job.repositoryId, stage.subject, stage.target)) {
+    throw new SourceControlError(409, "VALIDATION_STALE", "Integration stage evidence is missing, stale or unauthenticated");
+  }
+  return true;
 }
 async function lockAndVerifyStage(tx: Prisma.TransactionClient, job: Integration, stage: Stage,
   expected: Awaited<ReturnType<typeof snapshotFor>>) {
@@ -292,8 +298,9 @@ export async function executeIntegration(jobId: string, lease: string) {
   let baseId: string;
   let incomingId: string;
   if (job.mode === "REVERT") {
+    if (!job.revertIntegrationId) throw new SourceControlError(409, "INVALID_REVERT", "Missing exact source integration");
     const prior = await db.changeIntegration.findFirst({ where: {
-      id: job.revertIntegrationId ?? undefined, repositoryId: job.repositoryId,
+      id: job.revertIntegrationId, repositoryId: job.repositoryId,
       state: "INTEGRATED", targetRef: job.targetRef,
     } });
     if (!prior?.resultChangesetId || !prior.targetChangesetId ||

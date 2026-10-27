@@ -146,7 +146,7 @@ export async function mutateReference(repositoryId: string, actor: SourceActor, 
     // Existing protected refs can advance only through the integration service.
     // The legacy direct ref path checks manifest validity, not signed execution
     // evidence for the merged snapshot, so allowing it would bypass the gate.
-    if (input.operation === "UPDATE" && protectedRef && !input.force) {
+    if ((input.operation === "UPDATE" || input.operation === "RESTORE") && protectedRef && !input.force) {
       throw new SourceControlError(403, "INTEGRATION_REQUIRED", "Protected refs require validated integration");
     }
     if ((protectedRef || isDefault) && input.force) throw new SourceControlError(403, "PROTECTED_REFERENCE", "Force updates are forbidden on protected references");
