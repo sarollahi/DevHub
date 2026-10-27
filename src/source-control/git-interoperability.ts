@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, isAbsolute } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { db } from "../lib/prisma";
@@ -77,7 +77,7 @@ export async function gitObjectStream(dir: string, kind: string, source: Readabl
 export async function gitCacheDirectory(repositoryId: string) {
   if (!UUID.test(repositoryId)) throw new SourceControlError(404, "NOT_FOUND", "Invalid repository identifier");
   const root = process.env.GIT_INTEROP_ROOT;
-  if (!root || !resolve(root).startsWith("/")) throw new Error("GIT_INTEROP_ROOT must be an absolute, private directory");
+  if (!root || !isAbsolute(root)) throw new Error("GIT_INTEROP_ROOT must be an absolute, private directory");
   await mkdir(root, { recursive: true, mode: 0o700 });
   const rootStat = await lstat(root);
   if (rootStat.isSymbolicLink()) throw new Error("Git cache root must not be a symlink");
@@ -203,11 +203,22 @@ async function exportCommit(repositoryId: string, dir: string, changesetId: stri
     const original = await db.gitImportCommit.findUnique({ where: {
       repositoryId_changesetId: { repositoryId, changesetId },
     } });
-    const bytes = commitBytes({ treeSha, parents, changeId: changesetId, message: change.message,
-      authorId: change.authorId, date: change.createdAt, imported: original ?? undefined });
+    // Preserve raw pushed commits so rebuilding the cache never changes mapped Git IDs.
+    const bytes = mapped?.rawCommit ? Buffer.from(mapped.rawCommit) : commitBytes({
+      treeSha, parents, changeId: changesetId, message: change.message,
+      authorId: change.authorId, date: change.createdAt, imported: original ?? undefined,
+    });
+    if (mapped?.rawCommit) {
+      const header = bytes.toString("utf8").split("\\n\\n")[0];
+      const treeHeader = header.split("\\n").find(line => line.startsWith("tree "));
+      const parentHeaders = header.split("\\n").filter(line => line.startsWith("parent ")).map(line => line.slice(7));
+      if (treeHeader !== "tree " + treeSha || parentHeaders.join(",") !== parents.join(",")) {
+        throw new Error("Raw Git commit does not match authoritative native parents and tree");
+      }
+    }
     const sha = await gitObjectStream(dir, "commit", Readable.from([bytes]));
     await db.gitInteropCommit.createMany({
-      data: [{ repositoryId, changesetId, gitSha: sha, treeSha }], skipDuplicates: true,
+      data: [{ repositoryId, changesetId, gitSha: sha, treeSha, rawCommit: bytes }], skipDuplicates: true,
     });
     const saved = await db.gitInteropCommit.findUniqueOrThrow({ where: key });
     if (saved.gitSha !== sha || saved.treeSha !== treeSha) throw new Error("Persisted Git projection conflict");
