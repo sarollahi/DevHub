@@ -49,10 +49,10 @@ export async function assertRepositoryPermission(
 
   if (actor.type === "HUMAN") {
     if (actor.gitCredentialId) {
-      const token = await tx.gitInteropCredential.findUnique({ where: { id: actor.gitCredentialId },
-        include: { user: { select: { disabledAt: true } } } });
-      if (!token || token.userId !== actor.id || token.repositoryId !== repositoryId ||
-          token.revokedAt || token.expiresAt <= now || token.user.disabledAt) {
+      const token = await tx.gitInteropCredential.findUnique({ where: { id: actor.gitCredentialId } });
+      const user = token ? await tx.user.findUnique({ where: { id: token.userId }, select: { disabledAt: true } }) : null;
+      if (!token || !user || token.userId !== actor.id || token.repositoryId !== repositoryId ||
+          token.revokedAt || token.expiresAt <= now || user.disabledAt) {
         throw new SourceControlError(401, "GIT_CREDENTIAL_REVOKED", "Git credential expired or revoked");
       }
       if (!token.scopes.includes(capability)) {
