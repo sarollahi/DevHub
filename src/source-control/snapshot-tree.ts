@@ -60,6 +60,8 @@ function decode(data: Uint8Array): Node {
 export class SnapshotTree {
   private readonly cache = new Map<string, Node>();
   private readonly pending = new Map<string, Uint8Array>();
+  private nodeReadQueries = 0;
+  private nodeWriteQueries = 0;
   constructor(private readonly tx: Tx) {}
 
   private make(value: SnapshotEntry | null, edges: Edge[]): string {
@@ -78,6 +80,7 @@ export class SnapshotTree {
   private async read(id: string, expectedCount?: number): Promise<Node> {
     let node = this.cache.get(id);
     if (!node) {
+      this.nodeReadQueries++;
       const record = await this.tx.sourceSnapshotNode.findUnique({ where: { id }, select: { data: true } });
       if (!record || hash(record.data) !== id) throw invalid();
       node = decode(record.data);
@@ -199,10 +202,19 @@ export class SnapshotTree {
       for (const [, child] of node.edges) visit(child);
     };
     visit(root);
+    let newNodeCount = 0;
+    let newNodeBytes = 0;
     for (let i = 0; i < rows.length; i += 500) {
-      await this.tx.sourceSnapshotNode.createMany({ data: rows.slice(i, i + 500), skipDuplicates: true });
+      this.nodeWriteQueries++;
+      const created = await this.tx.sourceSnapshotNode.createManyAndReturn({
+        data: rows.slice(i, i + 500), skipDuplicates: true, select: { id: true },
+      });
+      newNodeCount += created.length;
+      for (const node of created) newNodeBytes += this.pending.get(node.id)!.byteLength;
     }
-    return rows.reduce((sum, row) => sum + row.data.byteLength, 0);
+    return { nodeReadQueries: this.nodeReadQueries, nodeWriteQueries: this.nodeWriteQueries,
+      newNodeCount, newNodeBytes };
+
   }
 
   async entries(root: string): Promise<Array<{ path: string } & SnapshotEntry>> {
