@@ -134,10 +134,11 @@ async function main() {
       where: { repositoryId_name: { repositoryId, name } },
     });
     currentByName.set(name, current);
-    if ((oldSha === NULL) !== !current || current?.deletedAt) {
+    const active = !!current && !current.deletedAt;
+    if ((oldSha === NULL) !== !active) {
       throw new Error("Native ref generation differs from Git advertisement; fetch and retry: " + name);
     }
-    if (current && await nativeForGitSha(repositoryId, oldSha) !== current.changesetId) {
+    if (active && await nativeForGitSha(repositoryId, oldSha) !== current!.changesetId) {
       throw new Error("Git ref is stale compared with native ref: " + name);
     }
     if (kind === "TAG" && (current || newSha === NULL)) {
@@ -152,7 +153,7 @@ async function main() {
       throw new Error("Only commits are accepted as Git ref targets");
     }
     let force = false;
-    if (current) {
+    if (active) {
       try { await gitText(dir, ["merge-base", "--is-ancestor", oldSha, newSha], 64); }
       catch { force = true; }
     }
@@ -211,7 +212,8 @@ async function main() {
     const current = currentByName.get(entry.name);
     const changesetId = await nativeForGitSha(repositoryId, entry.newSha);
     if (entry.newSha !== NULL && !changesetId) throw new Error("Git tip is not mapped to a native changeset");
-    const operation = entry.newSha === NULL ? "DELETE" : current ? "UPDATE" : "CREATE";
+    const operation = entry.newSha === NULL ? "DELETE" :
+      current?.deletedAt ? "RESTORE" : current ? "UPDATE" : "CREATE";
     const digest = createHash("sha256").update(JSON.stringify([entry.name, entry.oldSha, entry.newSha])).digest("hex");
     mutations.push({
       name: entry.name, kind: entry.kind, operation,
