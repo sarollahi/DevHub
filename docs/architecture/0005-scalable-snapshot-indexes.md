@@ -140,6 +140,11 @@ samples are *estimates*. Detailed PostgreSQL statement count, WAL bytes,
 database CPU and storage write amplification need external metrics and are
 reported as `null`, never inferred.
 
+Git importer now publishes a root in the same transaction as each imported
+revision, and verifies sampled Git trees via streaming Git paths and indexed
+native point lookups instead of replaying first-parent history. Direct SQL
+fixture seeders (including the browser harness) must publish roots explicitly.
+
 The integration test suite covers 300-operation changesets, keyset paging,
 independent readers while backfill advances, immutable root consistency,
 resuming interrupted migration and v1 compatibility. For additional
@@ -157,8 +162,10 @@ or p99 latency until a completed run and raw report are attached to the PR.
 * The older all-entry review, validation, diff and search paths can still
   materialize O(N) snapshots; large-repo consumption requires their own
   paginated or streaming conversion.
-* The ancestry API still has a 100,000-result cap. Deep ancestry query/index
-  migration is a separate requirement; indexed path operations do not use it.
+* The ancestry and merge-base queries now run recursive reachability inside
+  PostgreSQL, but callers explicitly requesting the entire ancestor list can
+  still materialize O(history) rows. Large DAG walks require query planning
+  and index tuning against million-revision fixtures.
 * 5,000 operations are bounded but are not a multipart transaction/upload
   protocol. Blob validation and authorization costs may dominate large writes.
 * Per-changeset checkpointing incurs durable write amplification. Native
