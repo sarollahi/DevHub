@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireRepositoryAccess, sourceFailure } from "@/source-control/http";
 import { SourceControlError } from "@/source-control/contracts";
 import { db } from "@/lib/prisma";
+import { assertRepositoryPermission } from "@/lib/authorization";
 export const runtime = "nodejs";
 // The journal is durable and immutable. Consumers must deduplicate event IDs.
 // This endpoint intentionally returns a bounded recent window rather than an
@@ -9,11 +10,12 @@ export const runtime = "nodejs";
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    await requireRepositoryAccess(req, id, "changesets:read");
+    const { actor } = await requireRepositoryAccess(req, id, "changesets:read");
     const limit = Number(req.nextUrl.searchParams.get("limit") ?? "100");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
       throw new SourceControlError(422, "INVALID_INPUT", "Limit must be 1–200");
     }
+    await assertRepositoryPermission(actor, id, "source:read");
     const records = await db.sourceRefMutation.findMany({
       where: { repositoryId: id }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: limit,
     });

@@ -1,29 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ZodError } from "zod";
 import { db } from "../lib/prisma";
-import { authenticateAgent, isAdminRequest, verifyBrowserOrigin } from "../lib/auth";
+import { requestIdentity, verifyBrowserOrigin } from "../lib/auth";
+import { assertRepositoryPermission, canonicalCapability, consumeRequestQuota, type AccessTarget } from "../lib/authorization";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { ObjectStorageError } from "../object-store/s3";
 
-export async function requireRepositoryAccess(request: NextRequest, repositoryId: string, scope: string, adminOnly = false):
-  Promise<{ actor: SourceActor; ownerId: string }> {
-  if (!/^[0-9a-f-]{36}$/i.test(repositoryId)) throw new SourceControlError(404, "NOT_FOUND", "Repository not found");
-  const repository = await db.repository.findUnique({ where: { id: repositoryId }, select: { ownerId: true } });
-  if (!repository) throw new SourceControlError(404, "NOT_FOUND", "Repository not found");
-  if (!adminOnly) {
-    const agent = await authenticateAgent(request, scope);
-    if (agent) {
-      if (agent.ownerId !== repository.ownerId) throw new SourceControlError(403, "REPOSITORY_FORBIDDEN", "Agent does not own this repository");
-      return { ownerId: repository.ownerId, actor: { id: agent.id, type: "AGENT" } };
-    }
-  }
-  if (!(await isAdminRequest(request))) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
-  if (request.method !== "GET" && !request.headers.get("authorization") && !verifyBrowserOrigin(request)) {
+export async function requireRepositoryAccess(
+  request: NextRequest, repositoryId: string, scope: string, adminOnly = false, target: AccessTarget = {},
+): Promise<{ actor: SourceActor; ownerId: string }> {
+  const actor = await requestIdentity(request);
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  if (adminOnly && actor.type !== "HUMAN") throw new SourceControlError(403, "HUMAN_REQUIRED", "Human session required");
+  if (request.method !== "GET" && actor.type === "HUMAN" && !verifyBrowserOrigin(request)) {
     throw new SourceControlError(403, "INVALID_ORIGIN", "Browser origin mismatch");
   }
-  return { ownerId: repository.ownerId, actor: { id: repository.ownerId, type: "HUMAN" } };
+  const capability = canonicalCapability(scope);
+  await assertRepositoryPermission(actor, repositoryId, capability, {
+    ...target, allowStaging: capability === "changeset:write" && request.method !== "GET",
+  });
+  await consumeRequestQuota(repositoryId, actor);
+  const repository = await db.repository.findUnique({ where: { id: repositoryId }, select: { ownerId: true } });
+  if (!repository) throw new SourceControlError(404, "NOT_FOUND", "Repository not found");
+  return { ownerId: repository.ownerId, actor };
 }
 
 export function sourceFailure(error: unknown) {
+  if (error instanceof ZodError) return NextResponse.json({ error: "INVALID_INPUT", issues: error.issues.map(i => ({ path: i.path, message: i.message })) }, { status: 422 });
   if (error instanceof SourceControlError) return NextResponse.json({ error: error.code, message: error.message }, { status: error.status });
   if (error instanceof ObjectStorageError) return NextResponse.json({ error: "OBJECT_STORAGE_ERROR", message: error.message }, { status: error.status >= 400 && error.status <= 599 ? error.status : 503 });
   console.error("Source-control request failed", error);

@@ -2,11 +2,13 @@ import { Prisma, type AgentIdentity } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { createPullRequestInput } from "../lib/validation";
 import { sha256 } from "../lib/review-logic";
+import { assertRepositoryPermission } from "../lib/authorization";
+import type { SourceActor } from "../source-control/contracts";
 
 export class IngestError extends Error {
   constructor(public status: number, public code: string, message: string, public retryAfter?: number) { super(message); }
 }
-export async function ingestPullRequest(agent: AgentIdentity, body: unknown, key: string) {
+export async function ingestPullRequest(agent: AgentIdentity, actor: SourceActor, body: unknown, key: string) {
   if (!/^[a-zA-Z0-9_-]{8,128}$/.test(key)) throw new IngestError(400, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key must be 8 to 128 safe characters");
   const parsed = createPullRequestInput.safeParse(body);
   if (!parsed.success) throw new IngestError(422, "INVALID_INPUT", parsed.error.issues.map((i) => i.message).join("; "));
@@ -17,7 +19,7 @@ export async function ingestPullRequest(agent: AgentIdentity, body: unknown, key
     return await db.$transaction(async (tx) => {
       const repo = await tx.repository.findFirst({ where: { slug, owner: { handle } } });
       if (!repo) throw new IngestError(404, "REPOSITORY_NOT_FOUND", "Repository not found");
-      if (repo.ownerId !== agent.ownerId) throw new IngestError(403, "REPOSITORY_FORBIDDEN", "Agent does not own this repository");
+      await assertRepositoryPermission(actor, repo.id, "changeset:write", { paths: input.changedFiles, branch: input.targetBranch }, tx);
       if (input.nativeChangesetId) {
         const native = await tx.sourceChangeset.findFirst({ where: {
           id: input.nativeChangesetId, repositoryId: repo.id,

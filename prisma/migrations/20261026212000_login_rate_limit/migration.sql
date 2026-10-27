@@ -1,0 +1,1 @@
+CREATE TABLE "LoginRateBucket" ("key" CHAR(64) NOT NULL, "windowStart" TIMESTAMP(3) NOT NULL, "count" INTEGER NOT NULL DEFAULT 0, CONSTRAINT "LoginRateBucket_pkey" PRIMARY KEY ("key", "windowStart"));

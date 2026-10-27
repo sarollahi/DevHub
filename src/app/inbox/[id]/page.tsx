@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect, notFound } from "next/navigation";
-import { isAdminRequest } from "@/lib/auth";
+import { sessionIdentity } from "@/lib/auth";
+import { assertRepositoryPermission } from "@/lib/authorization";
 import { db } from "@/lib/prisma";
 import { canApprove } from "@/lib/review-logic";
 import Icon from "@/components/icons";
@@ -10,10 +11,12 @@ import ApproveButton from "./approve-button";
 import { hasVerifiedChecks } from "@/validation/service";
 export const dynamic="force-dynamic";
 export default async function Detail({params}:{params:Promise<{id:string}>}) {
-  if (!(await isAdminRequest())) redirect("/login");
+  const actor = await sessionIdentity();
+  if (!actor) redirect("/login");
   const { id } = await params;
   const pr = await db.pullRequest.findUnique({where:{id},include:{agent:true,repository:{include:{owner:true}},checks:{orderBy:{createdAt:"desc"}},fingerprints:true,approvals:true}});
   if (!pr) notFound();
+  try { await assertRepositoryPermission(actor, pr.repositoryId, "source:read"); } catch { notFound(); }
   const nativeChecks = pr.nativeChangesetId
     ? await hasVerifiedChecks(pr.repositoryId, pr.nativeChangesetId, null) : false;
   const latestValidation = pr.nativeChangesetId ? await db.validationPipeline.findFirst({

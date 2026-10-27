@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string; objectId: string }> }) {
   try {
     const { id, objectId } = await params;
-    await requireRepositoryAccess(req, id, "changesets:read");
-    return NextResponse.json({ apiVersion: 1, ...(await getObject(id, objectId)) });
+    const { actor } = await requireRepositoryAccess(req, id, "changesets:read");
+    return NextResponse.json({ apiVersion: 1, ...(await getObject(id, objectId, actor)) });
   } catch (error) { return sourceFailure(error); }
 }

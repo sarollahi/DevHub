@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
-import { isAdminRequest } from "@/lib/auth";
+import { sessionIdentity } from "@/lib/auth";
+import { permittedRepositoryIds } from "@/lib/tenant";
 import { db } from "@/lib/prisma";
 import WorkspaceShell from "@/components/workspace-shell";
 import Icon from "@/components/icons";
@@ -8,15 +9,18 @@ import Link from "next/link";
 export const dynamic = "force-dynamic";
 
 export default async function Inbox() {
-  if (!(await isAdminRequest())) redirect("/login");
+  const actor = await sessionIdentity();
+  if (!actor) redirect("/login");
+  const allowed = await permittedRepositoryIds(actor);
+  const repoScope = { repositoryId: { in: allowed } };
   const [prs, grouped, duplicates, pendingOutbox, agents, repos, highRisk] = await Promise.all([
-    db.pullRequest.findMany({ orderBy: { createdAt: "desc" }, take: 100, select: { id:true, title:true, state:true, riskTier:true, createdAt:true, sourceBranch:true, changedFiles:true, agent:{ select:{ name:true } }, repository:{ select:{ slug:true, owner:{ select:{ handle:true } } } }, fingerprints:{ select:{ relatedCount:true } } } }),
-    db.pullRequest.groupBy({ by:["state"], _count:{ id:true } }),
-    db.changeFingerprint.count({ where:{ relatedCount:{ gt:0 } } }),
-    db.outboxEvent.count({ where:{ state:"PENDING" } }),
-    db.agentIdentity.count({ where:{ status:"ACTIVE" } }),
-    db.repository.count(),
-    db.pullRequest.count({ where:{ riskTier:{ in:["HIGH","CRITICAL"] }, state:{ in:["REVIEW_REQUIRED","APPROVED"] } } }),
+    db.pullRequest.findMany({ where: repoScope, orderBy: { createdAt: "desc" }, take: 100, select: { id:true, title:true, state:true, riskTier:true, createdAt:true, sourceBranch:true, changedFiles:true, agent:{ select:{ name:true } }, repository:{ select:{ slug:true, owner:{ select:{ handle:true } } } }, fingerprints:{ select:{ relatedCount:true } } } }),
+    db.pullRequest.groupBy({ where: repoScope, by:["state"], _count:{ id:true } }),
+    db.changeFingerprint.count({ where:{ ...repoScope, relatedCount:{ gt:0 } } }),
+    db.outboxEvent.count({ where:{ state:"PENDING", aggregateType: "PullRequest", aggregateId: { in: (await db.pullRequest.findMany({ where: repoScope, select: { id: true }, take: 1000 })).map(x => x.id) } } }),
+    db.agentIdentity.count({ where:{ status:"ACTIVE", ownerId: actor.id } }),
+    db.repository.count({ where: { id: { in: allowed } } }),
+    db.pullRequest.count({ where:{ ...repoScope, riskTier:{ in:["HIGH","CRITICAL"] }, state:{ in:["REVIEW_REQUIRED","APPROVED"] } } }),
   ]);
   const counts = Object.fromEntries(grouped.map(x => [x.state,x._count.id]));
   const total = grouped.reduce((s,x) => s+x._count.id,0);

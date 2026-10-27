@@ -4,6 +4,8 @@ import { randomBytes } from "node:crypto";
 import { NextRequest } from "next/server";
 import { db } from "../src/lib/prisma";
 import { tokenHash, authenticateAgent } from "../src/lib/auth";
+import { testSession } from "./support/identities";
+import { SourceControlError } from "../src/source-control/contracts";
 import { ingestPullRequest, IngestError } from "../src/services/ingest";
 import { createQueue, redisConnection } from "../src/lib/queue";
 import { dispatchBatch } from "../src/workers/dispatcher";
@@ -18,7 +20,12 @@ test("real PostgreSQL and Redis: admission, outbox, durable retries and human ap
   const agent = await db.agentIdentity.create({ data: { ownerId: user.id, name: "integration", scopes: ["pull_requests:write"] } });
   const forbiddenAgent = await db.agentIdentity.create({ data: { ownerId: outsider.id, name: "integration", scopes: ["pull_requests:write"] } });
   const secret = randomBytes(32).toString("hex");
-  await db.agentCredential.create({ data: { agentId: agent.id, tokenHash: tokenHash(secret), label: "integration" } });
+  const cred = await db.agentCredential.create({ data: { agentId: agent.id, tokenHash: tokenHash(secret), label: "integration",
+    scopes: ["pull_requests:write"], expiresAt: new Date(Date.now()+3600000) } });
+  await db.agentDelegation.create({ data: { agentId: agent.id, repositoryId: repo.id, delegatedBy: user.id,
+    scopes: ["pull_requests:write"], expiresAt: new Date(Date.now()+3600000) } });
+  const actor = { type: "AGENT" as const, id: agent.id, credentialId: cred.id };
+  const human = await testSession(user.id);
   const queueConnection = redisConnection();
   const queue = createQueue(queueConnection);
   let worker: ReturnType<typeof createPreflightWorker> | undefined;
@@ -63,22 +70,22 @@ test("real PostgreSQL and Redis: admission, outbox, durable retries and human ap
       "repositories:admin",
     ), null);
     await assert.rejects(
-      () => ingestPullRequest(forbiddenAgent, input, `forbidden-${unique}`),
-      (error: unknown) => error instanceof IngestError && error.status === 403,
+      () => ingestPullRequest(forbiddenAgent, { type: "AGENT", id: forbiddenAgent.id }, input, `forbidden-${unique}`),
+      (error: unknown) => error instanceof SourceControlError && error.status === 401,
     );
     assert.equal(await db.pullRequest.count({ where: { repositoryId: repo.id } }), 0);
   });
 
   const key = `once-${unique}`;
-  const first = await ingestPullRequest(agent, input, key);
+  const first = await ingestPullRequest(agent, actor, input, key);
   ids.push(first.item.id);
   await t.test("idempotent creation persists job and outbox atomically", async () => {
     assert.equal(first.created, true);
-    const replay = await ingestPullRequest(agent, input, key);
+    const replay = await ingestPullRequest(agent, actor, input, key);
     assert.equal(replay.created, false);
     assert.equal(replay.item.id, first.item.id);
     await assert.rejects(
-      () => ingestPullRequest(agent, { ...input, patch: "+different change" }, key),
+      () => ingestPullRequest(agent, actor, { ...input, patch: "+different change" }, key),
       (error: unknown) => error instanceof IngestError && error.status === 409,
     );
     assert.equal(await db.pullRequest.count({ where: { repositoryId: repo.id } }), 1);
@@ -108,18 +115,18 @@ test("real PostgreSQL and Redis: admission, outbox, durable retries and human ap
     assert.equal(denied.status, 401);
     assert.equal(await db.approval.count({ where: { pullId: first.item.id } }), 0);
     const accepted = await approve(new NextRequest(endpoint, { method: "POST", headers: {
-      authorization: `Bearer ${process.env.ADMIN_TOKEN}`,
+      ...human.headers,
     } }), params);
     assert.equal(accepted.status, 409);
     assert.equal(await db.approval.count({ where: { pullId: first.item.id } }), 0);
     assert.equal((await db.pullRequest.findUniqueOrThrow({ where: { id: first.item.id } })).state, "REVIEW_REQUIRED");
     assert.equal((await approve(new NextRequest(endpoint, { method: "POST", headers: {
-      authorization: `Bearer ${process.env.ADMIN_TOKEN}`,
+      ...human.headers,
     } }), params)).status, 409);
   });
 
   await t.test("production worker retries a failed attempt and commits a single result", async () => {
-    const second = await ingestPullRequest(agent, { ...input, title: "Retry integration", sourceBranch: "feature/retry" }, `retry-${unique}`);
+    const second = await ingestPullRequest(agent, actor, { ...input, title: "Retry integration", sourceBranch: "feature/retry" }, `retry-${unique}`);
     ids.push(second.item.id);
     const job = await db.queueJob.findFirstOrThrow({ where: { pullId: second.item.id } });
     await db.pullRequest.update({ where: { id: second.item.id }, data: { changedFiles: ["../invalid"] } });

@@ -9,9 +9,10 @@ import { NextRequest } from "next/server";
 import { db } from "../src/lib/prisma";
 import { objectId, encodeTree } from "../src/source-control/storage";
 import { createChangeset } from "../src/source-control/service";
+import { testSession } from "./support/identities";
 import { compareEntries, mergeEntries, matchingLines } from "../src/source-control/query-algorithms";
 import {
-  ancestryQuery, mergeBases, compareQuery, treeQuery, resolvePath, diffQuery,
+  runAuthorizedQuery, ancestryQuery, mergeBases, compareQuery, treeQuery, resolvePath, diffQuery,
   fileHistory, blameQuery, mergeQuery, rebaseQuery, pathImpactQuery,
 } from "../src/source-control/query";
 import { GET as queryRoute } from "../src/app/api/v1/repositories/[id]/query/[operation]/route";
@@ -39,7 +40,8 @@ test("native indexed query APIs agree with independent DAG reference and Git fix
   const suffix = randomBytes(8).toString("hex");
   const owner = await db.user.create({ data: { handle: "query-" + suffix, email: suffix + "@example.invalid" } });
   const repository = await db.repository.create({ data: { ownerId: owner.id, slug: "query", name: "Query fixtures" } });
-  const actor = { type: "HUMAN" as const, id: owner.id };
+  const human = await testSession(owner.id);
+  const actor = human.actor;
   const created: string[] = [];
   const treeObjects = new Set<string>();
   const allBlobs = new Set<string>();
@@ -65,6 +67,7 @@ test("native indexed query APIs agree with independent DAG reference and Git fix
     await db.user.delete({ where: { id: owner.id } });
   });
 
+  await runAuthorizedQuery(actor, repository.id, async () => {
   const root = await add([], "root", [put("docs/a.txt", "one\ntwo\n"), put("src/app.ts", "export const x=1;\n")]);
   const moved = await add([root], "rename", [{ kind: "MOVE", previousPath: "docs/a.txt", path: "docs/b.txt" }]);
   const left = await add([moved], "edit", [put("docs/b.txt", "one\nTWO\n")]);
@@ -128,7 +131,7 @@ test("native indexed query APIs agree with independent DAG reference and Git fix
     const noAuth = await queryRoute(new NextRequest(uri + "/query/blame?revision=" + left + "&path=docs%2Fb.txt"),
       { params: Promise.resolve(params) });
     assert.equal(noAuth.status, 401);
-    const headers = { authorization: `Bearer ${process.env.ADMIN_TOKEN!}` };
+    const headers = human.headers;
     const response = await queryRoute(new NextRequest(uri + "/query/blame?revision=" + left + "&path=docs%2Fb.txt", { headers }),
       { params: Promise.resolve(params) });
     assert.equal(response.status, 200);
@@ -181,6 +184,7 @@ test("native indexed query APIs agree with independent DAG reference and Git fix
       assert.equal(base, git("rev-parse", "main"));
       assert.deepEqual(await mergeBases(repository.id, left, right), [moved]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
   });
 });
 

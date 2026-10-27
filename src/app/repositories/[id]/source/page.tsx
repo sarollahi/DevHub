@@ -1,14 +1,17 @@
 import Link from "next/link";
 import { redirect, notFound } from "next/navigation";
-import { isAdminRequest } from "@/lib/auth";
+import { sessionIdentity } from "@/lib/auth";
+import { assertRepositoryPermission } from "@/lib/authorization";
 import { db } from "@/lib/prisma";
 import WorkspaceShell from "@/components/workspace-shell";
 import SourceControls from "./source-controls";
 export const dynamic = "force-dynamic";
 
 export default async function SourcePage({ params }: { params: Promise<{ id: string }> }) {
-  if (!(await isAdminRequest())) redirect("/login");
+  const actor = await sessionIdentity();
+  if (!actor) redirect("/login");
   const { id } = await params;
+  try { await assertRepositoryPermission(actor, id, "source:read"); } catch { notFound(); }
   const repo = await db.repository.findUnique({ where: { id }, include: { owner: true } });
   if (!repo) notFound();
   const [refs, refHistory, changesets] = await Promise.all([

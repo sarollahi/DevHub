@@ -7,6 +7,7 @@ import { validPath } from "../lib/review-logic";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { decodeTree, objectId } from "./storage";
 import { deriveChangesetMetadata } from "./derived";
+import { assertRepositoryPermission } from "../lib/authorization";
 import { verifiedBlobStream } from "../object-store/service";
 
 const digest = (data: string) => createHash("sha256").update(data).digest("hex");
@@ -168,7 +169,7 @@ function checkSymlink(path: string, bytes: Uint8Array) {
   }
 }
 
-export async function stageCanonicalBlob(repositoryId: string, dataBase64: unknown) {
+export async function stageCanonicalBlob(repositoryId: string, actor: SourceActor, dataBase64: unknown) {
   if (typeof dataBase64 !== "string" || dataBase64.length > Math.ceil(limits.maxObjectBytes / 3) * 4 + 4
     || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(dataBase64)) {
     throw new SourceControlError(422, "INVALID_OBJECT", "Canonical base64 is required");
@@ -179,11 +180,17 @@ export async function stageCanonicalBlob(repositoryId: string, dataBase64: unkno
   }
   const blobId = objectId("BLOB", data);
   await db.$transaction(async tx => {
-    const repo = await tx.repository.findUnique({ where: { id: repositoryId }, select: { id: true } });
+    await assertRepositoryPermission(actor, repositoryId, "changeset:write", { allowStaging: true }, tx);
+    const repo = await tx.repository.findUnique({ where: { id: repositoryId }, select: { id: true, maxStoredBytes: true } });
     if (!repo) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Unknown repository");
     await tx.sourceObject.createMany({ data: [{ id: blobId, kind: "BLOB", data, byteSize: data.length }], skipDuplicates: true });
     await checkedBlobAfterInsert(tx, blobId);
-    await tx.sourceObjectGrant.createMany({ data: [{ repositoryId, objectId: blobId }], skipDuplicates: true });
+    const granted = await tx.sourceObjectGrant.createMany({ data: [{ repositoryId, objectId: blobId }], skipDuplicates: true });
+    if (granted.count) {
+      const reserved = await tx.repository.updateMany({ where: { id: repositoryId, storedBytes: { lte: repo!.maxStoredBytes - BigInt(data.length) } },
+        data: { storedBytes: { increment: data.length } } });
+      if (!reserved.count) throw new SourceControlError(429, "STORAGE_QUOTA", "Repository object storage quota exceeded");
+    }
   });
   return { id: blobId, byteSize: data.length };
 }
@@ -213,6 +220,8 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
   const changesetId = canonicalId(repositoryId, authorId, input);
   try {
     return await db.$transaction(async tx => {
+      await assertRepositoryPermission(actor, repositoryId, "changeset:write", { paths: input.operations.flatMap(op =>
+        "previousPath" in op ? [op.path, op.previousPath] : [op.path]) }, tx);
       const repository = await tx.repository.findUnique({ where: { id: repositoryId }, select: { id: true } });
       if (!repository) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Unknown repository");
       if (input.idempotencyKey) {
@@ -300,28 +309,35 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
   }
 }
 
-export async function getCanonicalChangeset(repositoryId: string, changesetId: string) {
+export async function getCanonicalChangeset(repositoryId: string, changesetId: string, actor?: SourceActor) {
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
   const record = await db.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId },
     include: { parents: { orderBy: { position: "asc" } }, operations: { orderBy: { position: "asc" } }, validation: true } });
   if (!record) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
   return record;
 }
 
-export async function listCanonicalChangesets(repositoryId: string, limit = 30) {
+export async function listCanonicalChangesets(repositoryId: string, limit = 30, actor?: SourceActor) {
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
   return db.sourceChangeset.findMany({ where: { repositoryId },
     take: Math.min(100, Math.max(1, limit)), orderBy: [{ createdAt: "desc" }, { id: "asc" }],
     include: { parents: { orderBy: { position: "asc" } },
       operations: { orderBy: { position: "asc" } } } });
 }
 
-export async function getCanonicalSnapshot(repositoryId: string, changesetId: string) {
-  const change = await getCanonicalChangeset(repositoryId, changesetId);
+export async function getCanonicalSnapshot(repositoryId: string, changesetId: string, actor?: SourceActor) {
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  const change = await getCanonicalChangeset(repositoryId, changesetId, actor);
   const state = await db.$transaction(tx => snapshot(tx, repositoryId, changesetId), { timeout: 20000 });
   return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
     .map(([path, entry]) => ({ path, ...entry })) };
 }
 
-export async function listCanonicalEvents(repositoryId: string, limit = 30) {
+export async function listCanonicalEvents(repositoryId: string, limit = 30, actor?: SourceActor) {
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
   return db.sourceChangesetEvent.findMany({ where: { repositoryId },
     orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: Math.min(100, Math.max(1, limit)) });
 }

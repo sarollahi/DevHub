@@ -8,13 +8,13 @@ export const runtime = "nodejs";
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string; changesetId: string }> }) {
   try {
     const { id, changesetId } = await params;
-    await requireRepositoryAccess(request, id, "changesets:read");
+    const { actor } = await requireRepositoryAccess(request, id, "changesets:read");
     const selects = request.nextUrl.searchParams.getAll("select");
     if (selects.length > 128 || selects.some(x => !/^[fd]:/.test(x) ||
       (x !== "d:." && !validPath(x.slice(2))))) {
       throw new SourceControlError(422, "INVALID_SELECTION", "Expected select=f:path or select=d:path");
     }
-    const state = await getCanonicalSnapshot(id, changesetId);
+    const state = await getCanonicalSnapshot(id, changesetId, actor);
     const entries = selects.length ? state.entries.filter(entry => selects.some(selector => {
       if (selector === "d:.") return true;
       const path = selector.slice(2);
