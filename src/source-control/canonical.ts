@@ -206,6 +206,17 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
         const tree = new SnapshotTree(tx);
         let rootId = await rootFor(tx, repositoryId, input.parents[0], tree);
         const touched = new Set<string>();
+        // Idempotent blob integrity/ownership checks are memoized for repeated
+        // objects in large operation batches. Symlink targets require bytes.
+        const blobProof = new Map<string, Uint8Array>();
+        const verifyObject = async (objectRef: string, asSymlink: boolean) => {
+          const cacheKey = objectRef + ":" + (asSymlink ? "link" : "blob");
+          const cached = blobProof.get(cacheKey);
+          if (cached) return cached;
+          const verified = await checkedBlob(tx, repositoryId, objectRef, asSymlink);
+          blobProof.set(cacheKey, verified);
+          return verified;
+        };
         const persisted = [];
         for (const [position, op] of input.operations.entries()) {
           if (touched.has(op.path)) throw new SourceControlError(422, "DUPLICATE_PATH", op.path);
@@ -221,10 +232,10 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
           const original = "previousPath" in op ? op.previousPath : null;
           if (op.kind === "ADD" || op.kind === "MODIFY") {
             const isSymlink = (requestedMode || old?.mode) === "120000";
-            const bytes = await checkedBlob(tx, repositoryId, objectRef!, isSymlink);
+            const bytes = await verifyObject(objectRef!, isSymlink);
             if (isSymlink) checkSymlink(op.path, bytes);
           } else if ((op.kind === "COPY" || op.kind === "RENAME") && source?.mode === "120000") {
-            const bytes = await checkedBlob(tx, repositoryId, source.objectId, true);
+            const bytes = await verifyObject(source.objectId, true);
             checkSymlink(op.path, bytes);
           }
           if (op.kind === "ADD" || op.kind === "MODIFY") {
