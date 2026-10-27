@@ -8,6 +8,8 @@ import { stageGitBlob, verifyAndReadBlob } from "./git-import-blobs";
 import { mutateReference } from "./refs";
 import { assertRepositoryPermission } from "../lib/authorization";
 import { SourceControlError, type SourceActor } from "./contracts";
+import { SnapshotTree, publishedSnapshotRoot } from "./snapshot-tree";
+import { applyHistoricalOperations } from "./snapshot-backfill";
 
 type ImportedOperation = {
   kind: SourceOperationKind; path: string; objectId: string | null;
@@ -154,11 +156,30 @@ export async function publishGitCommit(repositoryId: string, cwd: string, commit
       paths: operations.flatMap(op => op.previousPath ? [op.path, op.previousPath] : [op.path]),
     }, tx);
     if (await tx.gitImportCommit.findUnique({ where: { repositoryId_gitSha: { repositoryId, gitSha: commit.sha } } })) return;
+    // Imported commits must publish the same immutable path index as native
+    // changesets. A separate post-import backfill would break Git projections,
+    // native reads and crash recovery between the commit and its root.
+    const tree = new SnapshotTree(tx);
+    let parentRoot = tree.empty();
+    if (parents.length) {
+      const published = await publishedSnapshotRoot(tx, repositoryId, parents[0]);
+      if (!published) {
+        throw new SourceControlError(409, "SNAPSHOT_NOT_MATERIALIZED",
+          "Import parent requires checkpoint migration before incremental import");
+      }
+      parentRoot = published.rootId;
+      await tree.count(parentRoot);
+    }
+    const nextRoot = await applyHistoricalOperations(tree, parentRoot, operations);
+    await tree.persist(nextRoot);
     // One transaction publishes the complete change, its ancestry, imported identity, and event.
     await tx.sourceChangeset.create({ data: {
       id: changesetId, repositoryId, treeId: null,
       authorId: "GIT:" + commit.author.name + " <" + commit.author.email + ">",
       message: commit.message, createdAt: commit.author.date,
+    } });
+    await tx.sourceSnapshotRoot.create({ data: {
+      repositoryId, changesetId, rootId: nextRoot,
     } });
     if (parents.length) await tx.sourceChangesetParent.createMany({ data: parents.map((parentId, position) => ({
       changesetId, parentId, position,
