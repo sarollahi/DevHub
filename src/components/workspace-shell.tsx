@@ -16,7 +16,7 @@ export default function WorkspaceShell({ active, title, description, children, a
       <div className="brand"><div className="brand-mark"><Icon name="layers" size={19} /></div><span>DevHub</span><span className="brand-beta">BETA</span></div>
       <div className="workspace-picker"><span className="workspace-avatar">S</span><span className="workspace-picker-text"><strong>sarollahi</strong><small>Developer workspace</small></span><Icon name="chevron-down" size={15} className="muted" /></div>
       <div className="nav-section-label">WORKSPACE</div>
-      <nav className="side-navigation" aria-label="Workspace navigation">{nav.map(item => <Link href={item.href} className={`nav-item${active === item.href ? " active" : ""}`} key={item.href}><Icon name={item.icon} size={17} /><span>{item.title}</span>{item.href === "/merge-queue" && <span className="small-pill">Soon</span>}</Link>)}</nav>
+      <nav className="side-navigation" aria-label="Workspace navigation">{nav.map(item => <Link href={item.href} className={`nav-item${active === item.href ? " active" : ""}`} key={item.href}><Icon name={item.icon} size={17} /><span>{item.title}</span></Link>)}</nav>
       <div className="sidebar-divider"/><div className="nav-section-label">PLATFORM</div>
       <div className="platform-info"><span className="health-indicator" /><div><strong>Processing pipeline</strong><small>Database-backed workload</small></div></div>
       <div className="sidebar-footer"><div className="sidebar-user"><div className="user-avatar">S</div><div><strong>Signed-in developer</strong><small>Administrator</small></div></div><form action="/api/auth/logout" method="post"><button type="submit" className="signout-button">Sign out</button></form></div>
