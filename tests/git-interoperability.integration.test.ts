@@ -107,6 +107,40 @@ test("native binary/modes/ancestry round-trip over Git smart HTTP with fail-clos
     await syncGitProjection(repository.id, actor, cache);
     assert.equal((await git(cache, "rev-parse", "refs/heads/dev")), pushedSha,
       "native ref re-export must not rewrite an accepted Git push");
+
+    // A two-parent Git merge must preserve parent order and materialized tree.
+    await git(clone, "checkout", "-b", "merge-side");
+    await writeFile(join(clone, "side.txt"), "merged from side\n");
+    await git(clone, "add", "side.txt");
+    await git(clone, "commit", "-m", "Side branch");
+    const sideSha = await git(clone, "rev-parse", "HEAD");
+    await git(clone, "checkout", "dev");
+    await writeFile(join(clone, "main.txt"), "merged from main\n");
+    await git(clone, "add", "main.txt");
+    await git(clone, "commit", "-m", "Main branch");
+    const mainSha = await git(clone, "rev-parse", "HEAD");
+    await git(clone, "merge", "--no-ff", "merge-side", "-m", "Ordered merge");
+    const mergeSha = await git(clone, "rev-parse", "HEAD");
+    await git(clone, "-c", "http.extraHeader=" + header, "push", "origin", "HEAD:dev");
+    const merged = await db.gitImportCommit.findUniqueOrThrow({ where: {
+      repositoryId_gitSha: { repositoryId: repository.id, gitSha: mergeSha },
+    } });
+    const parentRows = await db.sourceChangesetParent.findMany({
+      where: { changesetId: merged.changesetId }, orderBy: { position: "asc" },
+    });
+    const [main, side] = await Promise.all([mainSha, sideSha].map(sha =>
+      db.gitImportCommit.findUniqueOrThrow({ where: {
+        repositoryId_gitSha: { repositoryId: repository.id, gitSha: sha },
+      } })));
+    assert.deepEqual(parentRows.map(x => x.parentId), [main.changesetId, side.changesetId]);
+    await syncGitProjection(repository.id, actor, cache);
+    assert.equal(await git(cache, "rev-parse", "refs/heads/dev"), mergeSha);
+    await git(clone, "tag", "v1.0.0");
+    await git(clone, "-c", "http.extraHeader=" + header, "push", "origin", "refs/tags/v1.0.0");
+    assert.equal((await db.sourceReference.findUniqueOrThrow({ where: {
+      repositoryId_name: { repositoryId: repository.id, name: "tags/v1.0.0" },
+    } })).changesetId, merged.changesetId);
+
     await writeFile(join(clone, "protected.txt"), "cannot create protected main with direct push");
     await git(clone, "add", "protected.txt");
     await git(clone, "commit", "-m", "Protected branch attempt");
@@ -116,13 +150,16 @@ test("native binary/modes/ancestry round-trip over Git smart HTTP with fail-clos
       repositoryId_name: { repositoryId: repository.id, name: "protected-main" },
     } }), null);
     // Native concurrent advancement must invalidate a stale Git writer.
+    const latest = await db.sourceReference.findUniqueOrThrow({ where: {
+      repositoryId_name: { repositoryId: repository.id, name: "dev" },
+    } });
     const newerBlob = await stageCanonicalBlob(repository.id, actor, Buffer.from("native\n").toString("base64"));
     const newer = await createCanonicalChangeset(repository.id, actor, {
-      apiVersion: 2, parents: [updated.changesetId], description: "Concurrent native change",
+      apiVersion: 2, parents: [latest.changesetId], description: "Concurrent native change",
       operations: [{ kind: "ADD", path: "from-native.txt", objectId: newerBlob.id }],
     });
     await mutateReference(repository.id, actor, { name: "dev", kind: "BRANCH", operation: "UPDATE",
-      changesetId: newer.id, expectedGeneration: updated.generation, expectedChangesetId: updated.changesetId,
+      changesetId: newer.id, expectedGeneration: latest.generation, expectedChangesetId: latest.changesetId,
       mutationId: "test-git-interop-native-race" });
     await assert.rejects(() => git(clone, "-c", "http.extraHeader=" + header, "push", "origin", "HEAD:dev"),
       /rejected|fetch first|non-fast-forward|failed/i);
