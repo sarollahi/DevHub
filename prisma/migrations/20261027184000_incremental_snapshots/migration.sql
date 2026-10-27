@@ -34,3 +34,18 @@ $$;
 CREATE TRIGGER "snapshot_root_repository_guard"
 BEFORE INSERT OR UPDATE ON "SourceSnapshotRoot"
 FOR EACH ROW EXECUTE FUNCTION verify_snapshot_root_repository();
+
+-- Both structures are append-only; failed publications are rolled back with
+-- their nodes. Reachability-based pruning, if introduced, must be coordinated
+-- with active publication transactions rather than deleting arbitrary rows.
+CREATE OR REPLACE FUNCTION reject_immutable_snapshot_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'immutable snapshot rows cannot be modified';
+END
+$$;
+CREATE TRIGGER "snapshot_node_immutable"
+BEFORE UPDATE OR DELETE ON "SourceSnapshotNode"
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_snapshot_change();
+CREATE TRIGGER "snapshot_root_immutable"
+BEFORE UPDATE OR DELETE ON "SourceSnapshotRoot"
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_snapshot_change();
