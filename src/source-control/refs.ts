@@ -3,7 +3,7 @@ import { Prisma, type SourceRefKind } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { assertRepositoryPermission } from "../lib/authorization";
-import { assertSignedProtectedTip } from "../integration/protected-evidence";
+import { assertSignedProtectedTip, assertSignedGitProtectedUpdate } from "../integration/protected-evidence";
 
 export type RefOperation = "CREATE" | "UPDATE" | "DELETE" | "RESTORE";
 export type RefMutationRequest = {
@@ -178,11 +178,19 @@ async function mutateWithinTransaction(tx: Prisma.TransactionClient, repositoryI
     if (isDefault && kind !== "BRANCH") throw new SourceControlError(422, "INVALID_REFERENCE_KIND", "Default branch must be a branch");
     const policy = await tx.sourceReferencePolicy.findUnique({ where: { repositoryId_name: { repositoryId, name: input.name } } });
     const protectedRef = isDefault || policy?.protected === true;
-    // Existing protected refs can advance only through the integration service.
-    // The legacy direct ref path checks manifest validity, not signed execution
-    // evidence for the merged snapshot, so allowing it would bypass the gate.
-    if ((input.operation === "CREATE" || input.operation === "UPDATE" || input.operation === "RESTORE") && protectedRef && !input.force) {
-      throw new SourceControlError(403, "INTEGRATION_REQUIRED", "Protected refs require validated integration");
+    // Protected Git updates require signed approval and exact-target checks.
+    // Other writers must use the native integration worker.
+    let protectedEvidence: Awaited<ReturnType<typeof assertSignedGitProtectedUpdate>> | null = null;
+    if ((input.operation === "CREATE" || input.operation === "UPDATE" || input.operation === "RESTORE") &&
+        protectedRef && !input.force) {
+      if (actor.gitCredentialId && input.operation === "UPDATE" &&
+          current && !current.deletedAt && current.kind === "BRANCH" && input.changesetId) {
+        protectedEvidence = await assertSignedGitProtectedUpdate(
+          tx, repositoryId, current.changesetId, input.changesetId);
+      } else {
+        throw new SourceControlError(403, "INTEGRATION_REQUIRED",
+          "Protected refs require signed checks and approved integration");
+      }
     }
     if ((protectedRef || isDefault) && input.force) throw new SourceControlError(403, "PROTECTED_REFERENCE", "Force updates are forbidden on protected references");
     if (input.operation === "DELETE" && (protectedRef || policy?.allowDelete === false)) {
@@ -250,7 +258,8 @@ async function mutateWithinTransaction(tx: Prisma.TransactionClient, repositoryI
     const payload = { apiVersion: 1, eventId: mutation.id, repositoryId, name: input.name,
       action: input.operation, kind, oldChangesetId: oldId,
       newChangesetId: input.operation === "DELETE" ? null : target,
-      oldGeneration, newGeneration, forced: !!input.force };
+      oldGeneration, newGeneration, forced: !!input.force,
+      ...(protectedEvidence ? { gitValidatedIntegration: protectedEvidence } : {}) };
     await tx.auditEvent.create({ data: { repositoryId, actorType: actor.type, actorId: actor.id,
       action: `reference.${input.operation.toLowerCase()}`, subjectId: target,
       metadata: payload } });
