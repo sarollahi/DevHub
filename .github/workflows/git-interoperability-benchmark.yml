@@ -1,0 +1,102 @@
+name: Git interoperability performance
+on:
+  workflow_dispatch:
+    inputs:
+      gateway_url:
+        description: HTTPS Git gateway URL ending in /git/REPOSITORY_UUID.git
+        required: true
+        type: string
+      native_server:
+        description: HTTPS native API base URL
+        required: true
+        type: string
+      native_repository:
+        description: Native repository UUID
+        required: true
+        type: string
+      native_ref:
+        description: Native revision or branch to benchmark
+        required: true
+        default: main
+        type: string
+      native_file:
+        description: Existing path to materialize via native client
+        required: true
+        default: README.md
+        type: string
+      iterations:
+        description: Repeated measured iterations (1-100)
+        required: true
+        default: "30"
+        type: string
+      concurrency:
+        description: Concurrent clients (1-16)
+        required: true
+        default: "4"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  measured-performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: git-performance
+    env:
+      DEVHUB_TOKEN: ${{ secrets.DEVHUB_BENCH_NATIVE_TOKEN }}
+      DEVHUB_GIT_BENCH_TOKEN: ${{ secrets.DEVHUB_BENCH_GIT_TOKEN }}
+      GIT_TERMINAL_PROMPT: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci --no-audit --no-fund
+      - name: Build actual native client
+        run: cargo build --release --manifest-path client/devhub-cli/Cargo.toml
+      - name: Configure ephemeral Git prompt, never embed tokens in URLs
+        shell: bash
+        run: |
+          test -n "$DEVHUB_TOKEN" && test -n "$DEVHUB_GIT_BENCH_TOKEN"
+          cat > "$RUNNER_TEMP/devhub-git-askpass" <<'PROMPT'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' 'git';;
+            *Password*) printf '%s\n' "$DEVHUB_GIT_BENCH_TOKEN";;
+            *) exit 1;;
+          esac
+          PROMPT
+          chmod 700 "$RUNNER_TEMP/devhub-git-askpass"
+          echo "GIT_ASKPASS=$RUNNER_TEMP/devhub-git-askpass" >> "$GITHUB_ENV"
+      - name: Measure Git and native client under controlled concurrency
+        env:
+          BENCH_URL: ${{ inputs.gateway_url }}
+          BENCH_NATIVE_SERVER: ${{ inputs.native_server }}
+          BENCH_NATIVE_REPOSITORY: ${{ inputs.native_repository }}
+          BENCH_NATIVE_REF: ${{ inputs.native_ref }}
+          BENCH_NATIVE_FILE: ${{ inputs.native_file }}
+          BENCH_ITERATIONS: ${{ inputs.iterations }}
+          BENCH_CONCURRENCY: ${{ inputs.concurrency }}
+        run: |
+          npm run bench:git-interop -- \
+            "--url=$BENCH_URL" \
+            "--native-server=$BENCH_NATIVE_SERVER" \
+            "--native-repository=$BENCH_NATIVE_REPOSITORY" \
+            "--native-ref=$BENCH_NATIVE_REF" \
+            "--native-file=$BENCH_NATIVE_FILE" \
+            "--native-cli=$PWD/client/devhub-cli/target/release/devhub" \
+            "--iterations=$BENCH_ITERATIONS" \
+            "--concurrency=$BENCH_CONCURRENCY" \
+            "--warmup=3" \
+            "--output=$RUNNER_TEMP/devhub-git-performance.json"
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devhub-git-native-benchmark
+          path: ${{ runner.temp }}/devhub-git-performance.json
+          if-no-files-found: warn
+          retention-days: 30

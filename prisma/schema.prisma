@@ -1038,3 +1038,36 @@ model SourceSearchDocument {
   object SourceObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
   @@index([state, nextAttemptAt, leaseUntil])
 }
+
+// Git objects are disposable projections of native changesets, never a second source of truth.
+model GitInteropCommit {
+  repositoryId String @db.Uuid
+  changesetId  String @db.Char(64)
+  gitSha       String @db.Char(40)
+  treeSha      String @db.Char(40)
+  rawCommit    Bytes? @db.ByteA
+  createdAt    DateTime @default(now())
+  @@id([repositoryId, changesetId])
+  @@unique([repositoryId, gitSha])
+}
+
+model GitInteropBlob {
+  repositoryId String @db.Uuid
+  objectId     String @db.Char(64)
+  gitSha       String @db.Char(40)
+  @@id([repositoryId, objectId])
+  @@unique([repositoryId, gitSha])
+}
+
+model GitInteropCredential {
+  id           String @id @default(uuid()) @db.Uuid
+  repositoryId String @db.Uuid
+  userId       String @db.Uuid
+  tokenHash    String @unique @db.Char(64)
+  scopes       String[]
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime @default(now())
+  lastUsedAt   DateTime?
+  @@index([repositoryId, userId])
+}

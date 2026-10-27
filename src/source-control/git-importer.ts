@@ -122,7 +122,7 @@ async function changedFiles(repositoryId: string, cwd: string, commit: GitCommit
   return operations;
 }
 
-async function publishGitCommit(repositoryId: string, cwd: string, commit: GitCommit, pulse: () => Promise<void>) {
+export async function publishGitCommit(repositoryId: string, cwd: string, commit: GitCommit, pulse: () => Promise<void>, actor?: SourceActor) {
   const previously = await db.gitImportCommit.findUnique({
     where: { repositoryId_gitSha: { repositoryId, gitSha: commit.sha } },
   });
@@ -131,20 +131,28 @@ async function publishGitCommit(repositoryId: string, cwd: string, commit: GitCo
     return false;
   }
   if (new Set(commit.parents).size !== commit.parents.length) throw new Error("Duplicate Git parent");
-  const ancestors = await db.gitImportCommit.findMany({
-    where: { repositoryId, gitSha: { in: commit.parents } },
-    select: { gitSha: true, changesetId: true },
-  });
-  if (ancestors.length !== commit.parents.length) throw new Error("Missing native parent for " + commit.sha);
-  const parentMap = new Map(ancestors.map(p => [p.gitSha, p.changesetId]));
+  const [imports, exports] = await Promise.all([
+    db.gitImportCommit.findMany({ where: { repositoryId, gitSha: { in: commit.parents } },
+      select: { gitSha: true, changesetId: true } }),
+    db.gitInteropCommit.findMany({ where: { repositoryId, gitSha: { in: commit.parents } },
+      select: { gitSha: true, changesetId: true } }),
+  ]);
+  const parentMap = new Map([...imports, ...exports].map(p => [p.gitSha, p.changesetId]));
+  if (commit.parents.some(sha => !parentMap.has(sha))) throw new Error("Missing native parent for " + commit.sha);
   const parents = commit.parents.map(sha => parentMap.get(sha)!);
   const operations = await changedFiles(repositoryId, cwd, commit, pulse);
+  if (actor) await assertRepositoryPermission(actor, repositoryId, "changeset:write", {
+    paths: operations.flatMap(op => op.previousPath ? [op.path, op.previousPath] : [op.path]),
+  });
   const changesetId = digest(JSON.stringify([3, repositoryId, commit.sha, commit.treeSha, parents,
     commit.author, commit.committer, commit.message, operations]));
   const meta = deriveChangesetMetadata(operations.map(op => ({
     kind: op.kind as "PUT", path: op.path, previousPath: op.previousPath ?? undefined, objectId: op.objectId ?? undefined,
   })));
   await db.$transaction(async tx => {
+    if (actor) await assertRepositoryPermission(actor, repositoryId, "changeset:write", {
+      paths: operations.flatMap(op => op.previousPath ? [op.path, op.previousPath] : [op.path]),
+    }, tx);
     if (await tx.gitImportCommit.findUnique({ where: { repositoryId_gitSha: { repositoryId, gitSha: commit.sha } } })) return;
     // One transaction publishes the complete change, its ancestry, imported identity, and event.
     await tx.sourceChangeset.create({ data: {

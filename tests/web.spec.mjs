@@ -75,6 +75,14 @@ test.describe("Enterprise repository user journeys", () => {
   });
   test("keyboard access, critical accessibility and navigation performance", async ({ page }) => {
     await openRepository(page);
+    await expect(page.getByRole("link", { name: "README.md" })).toBeVisible();
+    // Start from a real visible keyboard target to avoid Chromium retaining
+    // BODY focus after a client-side navigation transition.
+    const navigation = page.getByRole("navigation", { name: "Repository sections" });
+    const start = navigation.getByRole("link").first();
+    await expect(start).toBeVisible();
+    await start.focus();
+    await expect(start).toBeFocused();
     await page.keyboard.press("Tab");
     const focused = await page.evaluate(() => document.activeElement?.tagName);
     expect(["A", "BUTTON", "INPUT", "SELECT"]).toContain(focused);

@@ -15,7 +15,7 @@ export const changesetInputSchema = z.object({
 });
 export type ChangesetInput = z.infer<typeof changesetInputSchema>;
 export type TreeEntry = { path: string; objectId: string; mode?: "100644" | "100755" | "120000" };
-export type SourceActor = { id: string; type: "AGENT" | "HUMAN"; credentialId?: string; sessionId?: string };
+export type SourceActor = { id: string; type: "AGENT" | "HUMAN"; credentialId?: string; sessionId?: string; gitCredentialId?: string };
 export type FileOperation = {
   kind: "PUT" | "DELETE" | "MOVE";
   path: string;
