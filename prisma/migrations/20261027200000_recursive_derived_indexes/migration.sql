@@ -75,3 +75,27 @@ CREATE TRIGGER "SourceDerivedJump_immutable"
 CREATE TRIGGER "SourceDerivedPathEvent_immutable"
   BEFORE UPDATE ON "SourceDerivedPathEvent"
   FOR EACH ROW EXECUTE FUNCTION reject_derived_posting_mutation();
+
+CREATE TABLE "SourceDerivedBlameFile" (
+  "repositoryId" UUID NOT NULL,
+  "changesetId" CHAR(64) NOT NULL REFERENCES "SourceChangeset"("id") ON DELETE CASCADE,
+  "version" INTEGER NOT NULL,
+  "position" INTEGER NOT NULL,
+  "path" TEXT NOT NULL,
+  "generation" INTEGER NOT NULL,
+  "objectId" CHAR(64) NOT NULL REFERENCES "SourceObject"("id") ON DELETE RESTRICT,
+  "state" VARCHAR(16) NOT NULL CHECK ("state" IN ('READY','UNAVAILABLE')),
+  "lineCount" INTEGER NOT NULL CHECK ("lineCount" >= 0),
+  "spans" JSONB,
+  "checksum" CHAR(64),
+  PRIMARY KEY ("changesetId","version","position"),
+  CONSTRAINT "SourceDerivedBlameFile_ready_check" CHECK (
+    ("state"='READY' AND "spans" IS NOT NULL AND "checksum" IS NOT NULL)
+    OR ("state"='UNAVAILABLE' AND "spans" IS NULL)
+  )
+);
+CREATE INDEX "SourceDerivedBlameFile_path_idx"
+  ON "SourceDerivedBlameFile" ("repositoryId","version","path","generation" DESC);
+CREATE TRIGGER "SourceDerivedBlameFile_immutable"
+  BEFORE UPDATE ON "SourceDerivedBlameFile"
+  FOR EACH ROW EXECUTE FUNCTION reject_derived_posting_mutation();
