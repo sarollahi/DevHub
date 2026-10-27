@@ -1,5 +1,5 @@
 export type FileEntry = { path: string; objectId: string; mode?: string };
-export type Conflict = { path: string; code: "EDIT_CONFLICT" | "PATH_COLLISION"; base: FileEntry | null; target: FileEntry | null; incoming: FileEntry | null };
+export type Conflict = { path: string; code: "EDIT_CONFLICT" | "PATH_COLLISION" | "RENAME_CONFLICT" | "RENAME_DELETE"; base: FileEntry | null; target: FileEntry | null; incoming: FileEntry | null };
 export type MergeOperation = { kind: "ADD" | "MODIFY" | "DELETE" | "CHMOD"; path: string; objectId?: string; mode?: "100644" | "100755" | "120000" };
 const mode = (entry: FileEntry | undefined) => entry?.mode ?? "100644";
 const same = (a: FileEntry | undefined, b: FileEntry | undefined) =>
@@ -23,6 +23,30 @@ export function planIntegration(base: FileEntry[], target: FileEntry[], incoming
       continue;
     }
     if (desired) result.set(path, desired); else result.delete(path);
+  }
+  // Divergent renames or rename/delete must not silently materialize both
+  // destinations or erase a moved source. Exact object and mode identities
+  // avoid heuristic false positives; ambiguous move inference fails closed.
+  const renamed = (current: Map<string, FileEntry>) => {
+    const moves = new Map<string, string>();
+    for (const [from, original] of b) {
+      if (current.has(from)) continue;
+      const matches = [...current.values()].filter(entry =>
+        !b.has(entry.path) && same(entry, original)).map(e => e.path);
+      if (matches.length === 1) moves.set(from, matches[0]);
+    }
+    return moves;
+  };
+  const targetMoves = renamed(t), incomingMoves = renamed(i);
+  for (const from of [...new Set([...targetMoves.keys(), ...incomingMoves.keys()])].sort(sort)) {
+    const left = targetMoves.get(from), right = incomingMoves.get(from);
+    const divergent = left && right && left !== right;
+    const renameDelete = (left && !right && !i.has(from)) ||
+      (right && !left && !t.has(from));
+    if (divergent || renameDelete) conflicts.push({
+      path: from, code: divergent ? "RENAME_CONFLICT" : "RENAME_DELETE",
+      base: b.get(from) ?? null, target: t.get(from) ?? null, incoming: i.get(from) ?? null,
+    });
   }
   // A file and its descendant cannot coexist, even if they came from disjoint changes.
   for (const path of [...result.keys()].sort(sort)) {

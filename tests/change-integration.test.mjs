@@ -46,3 +46,14 @@ test("retrying against changed target only integrates independent paths", () => 
   const conflict=[file("base",a),file("left",c),file("right",a)];
   assert.equal(planIntegration(base,conflict,incoming).conflicts.length,1);
 });
+
+test("divergent rename and rename-versus-delete are rejected, never duplicated", () => {
+  const original = [file("old.ts",a)];
+  const left = [file("new-left.ts",a)];
+  const right = [file("new-right.ts",a)];
+  const diverged = planIntegration(original,left,right);
+  assert.deepEqual(diverged.conflicts.map(x=>[x.path,x.code]), [["old.ts","RENAME_CONFLICT"]]);
+  assert.deepEqual(diverged.operations, []);
+  const removed = planIntegration(original,left,[]);
+  assert.deepEqual(removed.conflicts.map(x=>[x.path,x.code]), [["old.ts","RENAME_DELETE"]]);
+});
