@@ -74,9 +74,9 @@ test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and 
     assert.equal(advanced.changesetId, winner);
     await assert.rejects(() => mutateReference(repo.id, actor, request(name, "UPDATE", 1, child)), fail("REFERENCE_CONFLICT"));
     await assert.rejects(() => mutateReference(repo.id, actor, {
-      ...request("main", "UPDATE", 2, root), force: true, reason: "Try to rewrite default branch",
+      ...request("main", "UPDATE", 1, root), force: true, reason: "Try to rewrite default branch",
     }), fail("PROTECTED_REFERENCE"));
-    await assert.rejects(() => mutateReference(repo.id, actor, request("main", "DELETE", 2)), fail("PROTECTED_REFERENCE"));
+    await assert.rejects(() => mutateReference(repo.id, actor, request("main", "DELETE", 1)), fail("PROTECTED_REFERENCE"));
   });
 
   await t.test("tags never move; policy gates force and protected branches", async () => {
