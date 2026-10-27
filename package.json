@@ -37,6 +37,7 @@
     "git:gateway": "tsx scripts/git-interop-server.ts",
     "bench:git-interop": "tsx scripts/bench-git-interoperability.ts",
     "bench:lifecycle": "tsx scripts/bench-lifecycle.ts",
+    "bench:publication": "tsx scripts/bench-publication.ts",
     "ops:reconcile": "tsx scripts/reconcile.ts",
     "ops:usage": "tsx scripts/tenant-usage.ts",
     "ops:cache-exporter": "node scripts/cache-exporter.mjs",

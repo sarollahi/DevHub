@@ -9,6 +9,7 @@ import { decodeTree, objectId } from "./storage";
 import { deriveChangesetMetadata } from "./derived";
 import { assertRepositoryPermission } from "../lib/authorization";
 import { verifiedBlobStream } from "../object-store/service";
+import { SnapshotTree, publishedSnapshotRoot, type SnapshotEntry } from "./snapshot-tree";
 
 const digest = (data: string) => createHash("sha256").update(data).digest("hex");
 const id = z.string().regex(/^[a-f0-9]{64}$/);
@@ -34,7 +35,7 @@ type Operation = CanonicalInput["operations"][number];
 type Entry = { objectId: string; mode: "100644" | "100755" | "120000" };
 type State = Map<string, Entry>;
 type Tx = Prisma.TransactionClient;
-const limits = { maxDepth: 1024, maxPaths: 10000, maxObjectBytes: 4 * 1024 * 1024 };
+const limits = { maxDepth: 100000, maxPaths: 2000000, maxObjectBytes: 4 * 1024 * 1024 };
 
 function inputOrError(input: unknown): CanonicalInput {
   const parsed = canonicalInputSchema.safeParse(input);
@@ -51,7 +52,7 @@ function canonicalId(repositoryId: string, authorId: string, input: CanonicalInp
 }
 
 function validState(state: State) {
-  if (state.size > limits.maxPaths) throw new SourceControlError(413, "TOO_MANY_PATHS", "Repository snapshot exceeds 10,000 paths");
+  if (state.size > limits.maxPaths) throw new SourceControlError(413, "TOO_MANY_PATHS", "Repository snapshot exceeds 2,000,000 paths");
   for (const path of state.keys()) {
     if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH_GRAPH", "Invalid stored path");
     const parts = path.split("/");
@@ -118,9 +119,42 @@ async function snapshot(tx: Tx, repositoryId: string, head: string | undefined):
   }
   for (const change of chain.reverse()) {
     for (const op of change.operations) apply(state, op);
-    validState(state);
   }
+  validState(state);
   return state;
+}
+
+
+async function rootFor(tx: Tx, repositoryId: string, head: string | undefined, tree: SnapshotTree) {
+  if (!head) return tree.empty();
+  const existing = await publishedSnapshotRoot(tx, repositoryId, head);
+  if (existing) {
+    await tree.count(existing.rootId);
+    return existing.rootId;
+  }
+  // One-time legacy migration. No existing identity or ancestry is rewritten.
+  const state = await snapshot(tx, repositoryId, head);
+  const computed = await tree.materialize(state);
+  await tree.persist(computed);
+  await tx.sourceSnapshotRoot.createMany({
+    data: [{ changesetId: head, repositoryId, rootId: computed }], skipDuplicates: true,
+  });
+  const actual = await publishedSnapshotRoot(tx, repositoryId, head);
+  if (!actual || actual.rootId !== computed) {
+    throw new SourceControlError(409, "CORRUPT_SNAPSHOT", "Snapshot materialization is inconsistent");
+  }
+  return actual.rootId;
+}
+
+export async function materializeCanonicalSnapshot(repositoryId: string, changesetId: string, actor: SourceActor) {
+  return db.$transaction(async tx => {
+    await assertRepositoryPermission(actor, repositoryId, "source:read", {}, tx);
+    const change = await tx.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId }, select: { id: true } });
+    if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
+    const tree = new SnapshotTree(tx);
+    const rootId = await rootFor(tx, repositoryId, changesetId, tree);
+    return { changesetId, rootId, pathCount: await tree.count(rootId) };
+  }, { timeout: 120000, maxWait: 15000 });
 }
 
 async function checkedBlob(tx: Tx, repositoryId: string, blobId: string, asSymlink = false): Promise<Uint8Array> {
@@ -240,7 +274,8 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
         if (parents.length !== input.parents.length || input.parents.includes(changesetId)) {
           throw new SourceControlError(422, "UNKNOWN_PARENT", "All parents must be published and in the same repository");
         }
-        const state = await snapshot(tx, repositoryId, input.parents[0]);
+        const tree = new SnapshotTree(tx);
+        let rootId = await rootFor(tx, repositoryId, input.parents[0], tree);
         const touched = new Set<string>();
         const persisted = [];
         for (const [position, op] of input.operations.entries()) {
@@ -249,29 +284,50 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
           if ((op.kind === "RENAME" || op.kind === "COPY") && op.previousPath === op.path) {
             throw new SourceControlError(422, "INVALID_RENAME", "Source and destination must differ");
           }
-          const old = state.get(op.path);
-          const source = "previousPath" in op ? state.get(op.previousPath) : undefined;
+          const old = await tree.get(rootId, op.path);
+          const source = "previousPath" in op ? await tree.get(rootId, op.previousPath) : undefined;
           const objectRef = "objectId" in op ? op.objectId : op.kind === "RENAME" || op.kind === "COPY" ? source?.objectId :
             op.kind === "CHMOD" ? old?.objectId : null;
           const requestedMode = "mode" in op ? op.mode : null;
           const original = "previousPath" in op ? op.previousPath : null;
-          // File modes and referenced contents are validated before any changeset row is inserted.
           if (op.kind === "ADD" || op.kind === "MODIFY") {
             const isSymlink = (requestedMode || old?.mode) === "120000";
             const bytes = await checkedBlob(tx, repositoryId, objectRef!, isSymlink);
             if (isSymlink) checkSymlink(op.path, bytes);
-          } else if (op.kind === "COPY" || op.kind === "RENAME") {
-            if (source?.mode === "120000") {
-              const bytes = await checkedBlob(tx, repositoryId, source.objectId, true);
-              checkSymlink(op.path, bytes);
-            }
+          } else if ((op.kind === "COPY" || op.kind === "RENAME") && source?.mode === "120000") {
+            const bytes = await checkedBlob(tx, repositoryId, source.objectId, true);
+            checkSymlink(op.path, bytes);
           }
-          const record = { kind: op.kind, path: op.path, previousPath: original, objectId: objectRef,
-            fileMode: requestedMode, position };
-          apply(state, record);
-          persisted.push(record);
+          if (op.kind === "ADD" || op.kind === "MODIFY") {
+            if (op.kind === "ADD" && old) throw new SourceControlError(409, "DESTINATION_EXISTS", op.path);
+            if (op.kind === "MODIFY" && !old) throw new SourceControlError(409, "MISSING_SOURCE", op.path);
+            rootId = await tree.set(rootId, op.path, { objectId: objectRef!, mode:
+              (requestedMode || old?.mode || "100644") as SnapshotEntry["mode"] });
+          } else if (op.kind === "DELETE") {
+            if (!old) throw new SourceControlError(409, "MISSING_SOURCE", op.path);
+            rootId = await tree.set(rootId, op.path, null);
+          } else if (op.kind === "RENAME" || op.kind === "COPY") {
+            if (!source) throw new SourceControlError(409, "MISSING_SOURCE", op.previousPath);
+            if (old) throw new SourceControlError(409, "DESTINATION_EXISTS", op.path);
+            if (op.kind === "RENAME") rootId = await tree.set(rootId, op.previousPath, null);
+            rootId = await tree.set(rootId, op.path, source);
+          } else if (op.kind === "CHMOD") {
+            if (!old || old.mode === "120000") throw new SourceControlError(409, "INVALID_MODE_CHANGE", op.path);
+            if (old.mode === op.mode) throw new SourceControlError(409, "UNCHANGED_MODE", op.path);
+            rootId = await tree.set(rootId, op.path, { ...old, mode: op.mode });
+          }
+          persisted.push({ kind: op.kind, path: op.path, previousPath: original, objectId: objectRef,
+            fileMode: requestedMode, position });
         }
-        validState(state);
+        // Match v2 delta semantics: operations are ordered, but the path graph
+        // must be valid in the final state, not at every intermediate step.
+        // Validate only affected live files; no full-tree enumeration occurs.
+        const graphChecks = new Set(input.operations.flatMap(op =>
+          "previousPath" in op ? [op.path, op.previousPath] : [op.path]));
+        for (const checkedPath of graphChecks) {
+          if (await tree.get(rootId, checkedPath)) await tree.checkSlot(rootId, checkedPath);
+        }
+        const snapshotStats = await tree.persist(rootId);
         const meta = deriveChangesetMetadata(persisted.map(op => ({
           kind: op.kind as "PUT", path: op.path, previousPath: op.previousPath ?? undefined,
           objectId: op.objectId ?? undefined,
@@ -286,6 +342,7 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
           validation: { create: { state: "SUCCESS", ...meta } },
           review: { create: { repositoryId } },
         } });
+        await tx.sourceSnapshotRoot.create({ data: { repositoryId, changesetId, rootId } });
         await tx.sourceQueryIndexJob.create({ data: { repositoryId, changesetId } });
         await tx.sourceChangesetEvent.create({ data: {
           repositoryId, changesetId, kind: "changeset.published",
@@ -293,7 +350,7 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
         } });
         await tx.auditEvent.create({ data: {
           repositoryId, actorType: actor.type, actorId: actor.id, action: "changeset.published", subjectId: changesetId,
-          metadata: { apiVersion: 2, operationCount: persisted.length },
+          metadata: { apiVersion: 2, operationCount: persisted.length, snapshotStats },
         } });
       }
       if (input.idempotencyKey) await tx.sourcePublicationKey.create({ data: {
@@ -330,9 +387,16 @@ export async function listCanonicalChangesets(repositoryId: string, limit = 30, 
 export async function getCanonicalSnapshot(repositoryId: string, changesetId: string, actor?: SourceActor) {
   if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
   const change = await getCanonicalChangeset(repositoryId, changesetId, actor);
-  const state = await db.$transaction(tx => snapshot(tx, repositoryId, changesetId), { timeout: 20000 });
-  return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
-    .map(([path, entry]) => ({ path, ...entry })) };
+  return db.$transaction(async tx => {
+    const root = await publishedSnapshotRoot(tx, repositoryId, changesetId);
+    if (root) {
+      const tree = new SnapshotTree(tx);
+      return { changesetId, treeId: change.treeId, entries: await tree.entries(root.rootId) };
+    }
+    const state = await snapshot(tx, repositoryId, changesetId);
+    return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
+      .map(([path, entry]) => ({ path, ...entry })) };
+  }, { timeout: 120000 });
 }
 
 // Internal review-worker access is tied to an active, exact changeset review lease.
@@ -353,9 +417,16 @@ export async function getCanonicalSnapshotForReview(
   const change = await db.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId },
     select: { treeId: true } });
   if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
-  const state = await db.$transaction(tx => snapshot(tx, repositoryId, changesetId), { timeout: 20000 });
-  return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
-    .map(([path, entry]) => ({ path, ...entry })) };
+  return db.$transaction(async tx => {
+    const root = await publishedSnapshotRoot(tx, repositoryId, changesetId);
+    if (root) {
+      const tree = new SnapshotTree(tx);
+      return { changesetId, treeId: change.treeId, entries: await tree.entries(root.rootId) };
+    }
+    const state = await snapshot(tx, repositoryId, changesetId);
+    return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
+      .map(([path, entry]) => ({ path, ...entry })) };
+  }, { timeout: 120000 });
 }
 
 // Trusted validation workers consume immutable revisions after their calling service
@@ -364,9 +435,16 @@ export async function readCanonicalSnapshotForValidation(repositoryId: string, c
   const change = await db.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId },
     select: { treeId: true } });
   if (!change) throw new SourceControlError(404, "NOT_FOUND", "Validation revision not found");
-  const state = await db.$transaction(tx => snapshot(tx, repositoryId, changesetId), { timeout: 20000 });
-  return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
-    .map(([path, entry]) => ({ path, ...entry })) };
+  return db.$transaction(async tx => {
+    const root = await publishedSnapshotRoot(tx, repositoryId, changesetId);
+    if (root) {
+      const tree = new SnapshotTree(tx);
+      return { changesetId, treeId: change.treeId, entries: await tree.entries(root.rootId) };
+    }
+    const state = await snapshot(tx, repositoryId, changesetId);
+    return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
+      .map(([path, entry]) => ({ path, ...entry })) };
+  }, { timeout: 120000 });
 }
 
 export async function listCanonicalEvents(repositoryId: string, limit = 30, actor?: SourceActor) {

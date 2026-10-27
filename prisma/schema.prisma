@@ -97,6 +97,7 @@ model Repository {
   fingerprints          ChangeFingerprint[]
   mergeGroups           MergeGroup[]
   ingressBuckets        IngressBucket[]
+  snapshotRoots         SourceSnapshotRoot[]
   sourceChangesets      SourceChangeset[]
   sourceReferences      SourceReference[]
   blobLeases            BlobLease[]
@@ -363,6 +364,26 @@ model SourceObject {
   searchDocument SourceSearchDocument?
 }
 
+// Internal immutable radix nodes are not exposed as cross-repository objects.
+// A repository-specific changeset root controls reachability and access.
+model SourceSnapshotNode {
+  id String @id @db.Char(64)
+  data Bytes @db.ByteA
+  createdAt DateTime @default(now())
+  roots SourceSnapshotRoot[]
+}
+
+model SourceSnapshotRoot {
+  changesetId String @id @db.Char(64)
+  repositoryId String @db.Uuid
+  rootId String @db.Char(64)
+  createdAt DateTime @default(now())
+  changeset SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Cascade)
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  node SourceSnapshotNode @relation(fields: [rootId], references: [id], onDelete: Restrict)
+  @@index([repositoryId, rootId])
+}
+
 // Content-addressed changesets are never modified when references advance.
 model SourceChangeset {
   review       SourceReview?
@@ -380,6 +401,7 @@ model SourceChangeset {
   validation   SourceValidation?
   approvals    SourceChangeApproval[]
   references   SourceReference[]
+  snapshotRoot SourceSnapshotRoot?
   publicationKeys SourcePublicationKey[]
   publicationEvent SourceChangesetEvent?
   validationPipelines ValidationPipeline[] @relation("ValidationSubject")
