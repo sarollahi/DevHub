@@ -10,6 +10,7 @@ import { hasVerifiedChecks, submitValidation } from "../validation/service";
 import { configurationDigest, fingerprint, KINDS, recipes, verifyTask } from "../validation/policy";
 import { snapshotFor } from "../validation/snapshot";
 import { planIntegration } from "./plan";
+import { resolveTextConflicts } from "./text-resolution";
 
 const ID = /^[0-9a-f]{64}$/;
 const KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
@@ -328,7 +329,11 @@ export async function executeIntegration(jobId: string, lease: string) {
     readCanonicalSnapshotForValidation(job.repositoryId, ref.changesetId),
     readCanonicalSnapshotForValidation(job.repositoryId, incomingId),
   ]);
-  const plan = planIntegration(base.entries, ours.entries, theirs.entries);
+  let plan = planIntegration(base.entries, ours.entries, theirs.entries);
+  if (plan.conflicts.length && job.mode === "MERGE") {
+    const resolved = await resolveTextConflicts(job.repositoryId, actor, plan.conflicts);
+    if (resolved.size) plan = planIntegration(base.entries, ours.entries, theirs.entries, resolved);
+  }
   if (plan.conflicts.length) {
     await setState(job, lease, "CONFLICTED", {
       baseChangesetId: baseId, targetChangesetId: ref.changesetId,

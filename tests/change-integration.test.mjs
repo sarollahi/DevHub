@@ -57,3 +57,11 @@ test("divergent rename and rename-versus-delete are rejected, never duplicated",
   const removed = planIntegration(original,left,[]);
   assert.deepEqual(removed.conflicts.map(x=>[x.path,x.code]), [["old.ts","RENAME_DELETE"]]);
 });
+
+test("a verified external resolution may replace only exact conflicting file entries", () => {
+  const original=[file("file",a)], left=[file("file",b)], right=[file("file",c)];
+  const proposed=new Map([["file",file("file","d".repeat(64))]]);
+  const merged=planIntegration(original,left,right,proposed);
+  assert.equal(merged.conflicts.length,0);
+  assert.deepEqual(merged.operations,[{kind:"MODIFY",path:"file",objectId:"d".repeat(64)}]);
+});

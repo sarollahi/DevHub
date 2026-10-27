@@ -8,7 +8,8 @@ const normalize = (input: FileEntry[]) => new Map(input.map(e => [e.path, e]));
 const sort = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 
 /** A conservative, deterministic, full-file three-way merge. No guessing at overlapping edits. */
-export function planIntegration(base: FileEntry[], target: FileEntry[], incoming: FileEntry[]) {
+export function planIntegration(base: FileEntry[], target: FileEntry[], incoming: FileEntry[],
+  resolutions: ReadonlyMap<string, FileEntry> = new Map()) {
   const b = normalize(base), t = normalize(target), i = normalize(incoming);
   const result = new Map(t);
   const conflicts: Conflict[] = [];
@@ -18,6 +19,8 @@ export function planIntegration(base: FileEntry[], target: FileEntry[], incoming
     if (same(original, desired)) continue;
     affectedPaths.push(path);
     if (!same(original, present) && !same(desired, present)) {
+      const resolved = resolutions.get(path);
+      if (resolved && resolved.path === path) { result.set(path, resolved); continue; }
       conflicts.push({ path, code: "EDIT_CONFLICT", base: original ?? null,
         target: present ?? null, incoming: desired ?? null });
       continue;
