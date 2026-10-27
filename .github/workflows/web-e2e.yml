@@ -1,7 +1,7 @@
 name: Web browser verification
 on:
   push:
-    branches: ["feature/**", develop]
+    branches: [develop]
   pull_request:
     branches: [develop]
 permissions:

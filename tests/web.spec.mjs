@@ -54,9 +54,14 @@ test.describe("Enterprise repository user journeys", () => {
   test("revision comparison and persisted reviews, agents, settings", async ({ page }) => {
     await openRepository(page);
     await page.getByRole("navigation", { name: "Repository sections" }).getByRole("link", { name: "History" }).click();
-    const hrefs = await page.locator("table tbody tr td:last-child a").evaluateAll(nodes => nodes.map(node => node.getAttribute("href")));
-    expect(hrefs.length).toBeGreaterThan(1);
-    const baseRevision = new URL(hrefs[1], "http://localhost:3000").searchParams.get("revision");
+    // URL changes can precede React Server Component rendering; await the actual history data.
+    await expect(page.getByRole("heading", { name: "Changeset history" })).toBeVisible();
+    const revisions = page.locator("table tbody tr td:last-child a");
+    await expect(revisions.nth(1)).toBeVisible();
+    const baseHref = await revisions.nth(1).getAttribute("href");
+    expect(baseHref).toBeTruthy();
+    const baseRevision = new URL(baseHref, "http://localhost:3000").searchParams.get("revision");
+    expect(baseRevision).toMatch(/^[0-9a-f]{64}$/);
     await page.getByRole("navigation", { name: "Repository sections" }).getByRole("link", { name: "Compare" }).click();
     await page.getByLabel("Base revision").fill(baseRevision);
     await page.getByRole("button", { name: "Compare" }).click();
