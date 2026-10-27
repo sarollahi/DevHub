@@ -1169,3 +1169,22 @@ model SourceDerivedPathEvent {
   @@index([repositoryId, version, path, generation(sort: Desc)])
   @@index([repositoryId, changesetId])
 }
+
+
+/// Sparse line-provenance state for changed text files only, never snapshots
+/// of the entire path namespace. UNAVAILABLE forces canonical blame fallback.
+model SourceDerivedBlameFile {
+  repositoryId String @db.Uuid
+  changesetId  String @db.Char(64)
+  version      Int
+  position     Int
+  path         String
+  generation   Int
+  objectId     String @db.Char(64)
+  state        String @db.VarChar(16)
+  lineCount    Int
+  spans        Json?
+  checksum     String? @db.Char(64)
+  @@id([changesetId, version, position])
+  @@index([repositoryId, version, path, generation(sort: Desc)])
+}
