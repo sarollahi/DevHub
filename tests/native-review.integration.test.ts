@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { NextRequest } from "next/server";
 import { db } from "../src/lib/prisma";
+import { testSession } from "./support/identities";
 import { createCanonicalChangeset, stageCanonicalBlob } from "../src/source-control/canonical";
 import { processReview } from "../src/review/source-review";
 import { POST as decide } from "../src/app/api/v2/repositories/[id]/changesets/[changesetId]/review/route";
@@ -11,8 +12,9 @@ test("authoritative review pipeline: duplicates, overlaps, policies and revision
   const suffix = randomBytes(8).toString("hex");
   const owner = await db.user.create({ data: { handle: "review-" + suffix, email: "review-" + suffix + "@example.invalid" } });
   const repo = await db.repository.create({ data: { ownerId: owner.id, name: "Review integration", slug: "review" } });
-  const actor = { type: "HUMAN" as const, id: owner.id };
-  const stage = async (contents: string) => (await stageCanonicalBlob(repo.id, Buffer.from(contents).toString("base64"))).id;
+  const human = await testSession(owner.id);
+  const actor = human.actor;
+  const stage = async (contents: string) => (await stageCanonicalBlob(repo.id, actor, Buffer.from(contents).toString("base64"))).id;
   const original = await stage("first\nsecond\nthird\n");
   const first = await stage("FIRST\nsecond\nthird\n");
   const second = await stage("first\nSECOND\nthird\n");
@@ -56,7 +58,7 @@ test("authoritative review pipeline: duplicates, overlaps, policies and revision
   assert.equal((await db.sourceReview.findUniqueOrThrow({where:{changesetId:document.id}})).riskTier,"LOW");
   const endpoint = (id: string) => "http://localhost:3000/api/v2/repositories/"+repo.id+"/changesets/"+id+"/review";
   const send = (id: string, expected: string) => decide(new NextRequest(endpoint(id), {
-    method:"POST",headers:{ authorization:"Bearer "+process.env.ADMIN_TOKEN,"content-type":"application/json" },
+    method:"POST",headers:{ ...human.headers, "content-type":"application/json" },
     body:JSON.stringify({expectedChangesetId:expected,decision:"APPROVED"}),
   }), {params:Promise.resolve({id:repo.id,changesetId:id})});
   assert.equal((await send(left.id,left.id)).status,200);

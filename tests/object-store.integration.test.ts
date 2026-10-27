@@ -4,6 +4,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { gzipSync } from "node:zlib";
 import { db } from "../src/lib/prisma";
+import { testSession } from "./support/identities";
 import { uploadBlob, verifiedBlobStream, verifyBlob, cleanupObjects, recoverPublications } from "../src/object-store/service";
 import { s3, objectKey } from "../src/object-store/s3";
 import { createChangeset, getTree } from "../src/source-control/service";
@@ -18,7 +19,7 @@ test("immutable S3 objects with real PostgreSQL and MinIO", { timeout: 180000 },
     handle: "blob-" + suffix, email: "blob-" + suffix + "@example.invalid",
   } });
   const repo = await db.repository.create({ data: { ownerId: user.id, slug: "object-test", name: "Object test" } });
-  const actor = { id: user.id, type: "HUMAN" as const };
+  const { actor } = await testSession(user.id);
   const owned: string[] = [];
   const changesets: string[] = [];
   const trees: string[] = [];
@@ -91,7 +92,7 @@ test("immutable S3 objects with real PostgreSQL and MinIO", { timeout: 180000 },
         { kind: "PUT", path: "bin/run", objectId: link.id, fileMode: "120000" },
       ] });
     changesets.push(change.id); trees.push(change.treeId);
-    assert.deepEqual((await getTree(repo.id, change.id)).entries, [
+    assert.deepEqual((await getTree(repo.id, change.id, actor)).entries, [
       { path: "bin/run", objectId: link.id, mode: "120000" },
       { path: "scripts/run.sh", objectId: exec.id, mode: "100755" },
     ]);
