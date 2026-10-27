@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { db } from "../src/lib/prisma";
 import { encodeTree, objectId } from "../src/source-control/storage";
-import { ancestors, mergeBases } from "../src/source-control/query";
+import { ancestors, mergeBases, runAuthorizedQuery } from "../src/source-control/query";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const args = new Map(process.argv.slice(2).map(arg => {
@@ -16,6 +16,13 @@ if (![depth, width, layers].every(Number.isSafeInteger)) throw new Error("Invali
 const token = randomBytes(8).toString("hex");
 const user = await db.user.create({ data: { handle: "benchmark-" + token, email: token + "@example.invalid" } });
 const repo = await db.repository.create({ data: { ownerId: user.id, slug: "benchmark", name: "DAG benchmarks" } });
+const session = await db.humanSession.create({ data: {
+  userId: user.id, tokenHash: randomBytes(32).toString("hex"),
+  expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+} });
+const authorized = <T>(task: () => Promise<T>) => runAuthorizedQuery(
+  { type: "HUMAN", id: user.id, sessionId: session.id }, repo.id, task,
+);
 const treeBytes = encodeTree([]);
 const treeId = objectId("TREE", treeBytes);
 const commits: string[] = [];
@@ -71,12 +78,12 @@ try {
     }
   });
   await elapsed("publish benchmark DAG", () => insertGraph());
-  const deep = await elapsed("deep ancestry", () => ancestors(repo.id, deepIds.at(-1)!));
+  const deep = await elapsed("deep ancestry", () => authorized(() => ancestors(repo.id, deepIds.at(-1)!)));
   if (deep.length !== depth + 1) throw new Error("Incorrect deep ancestry cardinality");
-  const wide = await elapsed("wide ancestry", () => ancestors(repo.id, wideLayers.at(-1)![0]));
+  const wide = await elapsed("wide ancestry", () => authorized(() => ancestors(repo.id, wideLayers.at(-1)![0])));
   if (!wide.includes(root)) throw new Error("Incorrect wide ancestry");
   const bases = await elapsed("wide DAG merge bases", () =>
-    mergeBases(repo.id, wideLayers.at(-1)![0], wideLayers.at(-1)![width - 1]));
+    authorized(() => mergeBases(repo.id, wideLayers.at(-1)![0], wideLayers.at(-1)![width - 1])));
   console.log(JSON.stringify({ depth, width, layers, vertices: commits.length, edges: parentRows.length,
     deepCount: deep.length, wideCount: wide.length, baseCount: bases.length,
     note: "Times include PostgreSQL query, network transport, and JavaScript processing; repeat for stable measurements." }));
@@ -87,6 +94,7 @@ try {
   for (let i = 0; i < commits.length; i += 500) {
     await db.sourceChangeset.deleteMany({ where: { id: { in: commits.slice(i, i + 500) } } });
   }
+  await db.humanSession.delete({ where: { id: session.id } });
   await db.repository.delete({ where: { id: repo.id } });
   await db.user.delete({ where: { id: user.id } });
   await db.$disconnect();
