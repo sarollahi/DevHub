@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { db } from "../src/lib/prisma";
+import { testSession } from "./support/identities";
 import { createCanonicalChangeset } from "../src/source-control/canonical";
 import { SourceControlError } from "../src/source-control/contracts";
 import { objectId } from "../src/source-control/storage";
@@ -14,6 +15,7 @@ test("PostgreSQL validation provenance, idempotency, lease, isolation and retrie
   const user=await db.user.create({data:{handle:"valid-"+suffix,email:suffix+"@example.invalid"}});
   const repo=await db.repository.create({data:{ownerId:user.id,slug:"validation",name:"validation"}});
   const other=await db.repository.create({data:{ownerId:user.id,slug:"other",name:"other"}});
+  const { actor } = await testSession(user.id);
   const original={
     VALIDATION_NODE_IMAGE:process.env.VALIDATION_NODE_IMAGE,
     VALIDATION_SCAN_IMAGE:process.env.VALIDATION_SCAN_IMAGE,
@@ -42,7 +44,7 @@ test("PostgreSQL validation provenance, idempotency, lease, isolation and retrie
   const id=objectId("BLOB",blob);
   await db.sourceObject.create({data:{id,kind:"BLOB",data:blob,byteSize:blob.length}});
   await db.sourceObjectGrant.create({data:{repositoryId:repo.id,objectId:id}});
-  const change=await createCanonicalChangeset(repo.id,{type:"HUMAN",id:user.id},{
+  const change=await createCanonicalChangeset(repo.id,actor,{
     apiVersion:2,parents:[],description:"validation input",operations:[
       {kind:"ADD",path:"package.json",objectId:id,mode:"100644"}
     ]});
