@@ -33,10 +33,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       !Number.isInteger(body.days) || (body.days as number) < 1 || (body.days as number) > 30) {
       throw new SourceControlError(422, "INVALID_INPUT", "Specify unique Git scopes and a 1–30 day expiration");
     }
-    for (const scope of body.scopes as Array<"source:read" | "changeset:write" | "ref:update">) {
-      // A token never provides more authority than the active user's grants.
-      await assertRepositoryPermission(actor, id, scope, { allowStaging: scope === "changeset:write" });
-    }
+    // Requested token scopes attenuate the current user's permissions; they do not grant access.
+    // Branch- and path-scoped authorizations are evaluated against the actual Git push
+    // paths and target branch, rather than incorrectly requiring a global grant here.
+    await assertRepositoryPermission(actor, id, "source:read");
     const count = await db.gitInteropCredential.count({ where: { repositoryId: id, userId: actor.id,
       revokedAt: null, expiresAt: { gt: new Date() } } });
     if (count >= 20) throw new SourceControlError(429, "GIT_TOKEN_LIMIT", "Revoke an existing credential first");
