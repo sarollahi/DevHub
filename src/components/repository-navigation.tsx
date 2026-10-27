@@ -4,7 +4,7 @@ import { repoHref } from "@/lib/repository-workspace";
 import type { ReactNode } from "react";
 
 const sections = [
-  ["browse", "Files"], ["history", "History"], ["search", "Search"], ["compare", "Compare"],
+  ["browse", "Files"], ["source", "Refs"], ["history", "History"], ["search", "Search"], ["compare", "Compare"],
   ["reviews", "Reviews"], ["checks", "Checks"], ["integrations", "Integrations"],
   ["agents", "Agents"], ["settings", "Settings"],
 ] as const;

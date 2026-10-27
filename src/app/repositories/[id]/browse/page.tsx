@@ -45,6 +45,19 @@ export default async function Browse({ params, searchParams }: {
   const q = await searchParams;
   const path = q.path || "";
   if (!validRelativePath(path)) notFound();
+  if (!q.revision) {
+    const ref = await db.sourceReference.findUnique({where:{
+      repositoryId_name:{repositoryId:id,name:repository.defaultBranch}
+    }});
+    if (!ref || ref.deletedAt) return <RepositoryNavigation id={id}
+      label={repository.owner.handle+"/"+repository.slug} active="browse"
+      title="Repository files" description="Canonical repository source browsing.">
+      <section className="surface-card"><p className="repo-empty">No default reference exists yet.
+        Publish or import an immutable changeset, then create the default branch.</p>
+        <div className="repo-pagination"><Link href={repoHref(id,"source/import")}>Import repository</Link>
+          <Link href={repoHref(id,"source")}>Reference management</Link></div></section>
+    </RepositoryNavigation>;
+  }
   const revision = await selectedRevision(id, q.revision || repository.defaultBranch, actor);
   const state = await getCanonicalSnapshot(id, revision, actor);
   const file = state.entries.find(entry => entry.path === path);
@@ -72,7 +85,7 @@ export default async function Browse({ params, searchParams }: {
     if (kind === "directory" || !available.has(childPath)) available.set(childPath,
       { path: childPath, kind, objectId: kind === "file" ? entry.objectId : undefined });
   }
-  const sorted = [...available.values()].sort((a,b) => (a.kind === b.kind ? a.path.localeCompare(b.path) : a.kind === "directory" ? -1 : 1));
+  const sorted = [...available.values()].sort((a,b) => a.path.localeCompare(b.path));
   const accessible: typeof sorted = [];
   for (const entry of sorted) {
     const probe = entry.kind === "file" ? [entry.path] :
@@ -101,7 +114,7 @@ export default async function Browse({ params, searchParams }: {
           <Link href={repoHref(id,"browse",{path:arr.slice(0,i+1).join("/"),revision})}>{part}</Link></span>)}</div>
         {file && <div className="repo-inline-actions"><Link href={repoHref(id,"history",{path,revision})}>File history</Link>
           <Link aria-current={blame ? "page" : undefined} href={repoHref(id,"browse",{path,revision,view:blame ? undefined:"blame"})}>{blame ? "View file" : "Blame"}</Link>
-          <a href={"/api/v2/repositories/"+id+"/objects/"+file.objectId+"/content"} download={path.split("/").pop()}>Download</a></div>}
+          <a href={"/api/v2/repositories/"+id+"/objects/"+file.objectId+"/content?path="+encodeURIComponent(path)+"&revision="+revision} download={path.split("/").pop()}>Download</a></div>}
       </div>
       {file ? <>
         {fileData?.error && <p className="repo-empty" role="status">{fileData.error}</p>}

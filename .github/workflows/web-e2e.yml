@@ -1,0 +1,59 @@
+name: Web browser verification
+on:
+  push:
+    branches: ["feature/**", develop]
+  pull_request:
+    branches: [develop]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: devhub
+          POSTGRES_PASSWORD: devhub
+          POSTGRES_DB: devhub
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U devhub -d devhub"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      APP_SECRET: isolated-web-e2e-app-secret-only-123456789
+      BOOTSTRAP_USER_PASSWORD: isolated-web-e2e-strong-password-012345
+      BOOTSTRAP_AGENT_TOKEN: isolated-web-e2e-machine-credential-0123456789
+      WEB_E2E_FIXTURE: isolated-ci
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run db:generate && npm run db:deploy
+      - run: npm run db:seed
+      - run: npx tsx scripts/seed-web-e2e.ts
+      - run: npm run build
+      - name: Start production server
+        run: |
+          npm run start -- -p 3000 > /tmp/devhub-web.log 2>&1 &
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:3000/api/health; then exit 0; fi
+            sleep 2
+          done
+          cat /tmp/devhub-web.log
+          exit 1
+      - name: Install isolated browser test dependencies
+        run: |
+          npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund @playwright/test@1.58.2 @axe-core/playwright@4.11.1
+          npx playwright install --with-deps chromium
+      - name: Exercise repository journeys and accessibility
+        run: npx playwright test tests/web.spec.mjs --reporter=line --workers=2
+      - name: Server output on failure
+        if: failure()
+        run: tail -n 200 /tmp/devhub-web.log || true
