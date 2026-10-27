@@ -4,7 +4,7 @@ import { posix } from "node:path";
 import { db } from "../src/lib/prisma";
 import { assertRepositoryPermission } from "../src/lib/authorization";
 import { fromGitRef } from "../src/source-control/git-interoperability-format";
-import { gitCacheDirectory } from "../src/source-control/git-interoperability";
+import { gitCacheDirectory, gitCommand } from "../src/source-control/git-interoperability";
 import { gitLines, gitText, readGitCommit, gitTreeEntries } from "../src/source-control/git-io";
 import { publishGitCommit } from "../src/source-control/git-importer";
 import { mutateReference } from "../src/source-control/refs";
@@ -22,7 +22,9 @@ async function validateTip(cwd: string, sha: string) {
       throw new Error("Unsupported Git tree path, mode, or size");
     }
     if (item.mode === "120000") {
-      const target = await gitText(cwd, ["cat-file", "blob", item.sha], 4097);
+      const raw = await gitCommand(cwd, ["cat-file", "blob", item.sha]);
+      if (raw.length > 4096) throw new Error("Oversized Git symbolic link");
+      const target = new TextDecoder("utf-8", { fatal: true }).decode(raw);
       const joined = posix.normalize(posix.join(posix.dirname(item.path), target));
       if (!target || target.includes("\0") || target.includes("\\") || posix.isAbsolute(target) ||
         joined === ".." || joined.startsWith("../") || joined.startsWith("/") ||
@@ -86,6 +88,18 @@ async function main() {
     await validateTip(dir, sha);
     const commit = await readGitCommit(dir, sha);
     await publishGitCommit(repositoryId, dir, commit, async () => {}, actor);
+    const published = await db.gitImportCommit.findUniqueOrThrow({ where: {
+      repositoryId_gitSha: { repositoryId, gitSha: sha },
+    } });
+    const rawCommit = await gitCommand(dir, ["cat-file", "commit", sha]);
+    await db.gitInteropCommit.createMany({
+      data: [{ repositoryId, changesetId: published.changesetId,
+        gitSha: sha, treeSha: commit.treeSha, rawCommit }], skipDuplicates: true,
+    });
+    const projection = await db.gitInteropCommit.findUniqueOrThrow({ where: {
+      repositoryId_changesetId: { repositoryId, changesetId: published.changesetId },
+    } });
+    if (projection.gitSha !== sha) throw new Error("Conflicting native-to-Git identity mapping");
   }
   const exported = await db.gitInteropCommit.findUnique({ where: {
     repositoryId_gitSha: { repositoryId, gitSha: newSha },
