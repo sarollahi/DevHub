@@ -18,7 +18,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const maxOutput = 16 * 1024 * 1024;
 const maxOp = 100_000;
 
-export async function gitCommand(dir: string, args: string[], input?: Buffer, env: NodeJS.ProcessEnv = {}) {
+export async function gitCommand(dir: string, args: string[], input?: Buffer, env: Record<string, string | undefined> = {}) {
   const child = spawn("git", ["-C", dir, ...args], {
     stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", ...env },
   });
@@ -80,7 +80,9 @@ export async function gitCacheDirectory(repositoryId: string) {
   if (!root || !isAbsolute(root)) throw new Error("GIT_INTEROP_ROOT must be an absolute, private directory");
   await mkdir(root, { recursive: true, mode: 0o700 });
   const rootStat = await lstat(root);
-  if (rootStat.isSymbolicLink()) throw new Error("Git cache root must not be a symlink");
+  if (rootStat.isSymbolicLink() || (rootStat.mode & 0o077)) {
+    throw new Error("Git cache root must be a private non-symlink directory (0700)");
+  }
   const canonical = await realpath(root);
   const dir = join(canonical, repositoryId + ".git");
   try {
