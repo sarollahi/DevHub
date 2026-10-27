@@ -81,7 +81,10 @@ async function installHooks(dir: string) {
   await chmod(resolve(dir, "hooks/pre-receive"), 0o700);
   for (const [key, value] of [
     ["receive.fsckObjects", "true"], ["transfer.fsckObjects", "true"],
-    ["receive.denyNonFastForwards", "true"], ["receive.denyDeletes", "true"],
+    // Git performs the final cache ref write; the pre-receive hook alone
+    // authorizes every update through the stricter native transactional policy.
+    ["receive.denyNonFastForwards", "false"], ["receive.denyDeletes", "false"],
+    ["receive.advertiseAtomic", "true"], ["receive.advertisePushOptions", "true"],
     ["gc.auto", "0"],
   ]) await gitCommand(dir, ["config", "--local", key, value]);
 }
