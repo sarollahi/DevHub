@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/prisma";
 import { validPath } from "@/lib/review-logic";
 import { requireRepositoryAccess, sourceFailure } from "@/source-control/http";
-import { runAuthorizedQuery, ancestryQuery, fileHistory, diffQuery, blameQuery, mergeQuery } from "@/source-control/query";
+import { runAuthorizedQuery, ancestryQuery, fileHistory, pathImpactQuery, diffQuery, blameQuery, mergeQuery } from "@/source-control/query";
 import { SourceControlError } from "@/source-control/contracts";
 
 export const runtime = "nodejs";
@@ -40,6 +40,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       }
       case "diff": result = await diffQuery(id, necessary(q.get("from"), "from"),
         necessary(q.get("to"), "to"), max); break;
+      case "impact":
+        if (!path) throw new SourceControlError(422, "INVALID_PATH", "Path required");
+        result = await pathImpactQuery(id, necessary(revision, "revision"), path, max); break;
       case "blame":
         if (!path) throw new SourceControlError(422, "INVALID_PATH", "Path required");
         result = await blameQuery(id, necessary(revision, "revision"), path); break;
