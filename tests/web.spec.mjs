@@ -75,17 +75,17 @@ test.describe("Enterprise repository user journeys", () => {
   });
   test("keyboard access, critical accessibility and navigation performance", async ({ page }) => {
     await openRepository(page);
-    // Navigation can leave the document body focused while the next route settles.
-    // Exercise real keyboard Tab traversal rather than asserting the first Tab
-    // happened to land on a control in every browser/OS.
-    const focusable = new Set(["A", "BUTTON", "INPUT", "SELECT"]);
-    let focused;
-    for (let attempt = 0; attempt < 8; attempt++) {
-      await page.keyboard.press("Tab");
-      focused = await page.evaluate(() => document.activeElement?.tagName);
-      if (focusable.has(focused)) break;
-    }
-    expect(focusable.has(focused)).toBe(true);
+    await expect(page.getByRole("link", { name: "README.md" })).toBeVisible();
+    // Start from a real visible keyboard target to avoid Chromium retaining
+    // BODY focus after a client-side navigation transition.
+    const navigation = page.getByRole("navigation", { name: "Repository sections" });
+    const start = navigation.getByRole("link").first();
+    await expect(start).toBeVisible();
+    await start.focus();
+    await expect(start).toBeFocused();
+    await page.keyboard.press("Tab");
+    const focused = await page.evaluate(() => document.activeElement?.tagName);
+    expect(["A", "BUTTON", "INPUT", "SELECT"]).toContain(focused);
     const accessibility = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
     expect(accessibility.violations.filter(v => v.impact === "critical")).toEqual([]);
     const navDuration = await page.evaluate(() => performance.getEntriesByType("navigation")[0]?.duration ?? 0);
