@@ -2,7 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import WorkspaceShell from "@/components/workspace-shell";
 import Icon from "@/components/icons";
-import { isAdminRequest } from "@/lib/auth";
+import { sessionIdentity } from "@/lib/auth";
+import { permittedRepositoryIds } from "@/lib/tenant";
 import { db } from "@/lib/prisma";
 import ReviewBoard from "./review-board";
 export const dynamic = "force-dynamic";
@@ -10,10 +11,14 @@ export const dynamic = "force-dynamic";
 export default async function NativeReviews({ searchParams }: {
   searchParams: Promise<{ cursor?: string }>;
 }) {
-  if (!(await isAdminRequest())) redirect("/login");
+  const actor = await sessionIdentity();
+  if (!actor) redirect("/login");
+  const permitted = await permittedRepositoryIds(actor);
+  const scoped = { repositoryId: { in: permitted } };
   const { cursor } = await searchParams;
   const [reviews, states, metrics, total, duplicates, risky] = await Promise.all([
     db.sourceReview.findMany({
+      where: scoped,
       take: 101,
       ...(cursor && /^[0-9a-f]{64}$/.test(cursor) ? { cursor: { changesetId: cursor }, skip: 1 } : {}),
       orderBy: [{ createdAt: "desc" }, { changesetId: "desc" }],
@@ -22,12 +27,12 @@ export default async function NativeReviews({ searchParams }: {
         approvals: { select: { decision: true } },
       } } },
     }),
-    db.sourceReview.groupBy({ by: ["state"], _count: { _all: true } }),
-    db.sourceReview.aggregate({ where: { state: "COMPLETED" }, _avg: { latencyMs: true, confidence: true },
+    db.sourceReview.groupBy({ where: scoped, by: ["state"], _count: { _all: true } }),
+    db.sourceReview.aggregate({ where: { ...scoped, state: "COMPLETED" }, _avg: { latencyMs: true, confidence: true },
       _sum: { costMicros: true } }),
-    db.sourceReview.count(),
-    db.sourceReview.count({ where: { exactDuplicateOf: { not: null } } }),
-    db.sourceReview.count({ where: { riskTier: { in: ["HIGH", "CRITICAL"] } } }),
+    db.sourceReview.count({ where: scoped }),
+    db.sourceReview.count({ where: { ...scoped, exactDuplicateOf: { not: null } } }),
+    db.sourceReview.count({ where: { ...scoped, riskTier: { in: ["HIGH", "CRITICAL"] } } }),
   ]);
   const counts = Object.fromEntries(states.map(s => [s.state, s._count._all]));
   const items = reviews.slice(0, 100).map(r => ({

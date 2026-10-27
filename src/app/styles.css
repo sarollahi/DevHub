@@ -75,3 +75,76 @@
 .integration-resolution input{font-size:11px;width:215px}
 .integration-empty{padding:28px;color:var(--muted);font-size:12px}
 @media(max-width:900px){.integration-metrics{grid-template-columns:1fr}.integration-panel-head{flex-direction:column;align-items:start}}
+
+/* Repository source workspace */
+.repo-skip{position:fixed;top:-100px;left:12px;padding:12px;background:#fff;border:2px solid #334e95;z-index:100}
+.repo-skip:focus{top:10px}
+.repo-identity{display:flex;gap:9px;margin-bottom:14px;font-size:12px;color:#708096}
+.repo-identity strong{color:#24354d}
+.repo-navigation{display:flex;flex-wrap:wrap;gap:3px;border-bottom:1px solid #dce2eb;margin-bottom:20px}
+.repo-navigation a{padding:10px 12px;border-bottom:2px solid transparent;font-size:12px;font-weight:600;color:#66758c}
+.repo-navigation a:hover{color:#304d85;background:#f1f4f8}
+.repo-navigation a[aria-current=page]{color:#244780;border-bottom-color:#31538d}
+.repo-section{margin-bottom:18px}
+.repo-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:13px;padding:15px 20px;border-bottom:1px solid #e5e9f0}
+.repo-toolbar-top{border:0;padding:0 0 18px}
+.repo-toolbar strong{color:#25374e;font-size:13px}
+.repo-toolbar a,.repo-pagination a,.repo-inline-actions a{color:#31518a;font-size:12px;font-weight:650}
+.repo-toolbar a:hover,.repo-pagination a:hover,.repo-crumbs a:hover{text-decoration:underline}
+.repo-note{color:#69788b;font-size:11px}
+.repo-note-padded{padding:10px 20px}
+.repo-empty{padding:30px 22px;color:#738298;font-size:13px}
+.repo-error{padding:20px;color:#a3434a;background:#fff4f3}
+.repo-error-inline{display:block;color:#a3434a;font-size:11px;white-space:normal;overflow-wrap:anywhere}
+.repo-table td{white-space:normal;overflow-wrap:anywhere}
+.repo-table .row-title{white-space:normal;max-width:none;overflow-wrap:anywhere}
+.repo-search-form,.repo-ref-picker{display:flex;align-items:center;gap:9px;padding:17px 20px;flex-wrap:wrap}
+.repo-ref-picker{padding:0}
+.repo-search-form label,.repo-ref-picker label{font-size:11px;font-weight:650;color:#5e6e85}
+.repo-search-form input,.repo-ref-picker input,.repo-search-form select{min-width:0;max-width:100%;padding:9px 10px;border:1px solid #cdd6e2;border-radius:6px;background:#fff;color:#243751;font-size:12px}
+.repo-search-form input[name=q]{flex:1;min-width:200px}
+.repo-ref-picker input{width:195px}
+.repo-ref-picker button{padding:8px 12px;border:1px solid #cdd6e2;background:#fff;border-radius:6px;color:#254b88}
+.repo-crumbs,.repo-crumbs span,.repo-inline-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.repo-inline-actions{gap:15px}
+.repo-pagination{display:flex;align-items:center;flex-wrap:wrap;gap:15px;padding:14px 20px;border-top:1px solid #e5e9f0;font-size:11px;color:#8491a2}
+.code-scroll{max-width:100%;max-height:65vh;overflow:auto;scrollbar-gutter:stable;border-top:1px solid #eef0f5}
+.source-code-table{border-collapse:collapse;width:100%;font:12px/21px ui-monospace,Menlo,Consolas,monospace}
+.source-code-table tr:nth-child(even){background:#fcfcfd}
+.source-code-table tr:hover{background:#eef4fb}
+.source-code-table th{position:sticky;left:0;width:50px;min-width:50px;padding:0 11px;text-align:right;color:#8a97a9;font-weight:400;background:#f7f9fc;border-right:1px solid #e8edf3}
+.source-code-table th a{color:inherit}
+.source-code-table td{padding:0 10px;white-space:pre;vertical-align:top}
+.source-code-table td code{font:inherit}
+.source-code-table .code-attribution{min-width:98px;width:98px;white-space:nowrap;color:#53698b;border-right:1px solid #e8edf3}
+.syntax-keyword{color:#244c93;font-weight:650}
+.repo-excerpt{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.5 ui-monospace,monospace}
+.repo-diff-file{margin:0 20px 20px;border:1px solid #e1e6ec;border-radius:7px;overflow:hidden}
+.repo-diff-title{display:flex;justify-content:space-between;gap:10px;background:#f8fafc;padding:12px;border-bottom:1px solid #e1e6ec}
+.repo-diff-title a{color:#30508a;font-weight:650}
+.repo-diff-file>p{padding:12px}
+.repo-diff-lines{display:flex;flex-direction:column;min-width:max-content;margin:0;font:11px/1.5 ui-monospace,Consolas,monospace}
+.repo-diff-lines span{white-space:pre;padding:0 12px}
+.diff-add{background:#eaf5ee;color:#275f3f}
+.diff-remove{background:#ffefef;color:#913e46}
+.diff-context{background:#fff;color:#65748a}
+.repo-review-group{margin:15px 20px;border:1px solid #e0e5ed;border-radius:7px;overflow:hidden}
+.repo-review-group header{display:flex;justify-content:space-between;gap:12px;background:#f8fafc;padding:12px;color:#607084;font-size:11px}
+.repo-review-group header strong{color:#263952}
+.repo-check{padding:16px 20px;border-top:1px solid #e5eaf0}
+.repo-check>header{display:flex;justify-content:space-between;gap:10px}
+.repo-check>header strong,.repo-check>header span{display:block}
+.repo-check>header span{font-size:11px;color:#7c899a}
+.repo-check-tasks{display:grid;grid-template-columns:repeat(auto-fit,minmax(195px,1fr));gap:10px;margin-top:12px}
+.repo-check-task{border:1px solid #e0e5ed;border-radius:7px;padding:12px;min-width:0}
+.repo-check-task strong,.repo-check-task span,.repo-check-task small{display:block}
+.repo-check-task small{color:#748195;margin:5px 0}
+.repo-check-task pre{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px}
+.repo-check-task a{display:block;color:#31518a}
+.repo-state{padding:4px 8px;border-radius:5px;background:#eff2f6;color:#596a81;font-size:10px}
+.repo-state-passed{background:#eaf7ef;color:#257858}
+.repo-state-failed,.repo-state-errored{background:#fff1ef;color:#a9434e}
+.repo-definition{display:grid;grid-template-columns:minmax(130px,180px) 1fr;gap:12px 18px;padding:20px}
+.repo-definition dt{color:#6d7d8f}.repo-definition dd{margin:0;color:#23374f;font-weight:650}
+@media(max-width:820px){.repo-navigation{flex-wrap:nowrap;overflow-x:auto}.repo-navigation a{flex-shrink:0}.repo-search-form input[name=q]{flex-basis:100%}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.01ms!important;transition-duration:.01ms!important}}

@@ -360,6 +360,7 @@ model SourceObject {
   operations  SourceFileOperation[] @relation("FileObject")
   grants      SourceObjectGrant[]
   importedBlobs GitImportBlob[]
+  searchDocument SourceSearchDocument?
 }
 
 // Content-addressed changesets are never modified when references advance.
@@ -1019,4 +1020,21 @@ model DeploymentExecution {
   repository Repository @relation(fields:[repositoryId],references:[id],onDelete:Restrict)
   @@unique([repositoryId,environment,requestKey])
   @@index([state,nextAttemptAt,leaseUntil])
+}
+
+
+// Immutable content is indexed once per SHA-256 object, independently of branch pointers.
+// Per-revision path visibility is always evaluated from an authorized source snapshot.
+model SourceSearchDocument {
+  objectId String @id @db.Char(64)
+  state JobState @default(QUEUED)
+  textBody String? @db.Text
+  excludedReason String? @db.VarChar(32)
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  leaseUntil DateTime?
+  lastError String?
+  indexedAt DateTime?
+  object SourceObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  @@index([state, nextAttemptAt, leaseUntil])
 }

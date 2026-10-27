@@ -1,4 +1,5 @@
 import { db } from "../lib/prisma";
+import { indexSearchBatch, enqueueSearchObjects } from "./search-indexer";
 
 // A lease is stored in PostgreSQL, so a worker crash or deployment restart
 // cannot permanently strand derived indexing. Retrying is idempotent.
@@ -42,6 +43,7 @@ export async function indexChangeset(changesetId: string): Promise<boolean> {
         ? [{ changesetId, path: op.previousPath, operationPath: op.path, role: "source" }]
         : []),
     ]);
+    await enqueueSearchObjects(source.operations.map(op => op.objectId).filter((id): id is string => !!id));
     await db.$transaction(async tx => {
       if (touches.length) await tx.sourceQueryPathTouch.createMany({ data: touches, skipDuplicates: true });
       await tx.sourceQueryIndexJob.update({ where: { changesetId }, data: {
@@ -82,8 +84,9 @@ async function main() {
   try {
     while (!stopping) {
       const batch = await indexBatch();
-      if (!batch.inspected) await sleep(1000);
-      else if (!batch.completed) await sleep(250);
+      const search = await indexSearchBatch();
+      if (!batch.inspected && !search.inspected) await sleep(1000);
+      else if (!batch.completed && !search.completed) await sleep(250);
     }
   } finally { await db.$disconnect(); }
 }

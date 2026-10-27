@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect, notFound } from "next/navigation";
-import { isAdminRequest } from "@/lib/auth";
+import { sessionIdentity } from "@/lib/auth";
+import { assertRepositoryPermission } from "@/lib/authorization";
 import { db } from "@/lib/prisma";
 import WorkspaceShell from "@/components/workspace-shell";
 import { StateBadge } from "@/components/status";
@@ -9,8 +10,10 @@ import ValidationControls from "./validation-controls";
 import LogViewer from "./log-viewer";
 export const dynamic="force-dynamic";
 export default async function ValidationPage({params}:{params:Promise<{id:string}>}) {
-  if(!(await isAdminRequest()))redirect("/login");
+  const actor = await sessionIdentity();
+  if(!actor)redirect("/login");
   const {id}=await params;
+  try { await assertRepositoryPermission(actor,id,"source:read"); } catch { notFound(); }
   const repo=await db.repository.findUnique({where:{id},include:{owner:true}});
   if(!repo)notFound();
   const items=await db.validationPipeline.findMany({where:{repositoryId:id},
