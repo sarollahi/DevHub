@@ -1,0 +1,62 @@
+name: Performance and resilience
+on:
+  push:
+    branches: ["feature/performance-resilience-observability"]
+  workflow_dispatch:
+    inputs:
+      profile:
+        type: choice
+        options: [smoke, scale]
+        default: smoke
+        description: "smoke is fast; scale publishes 10,000 real changesets"
+permissions:
+  contents: read
+jobs:
+  native-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: devhub
+          POSTGRES_PASSWORD: devhub
+          POSTGRES_DB: devhub
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U devhub -d devhub"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      REDIS_URL: redis://localhost:6379
+      APP_SECRET: ci-only-long-random-testing-secret-123456789
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22.18", cache: npm }
+      - run: npm ci --no-audit --no-fund
+      - run: npm run db:generate && npm run db:deploy
+      - name: Run native real-object lifecycle
+        run: |
+          mkdir -p reports
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.profile }}" = "scale" ]; then
+            timeout --signal=TERM 9500s npm run bench:lifecycle -- --submissions=1000 --changesets=10000 --concurrency=1000 --depth=900 --monorepo-paths=6000 --ref-writers=128 --integration-jobs=400 --ci-jobs=1000 --queries=100 --output=reports/lifecycle.json
+          else
+            timeout --signal=TERM 900s npm run bench:lifecycle -- --submissions=10 --changesets=24 --concurrency=10 --depth=8 --monorepo-paths=80 --ref-writers=12 --integration-jobs=8 --ci-jobs=0 --queries=12 --blobs=4 --output=reports/lifecycle.json
+          fi
+      - name: Reconcile persisted source data
+        if: always()
+        run: npm run ops:reconcile -- --sample=100 | tee reports/reconcile.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lifecycle-evidence
+          path: reports/
+          if-no-files-found: warn

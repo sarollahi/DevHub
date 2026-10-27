@@ -7,3 +7,5 @@ node_modules/
 coverage/
 *.tsbuildinfo
 .DS_Store
+ops/observability/metrics.token
+reports/

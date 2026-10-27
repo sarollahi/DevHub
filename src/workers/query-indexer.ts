@@ -1,3 +1,4 @@
+import { measured } from "../observability/telemetry";
 import { db } from "../lib/prisma";
 import { indexSearchBatch, enqueueSearchObjects } from "./search-indexer";
 
@@ -70,7 +71,7 @@ export async function indexBatch(batchSize = 32) {
   ] }, orderBy: { createdAt: "asc" }, take: Math.min(100, Math.max(1, batchSize)), select: { changesetId: true } });
   let completed = 0;
   for (const job of jobs) {
-    try { if (await indexChangeset(job.changesetId)) completed++; }
+    try { if (await measured("worker.index", () => indexChangeset(job.changesetId))) completed++; }
     catch (error) { console.error("Query indexing failed", job.changesetId, error); }
   }
   return { inspected: jobs.length, completed };

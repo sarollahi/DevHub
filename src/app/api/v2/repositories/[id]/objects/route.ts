@@ -1,9 +1,11 @@
+import { measured } from "@/observability/telemetry";
 import { NextRequest, NextResponse } from "next/server";
 import { requireRepositoryAccess, sourceFailure, readBoundedJson } from "@/source-control/http";
 import { stageCanonicalBlob } from "@/source-control/canonical";
 export const runtime = "nodejs";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  return measured("blob.stage", async () => {
   try {
     const { id } = await params;
     const { actor } = await requireRepositoryAccess(request, id, "changesets:write");
@@ -17,4 +19,5 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const result = await stageCanonicalBlob(id, actor, dataBase64);
     return NextResponse.json({ apiVersion: 2, ...result }, { status: 201 });
   } catch (error) { return sourceFailure(error); }
+  }, request.headers.get("traceparent"));
 }

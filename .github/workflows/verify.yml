@@ -113,6 +113,10 @@ jobs:
           export VALIDATION_FIXTURE_IMAGE="$(docker image inspect busybox:1.37 --format='{{index .RepoDigests 0}}')"
           export RUN_VALIDATION_CONTAINER_TEST=1
           npx tsx --test tests/validation.integration.test.ts
+      - name: Native real-object lifecycle smoke
+        run: timeout --signal=TERM 240s npm run bench:lifecycle -- --submissions=8 --changesets=20 --concurrency=8 --depth=6 --monorepo-paths=40 --ref-writers=8 --integration-jobs=6 --ci-jobs=0 --queries=10 --blobs=4
+      - name: Reconciliation smoke
+        run: npm run ops:reconcile -- --sample=50
       - name: Production build
         run: npm run build
       - name: Start server against real database
