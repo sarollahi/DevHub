@@ -5,7 +5,7 @@ import { db } from "../src/lib/prisma";
 import { assertRepositoryPermission } from "../src/lib/authorization";
 import { fromGitRef } from "../src/source-control/git-interoperability-format";
 import { gitCacheDirectory, gitCommand } from "../src/source-control/git-interoperability";
-import { gitLines, gitText, readGitCommit, gitTreeEntries } from "../src/source-control/git-io";
+import { gitDiff, gitLines, gitText, readGitCommit, gitTreeEntries } from "../src/source-control/git-io";
 import { publishGitCommit } from "../src/source-control/git-importer";
 import { mutateReference } from "../src/source-control/refs";
 import { validPath } from "../src/lib/review-logic";
@@ -87,6 +87,17 @@ async function main() {
     } })) continue;
     await validateTip(dir, sha);
     const commit = await readGitCommit(dir, sha);
+    // Enforce path-scoped permissions before staging any objects, not only
+    // inside the publication transaction after blobs have been uploaded.
+    const changedPaths: string[] = [];
+    for await (const delta of gitDiff(dir, sha, commit.parents[0])) {
+      if (!validPath(delta.path)) throw new Error("Invalid changed path in Git push");
+      changedPaths.push(delta.path);
+      if (changedPaths.length > 100000) throw new Error("Excessive changed paths in Git push");
+    }
+    if (changedPaths.length) {
+      await assertRepositoryPermission(actor, repositoryId, "changeset:write", { paths: changedPaths });
+    }
     await publishGitCommit(repositoryId, dir, commit, async () => {}, actor);
     const published = await db.gitImportCommit.findUniqueOrThrow({ where: {
       repositoryId_gitSha: { repositoryId, gitSha: sha },
