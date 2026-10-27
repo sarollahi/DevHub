@@ -29,7 +29,8 @@
     "cache:benchmark": "node scripts/benchmark-cache.mjs",
     "import:git": "tsx scripts/git-import.ts",
     "import:worker": "tsx scripts/git-import-worker.ts",
-    "worker:review": "tsx src/review/source-review.ts"
+    "worker:review": "tsx src/review/source-review.ts",
+    "worker:integration": "tsx src/integration/worker.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",

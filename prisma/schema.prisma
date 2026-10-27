@@ -949,6 +949,7 @@ model ChangeIntegration {
   requestKey           String   @db.VarChar(128)
   mode                 String   @default("MERGE")
   revertIntegrationId  String?  @db.Uuid
+  resolutionOfId       String?  @db.Uuid
   state                String   @default("QUEUED")
   actorType            String
   actorId              String
