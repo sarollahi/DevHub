@@ -29,7 +29,7 @@ CREATE TABLE "SourceDerivedJump" (
   "changesetId" CHAR(64) NOT NULL REFERENCES "SourceChangeset"("id") ON DELETE CASCADE,
   "version" INTEGER NOT NULL,
   "level" INTEGER NOT NULL CHECK ("level" >= 0 AND "level" < 63),
-  "ancestorId" CHAR(64) NOT NULL REFERENCES "SourceChangeset"("id") ON DELETE RESTRICT,
+  "ancestorId" CHAR(64) NOT NULL REFERENCES "SourceChangeset"("id") ON DELETE CASCADE,
   PRIMARY KEY ("changesetId","version","level")
 );
 CREATE INDEX "SourceDerivedJump_ancestor_idx" ON "SourceDerivedJump" ("repositoryId","ancestorId");
@@ -62,7 +62,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 CREATE TRIGGER "SourceDerivedIndex_immutable"
-  BEFORE UPDATE OR DELETE ON "SourceDerivedIndex"
+  BEFORE UPDATE ON "SourceDerivedIndex"
   FOR EACH ROW EXECUTE FUNCTION reject_published_derived_update();
 CREATE FUNCTION reject_derived_posting_mutation() RETURNS TRIGGER AS $$
 BEGIN
@@ -70,8 +70,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 CREATE TRIGGER "SourceDerivedJump_immutable"
-  BEFORE UPDATE OR DELETE ON "SourceDerivedJump"
+  BEFORE UPDATE ON "SourceDerivedJump"
   FOR EACH ROW EXECUTE FUNCTION reject_derived_posting_mutation();
 CREATE TRIGGER "SourceDerivedPathEvent_immutable"
-  BEFORE UPDATE OR DELETE ON "SourceDerivedPathEvent"
+  BEFORE UPDATE ON "SourceDerivedPathEvent"
   FOR EACH ROW EXECUTE FUNCTION reject_derived_posting_mutation();
