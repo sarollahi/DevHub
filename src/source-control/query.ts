@@ -220,19 +220,19 @@ export async function diffQuery(repositoryId: string, from: string, to: string, 
 }
 
 type HistoryNode = { id: string; depth: number };
-async function firstParentChain(repositoryId: string, revision: string): Promise<HistoryNode[]> {
+// Used only by the bounded rebase preview. Never load 1m IDs to reject a
+// preview that supports at most 200 operations.
+async function firstParentChain(repositoryId: string, revision: string, maxDepth = 201): Promise<HistoryNode[]> {
   const id = await resolveRevision(repositoryId, revision);
-  const rows = await db.$queryRaw<HistoryNode[]>`
+  return db.$queryRaw<HistoryNode[]>`
     WITH RECURSIVE first_parent(id, depth) AS (
       SELECT id, 0 FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
       UNION ALL
       SELECT p."parentId", f.depth + 1 FROM "SourceChangesetParent" p
         JOIN first_parent f ON p."changesetId" = f.id WHERE p.position = 0
     )
-    SELECT id, depth FROM first_parent LIMIT 100001
+    SELECT id, depth FROM first_parent LIMIT ${maxDepth + 1}
   `;
-  if (rows.length > 100000) throw new SourceControlError(413, "HISTORY_LIMIT", "First-parent history exceeds 100,000 changesets");
-  return rows;
 }
 
 export type FileHistoryEvent = {
@@ -240,47 +240,65 @@ export type FileHistoryEvent = {
   objectId: string | null; authorId: string; message: string; createdAt: Date;
 };
 
+type FileHistoryRow = {
+  changesetId: string; path: string; kind: string; previousPath: string | null;
+  objectId: string | null; depth: number;
+};
+
+// A recursive first-parent walk is executed within PostgreSQL. Only relevant
+// file operations (up to the caller's page limit) enter JS memory. Rename
+// following resumes after the rename's depth, independent of history length.
 export async function fileHistory(repositoryId: string, revision: string, path: string, followRenames = true, max = 100) {
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
-  const chain = await firstParentChain(repositoryId, id);
-  const index = new Map(chain.map((node, i) => [node.id, i]));
-  const events: { changesetId: string; path: string; kind: string; previousPath: string | null; objectId: string | null }[] = [];
+  const size = limitQuery(max, 1000);
+  const events: FileHistoryRow[] = [];
   let current = path;
-  let offset = 0;
-  while (offset < chain.length) {
-    const candidates: typeof events = [];
-    for (const batch of chunks(chain.slice(offset).map(node => node.id))) {
-      const matches = await db.sourceFileOperation.findMany({ where: { changesetId: { in: batch },
-        OR: [{ path: current }, { previousPath: current }] },
-        select: { changesetId: true, path: true, kind: true, previousPath: true, objectId: true } });
-      candidates.push(...matches);
-    }
-    candidates.sort((a, b) => index.get(a.changesetId)! - index.get(b.changesetId)!);
-    let renamed = false;
-    for (const change of candidates) {
-      const position = index.get(change.changesetId)!;
-      if (position < offset) continue;
-      if (change.path !== current) continue; // MOVE source is represented at destination.
-      events.push(change);
-      if (followRenames && (change.kind === "MOVE" || change.kind === "RENAME") && change.previousPath) {
-        current = change.previousPath;
-        offset = position + 1;
-        renamed = true;
+  let fromDepth = 0;
+  let truncated = false;
+  // Each rename consumes at least one event, so this loop is bounded by size.
+  while (events.length <= size) {
+    const limit = size + 1 - events.length;
+    const candidates = await db.$queryRaw<FileHistoryRow[]>`
+      WITH RECURSIVE chain(id, depth) AS (
+        SELECT id, 0 FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
+        UNION ALL SELECT p."parentId", f.depth + 1
+          FROM "SourceChangesetParent" p JOIN chain f ON p."changesetId" = f.id
+          WHERE p.position = 0
+      )
+      SELECT op."changesetId", op.path, op.kind::text AS kind,
+        op."previousPath", op."objectId", chain.depth
+      FROM chain JOIN "SourceFileOperation" op ON op."changesetId" = chain.id
+      WHERE chain.depth >= ${fromDepth} AND op.path = ${current}
+      ORDER BY chain.depth, op.position LIMIT ${limit}
+    `;
+    if (!candidates.length) break;
+    let rename = false;
+    for (const candidate of candidates) {
+      events.push(candidate);
+      if (events.length > size) { truncated = true; break; }
+      if (followRenames && (candidate.kind === "MOVE" || candidate.kind === "RENAME") && candidate.previousPath) {
+        current = candidate.previousPath;
+        fromDepth = Number(candidate.depth) + 1;
+        rename = true;
         break;
       }
     }
-    if (!renamed) break;
+    if (truncated || !rename) break;
   }
-  const selected = events.slice(0, limitQuery(max, 1000));
-  const metadata = await db.sourceChangeset.findMany({ where: { repositoryId, id: { in: selected.map(e => e.changesetId) } },
+  const selected = events.slice(0, size);
+  const metadata = await db.sourceChangeset.findMany({ where: { repositoryId,
+      id: { in: selected.map(e => e.changesetId) } },
     select: { id: true, authorId: true, message: true, createdAt: true } });
   const byId = new Map(metadata.map(row => [row.id, row]));
   const records: FileHistoryEvent[] = selected.map(e => {
-    const meta = byId.get(e.changesetId)!;
-    return { ...e, authorId: meta.authorId, message: meta.message, createdAt: meta.createdAt };
+    const meta = byId.get(e.changesetId);
+    if (!meta) throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing historical revision");
+    return { changesetId: e.changesetId, path: e.path, kind: e.kind,
+      previousPath: e.previousPath, objectId: e.objectId,
+      authorId: meta.authorId, message: meta.message, createdAt: meta.createdAt };
   });
-  return { revision: id, path, firstParentOnly: true, records, truncated: events.length > selected.length };
+  return { revision: id, path, firstParentOnly: true, records, truncated };
 }
 
 // Path-impact search uses durable precomputed touches when available, with
@@ -360,6 +378,7 @@ export async function rebaseQuery(repositoryId: string, tip: string, onto: strin
   if (bases.length !== 1) throw new SourceControlError(409, "AMBIGUOUS_BASE", "Rebase requires exactly one merge base");
   const chain = await firstParentChain(repositoryId, head);
   const end = chain.findIndex(node => node.id === bases[0]);
+  if (end < 0 && chain.length > 201) throw new SourceControlError(413, "REBASE_LIMIT", "Preview supports at most 200 source changesets");
   if (end < 0) throw new SourceControlError(409, "NONLINEAR_REBASE", "Merge base is not on source first-parent history");
   if (end > 200) throw new SourceControlError(413, "REBASE_LIMIT", "Preview supports at most 200 source changesets");
   const revisionIds = chain.slice(0, end).map(n => n.id).reverse();
