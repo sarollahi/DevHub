@@ -938,3 +938,49 @@ model LoginRateBucket {
   count Int @default(0)
   @@id([key, windowStart])
 }
+
+ 
+// Integration preparation is concurrent; only the final guarded ref CAS is serialized.
+model ChangeIntegration {
+  id                   String   @id @default(uuid()) @db.Uuid
+  repositoryId         String   @db.Uuid
+  sourceChangesetId    String   @db.Char(64)
+  targetRef            String
+  requestKey           String   @db.VarChar(128)
+  mode                 String   @default("MERGE")
+  revertIntegrationId  String?  @db.Uuid
+  state                String   @default("QUEUED")
+  actorType            String
+  actorId              String
+  actorSessionId       String?  @db.Uuid
+  actorCredentialId    String?  @db.Uuid
+  targetChangesetId    String?  @db.Char(64)
+  baseChangesetId      String?  @db.Char(64)
+  resultChangesetId    String?  @db.Char(64)
+  targetGeneration     Int?
+  attempts             Int      @default(0)
+  maxAttempts          Int      @default(8)
+  leaseToken           String?  @db.Uuid
+  leaseUntil           DateTime?
+  nextAttemptAt        DateTime @default(now())
+  affectedPaths        String[] @default([])
+  conflicts            Json?
+  lastError            String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  completedAt          DateTime?
+  @@unique([repositoryId, requestKey])
+  @@index([state, nextAttemptAt, leaseUntil])
+  @@index([repositoryId, targetRef, createdAt(sort: Desc)])
+}
+model IntegrationPolicy {
+  repositoryId           String @db.Uuid
+  targetRef              String
+  preChecks              Boolean @default(true)
+  targetChecks           Boolean @default(true)
+  postChecks             Boolean @default(true)
+  deploymentChecks       Boolean @default(true)
+  maxRetries             Int @default(8)
+  updatedAt              DateTime @updatedAt
+  @@id([repositoryId, targetRef])
+}

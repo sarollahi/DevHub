@@ -16,7 +16,7 @@ const path = z.string().max(512).refine(validPath, "Invalid relative path");
 const mode = z.enum(["100644", "100755", "120000"]);
 const operation = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("ADD"), path, objectId: id, mode: mode.default("100644") }).strict(),
-  z.object({ kind: z.literal("MODIFY"), path, objectId: id }).strict(),
+  z.object({ kind: z.literal("MODIFY"), path, objectId: id, mode: mode.optional() }).strict(),
   z.object({ kind: z.literal("DELETE"), path }).strict(),
   z.object({ kind: z.literal("RENAME"), path, previousPath: path }).strict(),
   z.object({ kind: z.literal("COPY"), path, previousPath: path }).strict(),
@@ -257,7 +257,7 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
           const original = "previousPath" in op ? op.previousPath : null;
           // File modes and referenced contents are validated before any changeset row is inserted.
           if (op.kind === "ADD" || op.kind === "MODIFY") {
-            const isSymlink = (op.kind === "ADD" ? requestedMode : old?.mode) === "120000";
+            const isSymlink = (requestedMode || old?.mode) === "120000";
             const bytes = await checkedBlob(tx, repositoryId, objectRef!, isSymlink);
             if (isSymlink) checkSymlink(op.path, bytes);
           } else if (op.kind === "COPY" || op.kind === "RENAME") {
