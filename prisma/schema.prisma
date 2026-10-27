@@ -122,6 +122,7 @@ model Repository {
   rateBuckets ApiRateBucket[]
   integrations ChangeIntegration[]
   integrationPolicies IntegrationPolicy[]
+  deployments DeploymentExecution[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -990,4 +991,32 @@ model IntegrationPolicy {
   maxRetries             Int @default(8)
   updatedAt              DateTime @updatedAt
   @@id([repositoryId, targetRef])
+}
+
+
+// Durable production deployment command and authenticated completion receipts.
+model DeploymentExecution {
+  id String @id @default(uuid()) @db.Uuid
+  repositoryId String @db.Uuid
+  integrationId String @db.Uuid
+  revisionId String @db.Char(64)
+  environment String @db.VarChar(80)
+  requestKey String @db.VarChar(128)
+  state String @default("QUEUED")
+  actorId String @db.Uuid
+  actorSessionId String @db.Uuid
+  attempts Int @default(0)
+  maxAttempts Int @default(5)
+  leaseToken String? @db.Uuid
+  leaseUntil DateTime?
+  nextAttemptAt DateTime @default(now())
+  dispatchedAt DateTime?
+  completedAt DateTime?
+  receipt Json?
+  lastError String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  repository Repository @relation(fields:[repositoryId],references:[id],onDelete:Restrict)
+  @@unique([repositoryId,environment,requestKey])
+  @@index([state,nextAttemptAt,leaseUntil])
 }
