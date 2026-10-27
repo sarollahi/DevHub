@@ -1,0 +1,212 @@
+{
+  "title": "DevHub | Source Control Operations",
+  "uid": "devhub-source-ops",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "timezone": "browser",
+  "tags": [
+    "devhub",
+    "operations"
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Native API throughput",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "devhub-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(devhub_operation_duration_seconds_count[5m]))",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Native p50 / p95 / p99",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "devhub-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(devhub_operation_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Native API errors",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "devhub-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation) (rate(devhub_operation_errors_total[5m]))",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Pending outbox / index / validation / integration",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "devhub-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "devhub_outbox_pending + devhub_source_index_pending + devhub_validation_active + devhub_integration_active",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Oldest queue age",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "devhub-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(devhub_outbox_oldest_age_seconds, devhub_source_index_oldest_age_seconds, devhub_integration_oldest_queue_age_seconds)",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Driver process RSS",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "devhub-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "devhub_process_rss_bytes",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Cache hits vs misses",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "devhub-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(devhub_cache_hits[5m])) / clamp_min(sum(rate(devhub_cache_hits[5m] + devhub_cache_misses[5m])), 0.001)",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Cache upstream requests",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "devhub-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(devhub_cache_upstream_requests[5m])",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Pending S3 publications",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "devhub-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "devhub_object_publications_pending",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    }
+  ]
+}

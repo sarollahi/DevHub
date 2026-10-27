@@ -204,3 +204,8 @@ A separate workflow `.github/workflows/web-e2e.yml` seeds an isolated PostgreSQL
 ### Git interoperability
 
 Native changesets remain authoritative. A separately deployed [Git smart-HTTP gateway](docs/git-interoperability.md) offers Git clone/fetch and native-transactional multi-reference pushes (up to 32 refs), branch deletion/restoration, and explicitly audited administrator force-with-lease. All Git objects and refs remain disposable projections. Protected branch fast-forwards require signed source and target-specific execution evidence plus independent human approval; unverified pushes fail closed. The gateway requires revocable scoped Git credentials and an HTTPS proxy. See the security and interoperability limitations before enabling the service.
+
+
+## Performance and operations
+
+DevHub includes a [native real-object lifecycle benchmark, telemetry, fault drills, reconciliation and dashboards](docs/performance-resilience.md). Measurements require a deployed test topology; no production-scale performance result is implied by the benchmark source.

@@ -35,7 +35,12 @@
     "bench:integration": "node --experimental-strip-types scripts/bench-integration.mjs",
     "bench:integration:db": "tsx scripts/bench-integration-db.ts",
     "git:gateway": "tsx scripts/git-interop-server.ts",
-    "bench:git-interop": "tsx scripts/bench-git-interoperability.ts"
+    "bench:git-interop": "tsx scripts/bench-git-interoperability.ts",
+    "bench:lifecycle": "tsx scripts/bench-lifecycle.ts",
+    "ops:reconcile": "tsx scripts/reconcile.ts",
+    "ops:usage": "tsx scripts/tenant-usage.ts",
+    "ops:cache-exporter": "node scripts/cache-exporter.mjs",
+    "ops:fault-drill": "node scripts/fault-drill.mjs"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",
