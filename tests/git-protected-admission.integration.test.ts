@@ -109,7 +109,7 @@ test("protected Git refs require actual signed post and exact-target checks plus
     assert.equal(ref.generation, 2);
     const audit = await db.auditEvent.findFirstOrThrow({ where: {
       repositoryId: repo.id, action: "reference.update",
-    }, orderBy: { createdAt: "desc" } });
+    }, orderBy: { occurredAt: "desc" } });
     assert.match(JSON.stringify(audit.metadata), new RegExp(targetPipeline.id));
     await assert.rejects(() => mutateReferencesBatch(repo.id, actor, [{ ...update,
       mutationId: "git-protected-stale-" + suffix,
