@@ -301,7 +301,6 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
           if (op.kind === "ADD" || op.kind === "MODIFY") {
             if (op.kind === "ADD" && old) throw new SourceControlError(409, "DESTINATION_EXISTS", op.path);
             if (op.kind === "MODIFY" && !old) throw new SourceControlError(409, "MISSING_SOURCE", op.path);
-            await tree.checkSlot(rootId, op.path);
             rootId = await tree.set(rootId, op.path, { objectId: objectRef!, mode:
               (requestedMode || old?.mode || "100644") as SnapshotEntry["mode"] });
           } else if (op.kind === "DELETE") {
@@ -311,7 +310,6 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
             if (!source) throw new SourceControlError(409, "MISSING_SOURCE", op.previousPath);
             if (old) throw new SourceControlError(409, "DESTINATION_EXISTS", op.path);
             if (op.kind === "RENAME") rootId = await tree.set(rootId, op.previousPath, null);
-            await tree.checkSlot(rootId, op.path);
             rootId = await tree.set(rootId, op.path, source);
           } else if (op.kind === "CHMOD") {
             if (!old || old.mode === "120000") throw new SourceControlError(409, "INVALID_MODE_CHANGE", op.path);
@@ -320,6 +318,14 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
           }
           persisted.push({ kind: op.kind, path: op.path, previousPath: original, objectId: objectRef,
             fileMode: requestedMode, position });
+        }
+        // Match v2 delta semantics: operations are ordered, but the path graph
+        // must be valid in the final state, not at every intermediate step.
+        // Validate only affected live files; no full-tree enumeration occurs.
+        const graphChecks = new Set(input.operations.flatMap(op =>
+          "previousPath" in op ? [op.path, op.previousPath] : [op.path]));
+        for (const checkedPath of graphChecks) {
+          if (await tree.get(rootId, checkedPath)) await tree.checkSlot(rootId, checkedPath);
         }
         const snapshotStats = await tree.persist(rootId);
         const meta = deriveChangesetMetadata(persisted.map(op => ({
