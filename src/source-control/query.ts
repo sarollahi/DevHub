@@ -55,75 +55,70 @@ export async function resolveRevision(repositoryId: string, revision: string): P
 
 // PostgreSQL's recursive UNION removes already visited vertices even in wide
 // merge-heavy DAGs. Edges are read from the parent table, not from file trees.
+// Legacy bulk ancestry helper retained for callers that explicitly request
+// the complete DAG. Ordinary history and merge-base queries avoid this map.
 export async function ancestors(repositoryId: string, revision: string): Promise<string[]> {
   const id = await resolveRevision(repositoryId, revision);
   const rows = await db.$queryRaw<{ id: string }[]>`
     WITH RECURSIVE reachable(id) AS (
       SELECT id FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
       UNION
-      SELECT p."parentId" FROM "SourceChangesetParent" p
-        JOIN reachable r ON r.id = p."changesetId"
+      SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON r.id = p."changesetId"
     )
-    SELECT id FROM reachable LIMIT 100001
+    SELECT id FROM reachable
   `;
-  if (rows.length > 100000) throw new SourceControlError(413, "HISTORY_LIMIT", "Ancestry exceeds 100,000 changesets");
   return rows.map(row => row.id);
 }
 
 export async function isAncestor(repositoryId: string, ancestor: string, descendant: string): Promise<boolean> {
-  const a = await resolveRevision(repositoryId, ancestor);
-  return (await ancestors(repositoryId, descendant)).includes(a);
+  const [a, d] = await Promise.all([resolveRevision(repositoryId, ancestor), resolveRevision(repositoryId, descendant)]);
+  const rows = await db.$queryRaw<{ found: boolean }[]>`
+    WITH RECURSIVE reachable(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${d} AND "repositoryId" = ${repositoryId}::uuid
+      UNION
+      SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON r.id = p."changesetId"
+    )
+    SELECT EXISTS(SELECT 1 FROM reachable WHERE id = ${a}) AS found
+  `;
+  return rows[0]?.found === true;
 }
 
+// Merge bases are evaluated in the database. No 100k-vertex JavaScript Sets.
 export async function mergeBases(repositoryId: string, leftRevision: string, rightRevision: string) {
-  const [left, right] = await Promise.all([ancestors(repositoryId, leftRevision), ancestors(repositoryId, rightRevision)]);
-  const leftSet = new Set(left);
-  const shared = new Set(right.filter(id => leftSet.has(id)));
-  if (!shared.size) return [];
-  // Shared is ancestry-closed. A shared parent with a shared child cannot
-  // be a lowest common ancestor; this also preserves multiple criss-cross bases.
-  const bases = new Set(shared);
-  for (const group of chunks([...shared])) {
-    const edges = await db.sourceChangesetParent.findMany({
-      where: { changesetId: { in: group } }, select: { parentId: true },
-    });
-    for (const edge of edges) if (shared.has(edge.parentId)) bases.delete(edge.parentId);
-  }
-  return [...bases].sort();
+  const [left, right] = await Promise.all([
+    resolveRevision(repositoryId, leftRevision), resolveRevision(repositoryId, rightRevision),
+  ]);
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    WITH RECURSIVE lhs(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${left} AND "repositoryId" = ${repositoryId}::uuid
+      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN lhs r ON p."changesetId" = r.id
+    ), rhs(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${right} AND "repositoryId" = ${repositoryId}::uuid
+      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN rhs r ON p."changesetId" = r.id
+    ), shared AS (SELECT id FROM lhs INTERSECT SELECT id FROM rhs)
+    SELECT s.id FROM shared s WHERE NOT EXISTS (
+      SELECT 1 FROM "SourceChangesetParent" p JOIN shared child ON child.id = p."changesetId"
+      WHERE p."parentId" = s.id
+    ) ORDER BY s.id
+  `;
+  return rows.map(r => r.id);
 }
 
 export async function ancestryQuery(repositoryId: string, revision: string, other?: string, max = 100) {
   const resolved = await resolveRevision(repositoryId, revision);
-  const nodes = await ancestors(repositoryId, resolved);
+  const size = limitQuery(max, 1000);
+  const rows = await db.$queryRaw<{ id: string; total: bigint }[]>`
+    WITH RECURSIVE reachable(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${resolved} AND "repositoryId" = ${repositoryId}::uuid
+      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON p."changesetId" = r.id
+    )
+    SELECT id, COUNT(*) OVER () AS total FROM reachable LIMIT ${size + 1}
+  `;
+  const count = Number(rows[0]?.total || 0);
   const common = other ? await mergeBases(repositoryId, resolved, other) : [];
-  return { revision: resolved, ancestorCount: nodes.length - 1, ancestors: nodes.slice(0, limitQuery(max, 1000)),
-    truncated: nodes.length > limitQuery(max, 1000), mergeBases: common };
-}
-
-// Content-addressed roots are the indexed read path. Do not synthesize a
-// million-path legacy map for an unmaterialized v2 changeset.
-async function indexedSnapshot<T>(
-  repositoryId: string, revision: string,
-  query: (tree: SnapshotTree, root: string) => Promise<T>,
-): Promise<T | undefined> {
-  const root = await db.sourceSnapshotRoot.findFirst({
-    where: { repositoryId, changesetId: revision }, select: { rootId: true },
-  });
-  if (!root) {
-    const change = await db.sourceChangeset.findFirst({
-      where: { repositoryId, id: revision }, select: { treeId: true },
-    });
-    if (!change?.treeId) {
-      throw new SourceControlError(409, "SNAPSHOT_NOT_MATERIALIZED",
-        "Revision requires incremental checkpoint migration before indexed reads");
-    }
-    return undefined; // v1 immutable tree compatibility only
-  }
-  return db.$transaction(async tx => {
-    const tree = new SnapshotTree(tx);
-    await tree.count(root.rootId); // verify root digest before following edges
-    return query(tree, root.rootId);
-  }, { timeout: 30000 });
+  return { revision: resolved, ancestorCount: Math.max(0, count - 1),
+    ancestors: rows.map(r => r.id).slice(0, size),
+    truncated: count > size, mergeBases: common };
 }
 
 export async function treeQuery(repositoryId: string, revision: string, directory = "", max = 200, cursor = "") {
