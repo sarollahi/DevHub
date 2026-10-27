@@ -4,6 +4,7 @@ CREATE TABLE "GitInteropCommit" (
   "changesetId" CHAR(64) NOT NULL REFERENCES "SourceChangeset"("id") ON DELETE RESTRICT,
   "gitSha" CHAR(40) NOT NULL,
   "treeSha" CHAR(40) NOT NULL,
+  "rawCommit" BYTEA,
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY ("repositoryId","changesetId"),
   CONSTRAINT "GitInteropCommit_git_unique" UNIQUE ("repositoryId","gitSha")
