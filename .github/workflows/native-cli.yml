@@ -1,0 +1,89 @@
+name: Native CLI
+on:
+  push:
+    branches: [develop, "feature/**"]
+    paths: ["client/devhub-cli/**", "src/source-control/**", "src/app/api/v2/**", "prisma/**", "tests/native-client.e2e.ts", ".github/workflows/native-cli.yml"]
+  pull_request:
+    branches: [develop]
+permissions:
+  contents: read
+jobs:
+  cross-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/devhub-cli
+      - name: Verify native CLI
+        run: cargo test --manifest-path client/devhub-cli/Cargo.toml
+      - name: Release build
+        run: cargo build --release --manifest-path client/devhub-cli/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devhub-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            client/devhub-cli/target/release/devhub
+            client/devhub-cli/target/release/devhub.exe
+          if-no-files-found: error
+  protocol-end-to-end:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: devhub
+          POSTGRES_PASSWORD: devhub
+          POSTGRES_DB: devhub
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U devhub -d devhub"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    env:
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      REDIS_URL: redis://localhost:6379
+      APP_SECRET: ci-only-long-random-testing-secret-123456789
+      ADMIN_TOKEN: ci-only-long-admin-testing-secret-123456789
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/devhub-cli
+      - run: npm ci --no-audit --no-fund
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: cargo test --manifest-path client/devhub-cli/Cargo.toml
+      - run: cargo build --manifest-path client/devhub-cli/Cargo.toml
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Run CLI against live API and PostgreSQL
+        shell: bash
+        run: |
+          npm run start -- -p 3000 > /tmp/devhub-cli-server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 50); do
+            if curl --fail --silent http://127.0.0.1:3000/api/health >/dev/null; then
+              DEVHUB_CLI="$GITHUB_WORKSPACE/client/devhub-cli/target/debug/devhub" \
+                npx tsx tests/native-client.e2e.ts
+              exit $?
+            fi
+            sleep 2
+          done
+          cat /tmp/devhub-cli-server.log
+          exit 1
