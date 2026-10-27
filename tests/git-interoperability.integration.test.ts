@@ -192,7 +192,7 @@ test("native binary/modes/ancestry round-trip over Git smart HTTP with fail-clos
         repositoryId_changesetId: { repositoryId: repository.id, changesetId: newer.id },
       } })).gitSha);
     await git(clone, "reset", "--hard", "refs/remotes/origin/dev");
-    assert.equal(await readFile(join(clone, "from-native.txt"), "utf8"), "native\\n");
+    assert.equal(await readFile(join(clone, "from-native.txt"), "utf8"), "native\n");
 
     // Revoked tokens fail closed even when the caller holds stale Git pack objects.
     const credential = await db.gitInteropCredential.findUniqueOrThrow({ where: {
