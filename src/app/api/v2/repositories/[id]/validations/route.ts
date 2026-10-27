@@ -1,3 +1,4 @@
+import { measured } from "@/observability/telemetry";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/prisma";
@@ -10,6 +11,7 @@ const input=z.object({
   idempotencyKey:z.string().regex(/^[a-zA-Z0-9_-]{8,128}$/)
 }).strict();
 export async function POST(request:NextRequest,{params}:{params:Promise<{id:string}>}) {
+  return measured("validation.submit", async () => {
   try {
     const {id}=await params;
     const {actor}=await requireRepositoryAccess(request,id,"validations:run");
@@ -21,8 +23,10 @@ export async function POST(request:NextRequest,{params}:{params:Promise<{id:stri
       statusUrl:"/api/v2/repositories/"+id+"/validations/"+pipeline.id},
       {status:created?202:200});
   } catch(error){return sourceFailure(error);}
+  }, request.headers.get("traceparent"));
 }
 export async function GET(request:NextRequest,{params}:{params:Promise<{id:string}>}) {
+  return measured("query.read", async () => {
   try {
     const {id}=await params;
     await requireRepositoryAccess(request,id,"changesets:read");
@@ -35,4 +39,5 @@ export async function GET(request:NextRequest,{params}:{params:Promise<{id:strin
         startedAt:true,finishedAt:true,reusedFromId:true}}}});
     return NextResponse.json({apiVersion:2,records});
   } catch(error){return sourceFailure(error);}
+  }, request.headers.get("traceparent"));
 }

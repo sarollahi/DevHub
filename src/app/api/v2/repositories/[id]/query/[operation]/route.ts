@@ -1,3 +1,4 @@
+import { measured } from "@/observability/telemetry";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/prisma";
 import { validPath } from "@/lib/review-logic";
@@ -11,6 +12,7 @@ const necessary = (value: string | null, field: string): string => {
   return value;
 };
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string; operation: string }> }) {
+  return measured("query.read", async () => {
   try {
     const { id, operation } = await params;
     const { actor } = await requireRepositoryAccess(request, id, "changesets:read");
@@ -48,4 +50,5 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({ apiVersion: 2, ...result });
     });
   } catch (error) { return sourceFailure(error); }
+  }, request.headers.get("traceparent"));
 }

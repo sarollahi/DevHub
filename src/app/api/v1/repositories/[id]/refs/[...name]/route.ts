@@ -1,3 +1,4 @@
+import { measured } from "@/observability/telemetry";
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -38,6 +39,7 @@ export async function GET(req: NextRequest, { params }: Context) {
 }
 
 export async function PUT(req: NextRequest, { params }: Context) {
+  return measured("ref.mutate", async () => {
   try {
     const { id, name } = await params;
     const { actor } = await requireRepositoryAccess(req, id, "refs:write", false, { branch: name.join("/") });
@@ -50,9 +52,11 @@ export async function PUT(req: NextRequest, { params }: Context) {
     });
     return NextResponse.json({ apiVersion: 1, ...result }, { status: input.expectedGeneration === null && !result.replayed ? 201 : 200 });
   } catch (error) { return sourceFailure(error); }
+  }, req.headers.get("traceparent"));
 }
 
 export async function DELETE(req: NextRequest, { params }: Context) {
+  return measured("ref.mutate", async () => {
   try {
     const { id, name } = await params;
     const { actor } = await requireRepositoryAccess(req, id, "refs:write", false, { branch: name.join("/") });
@@ -64,4 +68,5 @@ export async function DELETE(req: NextRequest, { params }: Context) {
     });
     return NextResponse.json({ apiVersion: 1, ...result });
   } catch (error) { return sourceFailure(error); }
+  }, req.headers.get("traceparent"));
 }

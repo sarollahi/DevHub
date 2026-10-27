@@ -1,3 +1,4 @@
+import { measured } from "@/observability/telemetry";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/prisma";
@@ -15,6 +16,7 @@ const input = z.object({
 }).strict();
 type Context = { params: Promise<{ id: string }> };
 export async function POST(request: NextRequest, { params }: Context) {
+  return measured("integration.enqueue", async () => {
   try {
     const { id } = await params;
     const parsed = input.parse(await readBoundedJson(request, 4096));
@@ -23,8 +25,10 @@ export async function POST(request: NextRequest, { params }: Context) {
     const record = await enqueueIntegration(id, actor, parsed);
     return NextResponse.json({ apiVersion:2, record }, { status: 202 });
   } catch(error) { return sourceFailure(error); }
+  }, request.headers.get("traceparent"));
 }
 export async function GET(request: NextRequest, { params }: Context) {
+  return measured("query.read", async () => {
   try {
     const { id } = await params;
     await requireRepositoryAccess(request, id, "changesets:read");
@@ -36,4 +40,5 @@ export async function GET(request: NextRequest, { params }: Context) {
     });
     return NextResponse.json({ apiVersion:2, records });
   } catch(error) { return sourceFailure(error); }
+  }, request.headers.get("traceparent"));
 }
