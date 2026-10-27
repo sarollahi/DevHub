@@ -3,6 +3,7 @@ import { Prisma, type SourceRefKind } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { assertRepositoryPermission } from "../lib/authorization";
+import { assertSignedProtectedTip } from "../integration/protected-evidence";
 
 export type RefOperation = "CREATE" | "UPDATE" | "DELETE" | "RESTORE";
 export type RefMutationRequest = {
@@ -278,6 +279,15 @@ export async function updateReferencePolicy(repositoryId: string, actor: SourceA
     }
     if (name.startsWith("tags/") && (policy.allowForce || policy.allowDelete)) {
       throw new SourceControlError(403, "IMMUTABLE_TAG", "Tags are always immutable");
+    }
+    const previous = await tx.sourceReferencePolicy.findUnique({
+      where: { repositoryId_name: { repositoryId, name } },
+    });
+    if (policy.protected && name !== repo.defaultBranch && previous?.protected !== true) {
+      const ref = await tx.sourceReference.findUnique({
+        where: { repositoryId_name: { repositoryId, name } },
+      });
+      if (ref && !ref.deletedAt) await assertSignedProtectedTip(tx, repositoryId, ref.changesetId);
     }
     const saved = await tx.sourceReferencePolicy.upsert({
       where: { repositoryId_name: { repositoryId, name } },

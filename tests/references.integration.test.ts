@@ -91,8 +91,14 @@ test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and 
     const forced = await mutateReference(repo.id, actor, { ...request("branches/preview", "UPDATE", 1, right),
       force: true, reason: "Explicitly reset preview pointer" });
     assert.equal(forced.ref.generation, 2);
-    await updateReferencePolicy(repo.id, actor, "branches/preview",
-      { protected: true, allowForce: false, allowDelete: false, requireApproval: true });
+    const protectedPolicy={ protected: true, allowForce: false, allowDelete: false, requireApproval: true };
+    await assert.rejects(() => updateReferencePolicy(repo.id, actor, "branches/preview", protectedPolicy),
+      fail("REVIEW_REQUIRED"));
+    // Fixture: simulate a previously protected ref to test deletion guards.
+    await db.sourceReferencePolicy.upsert({where:{repositoryId_name:{
+      repositoryId:repo.id,name:"branches/preview"
+    }},create:{repositoryId:repo.id,name:"branches/preview",...protectedPolicy},
+      update:protectedPolicy});
     await assert.rejects(() => mutateReference(repo.id, actor, request("branches/preview", "DELETE", 2)), fail("PROTECTED_REFERENCE"));
     await assert.rejects(() => updateReferencePolicy(repo.id, actor, "main",
       { protected: false, allowForce: true, allowDelete: true, requireApproval: false }), fail("DEFAULT_BRANCH_PROTECTED"));
