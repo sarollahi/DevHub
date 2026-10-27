@@ -143,6 +143,12 @@ export async function mutateReference(repositoryId: string, actor: SourceActor, 
     if (isDefault && kind !== "BRANCH") throw new SourceControlError(422, "INVALID_REFERENCE_KIND", "Default branch must be a branch");
     const policy = await tx.sourceReferencePolicy.findUnique({ where: { repositoryId_name: { repositoryId, name: input.name } } });
     const protectedRef = isDefault || policy?.protected === true;
+    // Existing protected refs can advance only through the integration service.
+    // The legacy direct ref path checks manifest validity, not signed execution
+    // evidence for the merged snapshot, so allowing it would bypass the gate.
+    if (input.operation === "UPDATE" && protectedRef) {
+      throw new SourceControlError(403, "INTEGRATION_REQUIRED", "Protected refs require validated integration");
+    }
     if ((protectedRef || isDefault) && input.force) throw new SourceControlError(403, "PROTECTED_REFERENCE", "Force updates are forbidden on protected references");
     if (input.operation === "DELETE" && (protectedRef || policy?.allowDelete === false)) {
       throw new SourceControlError(403, "PROTECTED_REFERENCE", "Deleting this reference is forbidden");
@@ -260,6 +266,7 @@ export async function updateReferencePolicy(repositoryId: string, actor: SourceA
   validateRefName(name);
   return db.$transaction(async tx => {
     await assertRepositoryPermission(actor, repositoryId, "admin", {}, tx);
+    await tx.$queryRaw`SELECT id FROM "Repository" WHERE id = ${repositoryId}::uuid FOR UPDATE`;
     const repo = await tx.repository.findUnique({ where: { id: repositoryId } });
     if (!repo) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Repository not found");
     if (actor.type !== "HUMAN") throw new SourceControlError(403, "HUMAN_REQUIRED", "Human administrator required");

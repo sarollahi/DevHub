@@ -129,11 +129,19 @@ async function setState(job: Integration, token: string, state: string, patch: {
 // Existing immutable content is safe to validate in parallel with unrelated changes.
 // The completed, authenticated pipeline is rechecked under the final CAS transaction.
 async function ensureStage(job: Integration, actor: SourceActor, stage: Stage): Promise<boolean> {
-  if (await hasVerifiedChecks(job.repositoryId, stage.subject, stage.target)) return true;
-  await submitValidation(job.repositoryId, stage.subject, stage.target, stageKey(job.id, stage), actor);
-  return false;
+  const key = stageKey(job.id, stage);
+  const pipeline = await db.validationPipeline.findUnique({ where: {
+    repositoryId_idempotencyKey: { repositoryId: job.repositoryId, idempotencyKey: key },
+  } });
+  if (!pipeline) {
+    await submitValidation(job.repositoryId, stage.subject, stage.target, key, actor);
+    return false;
+  }
+  return pipeline.state === "PASSED" &&
+    await hasVerifiedChecks(job.repositoryId, stage.subject, stage.target);
 }
-async function lockAndVerifyStage(tx: Prisma.TransactionClient, job: Integration, stage: Stage) {
+async function lockAndVerifyStage(tx: Prisma.TransactionClient, job: Integration, stage: Stage,
+  expected: Awaited<ReturnType<typeof snapshotFor>>) {
   const key = stageKey(job.id, stage);
   const pipeline = await tx.validationPipeline.findUnique({ where: {
     repositoryId_idempotencyKey: { repositoryId: job.repositoryId, idempotencyKey: key },
@@ -149,13 +157,12 @@ async function lockAndVerifyStage(tx: Prisma.TransactionClient, job: Integration
   if (pipeline.configurationDigest !== configurationDigest(current) || pipeline.tasks.length !== KINDS.length) {
     throw new SourceControlError(409, "CHECKS_NOT_READY", "Validation configuration or check count changed");
   }
-  const snapshot = await snapshotFor(job.repositoryId, stage.subject, stage.target);
-  if (pipeline.snapshotDigest !== snapshot.digest || pipeline.dependencyDigest !== snapshot.dependencyDigest ||
+  if (pipeline.snapshotDigest !== expected.digest || pipeline.dependencyDigest !== expected.dependencyDigest ||
       !current.every(recipe => {
         const task = pipeline.tasks.find(t => t.kind === recipe.kind);
         return task?.state === "PASSED" && task.exitCode === 0 && verifyTask(task) &&
           task.fingerprint === fingerprint(job.repositoryId, stage.subject, stage.target,
-            snapshot.digest, snapshot.dependencyDigest, recipe);
+            expected.digest, expected.dependencyDigest, recipe);
       })) {
     throw new SourceControlError(409, "CHECKS_NOT_READY", "Missing, stale or unauthenticated validation evidence");
   }
@@ -188,6 +195,8 @@ async function publish(job: Integration, token: string, actor: SourceActor,
     { name: "target", subject: resultId, target: observed.changesetId },
     { name: "post", subject: resultId, target: null },
   ];
+  const evidence = await Promise.all(stages.map(stage =>
+    snapshotFor(job.repositoryId, stage.subject, stage.target)));
   await db.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM "Repository" WHERE id = ${job.repositoryId}::uuid FOR SHARE`;
     await assertRepositoryPermission(actor, job.repositoryId, "ref:update", { branch: job.targetRef }, tx);
@@ -197,9 +206,19 @@ async function publish(job: Integration, token: string, actor: SourceActor,
     const configured = await tx.sourceReferencePolicy.findUnique({ where: {
       repositoryId_name: { repositoryId: job.repositoryId, name: job.targetRef },
     } });
+    const updatedIntegrationPolicy = await tx.integrationPolicy.findUnique({ where: {
+      repositoryId_targetRef: { repositoryId: job.repositoryId, targetRef: job.targetRef },
+    } });
     const nowProtected = repo.defaultBranch === job.targetRef || configured?.protected === true;
-    if (nowProtected && (!policy.preChecks || !policy.targetChecks || !policy.postChecks)) {
-      throw new SourceControlError(403, "PROTECTED_POLICY", "Protected refs cannot disable validation stages");
+    const requiredNow = {
+      preChecks: nowProtected || (updatedIntegrationPolicy?.preChecks ?? true),
+      targetChecks: nowProtected || (updatedIntegrationPolicy?.targetChecks ?? true),
+      postChecks: nowProtected || (updatedIntegrationPolicy?.postChecks ?? true),
+    };
+    if ((requiredNow.preChecks && !policy.preChecks) ||
+        (requiredNow.targetChecks && !policy.targetChecks) ||
+        (requiredNow.postChecks && !policy.postChecks)) {
+      throw new SourceControlError(409, "POLICY_CHANGED", "Integration policy became stricter during preparation");
     }
     const current = await tx.sourceReference.findUnique({ where: {
       repositoryId_name: { repositoryId: job.repositoryId, name: job.targetRef },
@@ -211,10 +230,10 @@ async function publish(job: Integration, token: string, actor: SourceActor,
     if (!await isAncestor(tx, job.repositoryId, observed.changesetId, resultId)) {
       throw new SourceControlError(409, "NON_FAST_FORWARD", "Integrated revision must descend from observed target");
     }
-    for (const stage of stages) {
+    for (const [index, stage] of stages.entries()) {
       if ((stage.name === "pre" && policy.preChecks) ||
           (stage.name === "target" && policy.targetChecks) ||
-          (stage.name === "post" && policy.postChecks)) await lockAndVerifyStage(tx, job, stage);
+          (stage.name === "post" && policy.postChecks)) await lockAndVerifyStage(tx, job, stage, evidence[index]);
     }
     await guardApprovals(tx, job, resultId, nowProtected);
     const claimed = await tx.changeIntegration.updateMany({ where: {
@@ -442,7 +461,7 @@ export async function deploymentGate(repositoryId: string, id: string, actor: So
       } });
       if (current.changesetId !== job.resultChangesetId || current.deletedAt)
         throw new SourceControlError(409, "DEPLOYMENT_STALE", "Branch changed before deployment authorization");
-      await lockAndVerifyStage(tx, job, stage);
+      await lockAndVerifyStage(tx, job, stage, await snapshotFor(repositoryId, stage.subject, stage.target));
       if (request) await tx.auditEvent.create({ data: {
         repositoryId, actorType: actor.type, actorId: actor.id, action: "deployment.validation.authorized",
         subjectId: job.id, metadata: { revision: job.resultChangesetId, pipelineId: pipeline!.id },
@@ -461,6 +480,7 @@ export async function updateIntegrationPolicy(repositoryId: string, targetRef: s
   }
   return db.$transaction(async tx => {
     await assertRepositoryPermission(actor, repositoryId, "admin", {}, tx);
+    await tx.$queryRaw`SELECT id FROM "Repository" WHERE id = ${repositoryId}::uuid FOR UPDATE`;
     const repo = await tx.repository.findUniqueOrThrow({ where: { id: repositoryId } });
     const refPolicy = await tx.sourceReferencePolicy.findUnique({ where: {
       repositoryId_name: { repositoryId, name: targetRef },

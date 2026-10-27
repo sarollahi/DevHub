@@ -120,6 +120,8 @@ model Repository {
   accessGrants RepositoryGrant[]
   delegations AgentDelegation[]
   rateBuckets ApiRateBucket[]
+  integrations ChangeIntegration[]
+  integrationPolicies IntegrationPolicy[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -384,6 +386,7 @@ model SourceChangeset {
   queryPathTouches SourceQueryPathTouch[]
   importedGitCommits GitImportCommit[]
   nativeReviews SourceReviewRequest[]
+  integrations ChangeIntegration[] @relation("IntegrationSource")
   @@index([repositoryId, createdAt(sort: Desc)])
 }
 
@@ -970,12 +973,15 @@ model ChangeIntegration {
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
   completedAt          DateTime?
+  repository Repository @relation(fields:[repositoryId],references:[id],onDelete:Restrict)
+  sourceChangeset SourceChangeset @relation("IntegrationSource",fields:[sourceChangesetId],references:[id],onDelete:Restrict)
   @@unique([repositoryId, requestKey])
   @@index([state, nextAttemptAt, leaseUntil])
   @@index([repositoryId, targetRef, createdAt(sort: Desc)])
 }
 model IntegrationPolicy {
   repositoryId           String @db.Uuid
+  repository             Repository @relation(fields:[repositoryId],references:[id],onDelete:Cascade)
   targetRef              String
   preChecks              Boolean @default(true)
   targetChecks           Boolean @default(true)

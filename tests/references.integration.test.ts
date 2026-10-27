@@ -55,18 +55,24 @@ test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and 
     assert.equal(await db.sourceRefMutation.count({ where: { repositoryId: repo.id, name: "main" } }), 1);
     await assert.rejects(() => mutateReference(repo.id, actor, { ...input, changesetId: left }), fail("MUTATION_ID_REUSED"));
     // The first true advance wins; the other must not overwrite it.
-    const requests = [
-      mutateReference(repo.id, actor, request("main", "UPDATE", 1, left, "race-left")),
-      mutateReference(repo.id, actor, request("main", "UPDATE", 1, right, "race-right")),
-    ];
-    const results = await Promise.allSettled(requests);
+    // No legacy direct-update API may bypass protected integration validation.
+    await assert.rejects(() => mutateReference(repo.id, actor, request("main", "UPDATE", 1, left)), fail("INTEGRATION_REQUIRED"));
+    const row = await db.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId: repo.id, name: "main" } } });
+    assert.equal(row.generation, 1);
+    assert.equal(row.changesetId, root);
+    const name = "branches/default-race";
+    await mutateReference(repo.id, actor, request(name, "CREATE", null, root));
+    const results = await Promise.allSettled([
+      mutateReference(repo.id, actor, request(name, "UPDATE", 1, left, "race-left")),
+      mutateReference(repo.id, actor, request(name, "UPDATE", 1, right, "race-right")),
+    ]);
     assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
     assert.equal(results.filter(r => r.status === "rejected").length, 1);
     const winner = results[0].status === "fulfilled" ? left : right;
-    const row = await db.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId: repo.id, name: "main" } } });
-    assert.equal(row.generation, 2);
-    assert.equal(row.changesetId, winner);
-    await assert.rejects(() => mutateReference(repo.id, actor, request("main", "UPDATE", 1, child)), fail("REFERENCE_CONFLICT"));
+    const advanced = await db.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId: repo.id, name } } });
+    assert.equal(advanced.generation, 2);
+    assert.equal(advanced.changesetId, winner);
+    await assert.rejects(() => mutateReference(repo.id, actor, request(name, "UPDATE", 1, child)), fail("REFERENCE_CONFLICT"));
     await assert.rejects(() => mutateReference(repo.id, actor, {
       ...request("main", "UPDATE", 2, root), force: true, reason: "Try to rewrite default branch",
     }), fail("PROTECTED_REFERENCE"));
