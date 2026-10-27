@@ -27,15 +27,17 @@ CREATE INDEX "SourceDerivedIndex_repo_idx" ON "SourceDerivedIndex" ("repositoryI
 CREATE TABLE "SourceDerivedJump" (
   "repositoryId" UUID NOT NULL,
   "changesetId" CHAR(64) NOT NULL REFERENCES "SourceChangeset"("id") ON DELETE CASCADE,
+  "version" INTEGER NOT NULL,
   "level" INTEGER NOT NULL CHECK ("level" >= 0 AND "level" < 63),
   "ancestorId" CHAR(64) NOT NULL REFERENCES "SourceChangeset"("id") ON DELETE RESTRICT,
-  PRIMARY KEY ("changesetId","level")
+  PRIMARY KEY ("changesetId","version","level")
 );
 CREATE INDEX "SourceDerivedJump_ancestor_idx" ON "SourceDerivedJump" ("repositoryId","ancestorId");
 
 CREATE TABLE "SourceDerivedPathEvent" (
   "repositoryId" UUID NOT NULL,
   "changesetId" CHAR(64) NOT NULL REFERENCES "SourceChangeset"("id") ON DELETE CASCADE,
+  "version" INTEGER NOT NULL,
   "position" INTEGER NOT NULL,
   "role" VARCHAR(16) NOT NULL CHECK ("role" IN ('destination','source')),
   "path" TEXT NOT NULL,
@@ -43,10 +45,10 @@ CREATE TABLE "SourceDerivedPathEvent" (
   "kind" VARCHAR(16) NOT NULL,
   "previousPath" TEXT,
   "objectId" CHAR(64),
-  PRIMARY KEY ("changesetId","position","role")
+  PRIMARY KEY ("changesetId","version","position","role")
 );
 CREATE INDEX "SourceDerivedPathEvent_path_idx"
-  ON "SourceDerivedPathEvent" ("repositoryId","path","generation" DESC);
+  ON "SourceDerivedPathEvent" ("repositoryId","version","path","generation" DESC);
 CREATE INDEX "SourceDerivedPathEvent_revision_idx" ON "SourceDerivedPathEvent" ("repositoryId","changesetId");
 
 -- Immutable published output. A stale worker cannot replace a completed result
