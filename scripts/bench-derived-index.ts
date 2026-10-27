@@ -52,7 +52,7 @@ async function main() {
   const ancestry = warm ? await measure(() => indexedLinearAncestry(repositoryId, revision, limit), samples) : null;
   const history = warm ? await measure(() => indexedFileHistory(repositoryId, revision, path, true, limit), samples) : null;
   const bases = warm ? await measure(() => indexedLinearMergeBases(repositoryId, revision, revision), samples) : null;
-  const tables = ["SourceDerivedIndex", "SourceDerivedJump", "SourceDerivedPathEvent"];
+  const tables = ["SourceDerivedIndex", "SourceDerivedJump", "SourceDerivedPathEvent", "SourceDerivedBlameFile"];
   const storage: Record<string, { tableBytes: number; indexBytes: number; rows: number }> = {};
   for (const name of tables) {
     const stats = await db.$queryRawUnsafe<Array<{ table_bytes: bigint; index_bytes: bigint; rows: bigint }>>(
