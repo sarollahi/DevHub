@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { getCanonicalSnapshot } from "../source-control/canonical";
-import { objectId } from "../source-control/storage";
+import { verifyAndReadBlob } from "../source-control/git-import-blobs";
 import { assessNativeChangeset, cosineSimilarity, regionOverlap, type Entry, type Region } from "./analysis";
 import { createReviewProvider } from "./provider";
 
@@ -37,14 +37,10 @@ export async function processReview(changesetId: string, lease: Date, attempt: n
     }
     const bytes = new Map<string, Uint8Array>();
     // Fetch only objects touched by the changeset. A bounded batch avoids a repository-wide blob load.
-    const requested = [...ids];
-    for (let i = 0; i < requested.length; i += 4) {
-      const batch = await db.sourceObject.findMany({ where: { id: { in: requested.slice(i, i + 4) } } });
-      for (const blob of batch) {
-        if (blob.kind !== "BLOB" || objectId("BLOB", blob.data) !== blob.id || blob.data.byteLength !== blob.byteSize)
-          throw new Error("Stored source object did not pass content-integrity verification");
-        bytes.set(blob.id, blob.data);
-      }
+    // Capture only a bounded prefix; the storage reader hashes the full streamed object.
+    // An oversized object receives conservative whole-file overlap and high-risk review.
+    for (const id of ids) {
+      bytes.set(id, await verifyAndReadBlob(null, id, 128001));
     }
     if (bytes.size !== ids.size) throw new Error("Review cannot locate all authoritative objects");
     const assessed = assessNativeChangeset({
