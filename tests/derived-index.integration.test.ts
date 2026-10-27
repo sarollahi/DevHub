@@ -34,6 +34,7 @@ test("versioned recursive indexes agree with canonical history and survive lost 
     return result.id;
   }
   t.after(async () => {
+    await db.sourceDerivedBlameFile.deleteMany({ where: { repositoryId: repository.id } });
     await db.sourceDerivedPathEvent.deleteMany({ where: { repositoryId: repository.id } });
     await db.sourceDerivedJump.deleteMany({ where: { repositoryId: repository.id } });
     await db.sourceDerivedIndex.deleteMany({ where: { repositoryId: repository.id } });
@@ -99,6 +100,11 @@ test("versioned recursive indexes agree with canonical history and survive lost 
   assert.equal(merged.ancestorCount, 4);
   const blame = await runAuthorizedQuery(actor, repository.id, () => blameQuery(repository.id, edit, "docs/new.txt"));
   assert.deepEqual(blame.lines.map(x => x.changesetId), [root, edit]);
+  const provenance = await db.sourceDerivedBlameFile.findFirstOrThrow({ where: {
+    repositoryId: repository.id, changesetId: edit, version: DERIVED_VERSION,
+  } });
+  assert.equal(provenance.state, "READY");
+  assert.equal(provenance.lineCount, 2);
 
   const published = await readDerived(repository.id, edit, "ancestry");
   assert.equal(published?.firstParentDepth, 2);
