@@ -317,6 +317,36 @@ export async function listCanonicalChangesets(repositoryId: string, limit = 30, 
       operations: { orderBy: { position: "asc" } } } });
 }
 
+/** Opt-in backward-compatible keyset pagination on the immutable path index. */
+export async function getCanonicalSnapshotPage(
+  repositoryId: string, changesetId: string, actor: SourceActor,
+  size = 200, cursor = "", directory = "",
+) {
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
+  return db.$transaction(async tx => {
+    const change = await tx.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId },
+      select: { treeId: true } });
+    if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
+    const root = await publishedSnapshotRoot(tx, repositoryId, changesetId);
+    if (root) {
+      const tree = new SnapshotTree(tx);
+      return { changesetId, treeId: change.treeId,
+        ...await tree.page(root.rootId, size, cursor, directory) };
+    }
+    const entries = await legacySnapshotRead(tx, repositoryId, changesetId);
+    if (!Number.isSafeInteger(size) || size < 1 || size > 1000 ||
+        (cursor && !validPath(cursor)) || (directory && !validPath(directory))) {
+      throw new SourceControlError(422, "INVALID_PAGE", "Invalid snapshot cursor or limit");
+    }
+    const prefix = directory ? directory + "/" : "";
+    const page = entries.filter(e => e.path.startsWith(prefix) &&
+      Buffer.compare(Buffer.from(e.path), Buffer.from(cursor)) > 0)
+      .sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path))).slice(0, size + 1);
+    return { changesetId, treeId: change.treeId, entries: page.slice(0, size),
+      nextCursor: page.length > size ? page[size - 1].path : null };
+  }, { timeout: 30000 });
+}
+
 export async function getCanonicalSnapshot(repositoryId: string, changesetId: string, actor?: SourceActor) {
   if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
   const change = await getCanonicalChangeset(repositoryId, changesetId, actor);
