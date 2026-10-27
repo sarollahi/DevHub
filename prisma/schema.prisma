@@ -1146,9 +1146,10 @@ model SourceDerivedIndex {
 model SourceDerivedJump {
   repositoryId String @db.Uuid
   changesetId  String @db.Char(64)
+  version      Int
   level        Int
   ancestorId   String @db.Char(64)
-  @@id([changesetId, level])
+  @@id([changesetId, version, level])
   @@index([repositoryId, ancestorId])
 }
 
@@ -1156,6 +1157,7 @@ model SourceDerivedJump {
 model SourceDerivedPathEvent {
   repositoryId  String @db.Uuid
   changesetId   String @db.Char(64)
+  version       Int
   position      Int
   role          String @db.VarChar(16)
   path          String
@@ -1163,7 +1165,7 @@ model SourceDerivedPathEvent {
   kind          String @db.VarChar(16)
   previousPath  String?
   objectId      String? @db.Char(64)
-  @@id([changesetId, position, role])
+  @@id([changesetId, version, position, role])
   @@index([repositoryId, path, generation(sort: Desc)])
   @@index([repositoryId, changesetId])
 }
