@@ -6,7 +6,7 @@ import { db } from "@/lib/prisma";
 import { tokenHash } from "@/lib/auth";
 import { SourceControlError } from "@/source-control/contracts";
 export const runtime = "nodejs";
-const supported = new Set(["source:read", "changeset:write", "ref:update"]);
+const supported = new Set(["source:read", "changeset:write", "ref:update", "admin"]);
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -27,7 +27,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const raw = await readBoundedJson(request, 2048);
     if (!raw || typeof raw !== "object") throw new SourceControlError(422, "INVALID_INPUT", "Credential options required");
     const body = raw as { scopes?: unknown; days?: unknown };
-    if (!Array.isArray(body.scopes) || !body.scopes.length || body.scopes.length > 3 ||
+    if (!Array.isArray(body.scopes) || !body.scopes.length || body.scopes.length > 4 ||
       body.scopes.some(scope => typeof scope !== "string" || !supported.has(scope)) ||
       new Set(body.scopes).size !== body.scopes.length ||
       !Number.isInteger(body.days) || (body.days as number) < 1 || (body.days as number) > 30) {
@@ -37,6 +37,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // Branch- and path-scoped authorizations are evaluated against the actual Git push
     // paths and target branch, rather than incorrectly requiring a global grant here.
     await assertRepositoryPermission(actor, id, "source:read");
+    if (body.scopes.includes("admin")) await assertRepositoryPermission(actor, id, "admin");
     const count = await db.gitInteropCredential.count({ where: { repositoryId: id, userId: actor.id,
       revokedAt: null, expiresAt: { gt: new Date() } } });
     if (count >= 20) throw new SourceControlError(429, "GIT_TOKEN_LIMIT", "Revoke an existing credential first");
