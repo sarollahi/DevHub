@@ -3,6 +3,7 @@ import { Prisma, type SourceRefKind } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { assertRepositoryPermission } from "../lib/authorization";
+import { assertSignedProtectedTip } from "../integration/protected-evidence";
 
 export type RefOperation = "CREATE" | "UPDATE" | "DELETE" | "RESTORE";
 export type RefMutationRequest = {
@@ -127,6 +128,9 @@ export async function mutateReference(repositoryId: string, actor: SourceActor, 
       if (priorRequest.requestHash !== hash) throw new SourceControlError(409, "MUTATION_ID_REUSED", "Mutation ID reused");
       return { ref: snapshot(priorRequest), replayed: true, eventId: priorRequest.id };
     }
+    // SHARE permits concurrent independent final ref CAS transactions while
+    // serializing changes to branch protection and repository bootstrap policy.
+    await tx.$queryRaw`SELECT id FROM "Repository" WHERE id = ${repositoryId}::uuid FOR SHARE`;
     const repo = await tx.repository.findUnique({ where: { id: repositoryId }, select: {
       defaultBranch: true, ownerId: true, requireHumanApproval: true,
     } });
@@ -143,6 +147,12 @@ export async function mutateReference(repositoryId: string, actor: SourceActor, 
     if (isDefault && kind !== "BRANCH") throw new SourceControlError(422, "INVALID_REFERENCE_KIND", "Default branch must be a branch");
     const policy = await tx.sourceReferencePolicy.findUnique({ where: { repositoryId_name: { repositoryId, name: input.name } } });
     const protectedRef = isDefault || policy?.protected === true;
+    // Existing protected refs can advance only through the integration service.
+    // The legacy direct ref path checks manifest validity, not signed execution
+    // evidence for the merged snapshot, so allowing it would bypass the gate.
+    if ((input.operation === "CREATE" || input.operation === "UPDATE" || input.operation === "RESTORE") && protectedRef && !input.force) {
+      throw new SourceControlError(403, "INTEGRATION_REQUIRED", "Protected refs require validated integration");
+    }
     if ((protectedRef || isDefault) && input.force) throw new SourceControlError(403, "PROTECTED_REFERENCE", "Force updates are forbidden on protected references");
     if (input.operation === "DELETE" && (protectedRef || policy?.allowDelete === false)) {
       throw new SourceControlError(403, "PROTECTED_REFERENCE", "Deleting this reference is forbidden");
@@ -260,6 +270,7 @@ export async function updateReferencePolicy(repositoryId: string, actor: SourceA
   validateRefName(name);
   return db.$transaction(async tx => {
     await assertRepositoryPermission(actor, repositoryId, "admin", {}, tx);
+    await tx.$queryRaw`SELECT id FROM "Repository" WHERE id = ${repositoryId}::uuid FOR UPDATE`;
     const repo = await tx.repository.findUnique({ where: { id: repositoryId } });
     if (!repo) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Repository not found");
     if (actor.type !== "HUMAN") throw new SourceControlError(403, "HUMAN_REQUIRED", "Human administrator required");
@@ -268,6 +279,15 @@ export async function updateReferencePolicy(repositoryId: string, actor: SourceA
     }
     if (name.startsWith("tags/") && (policy.allowForce || policy.allowDelete)) {
       throw new SourceControlError(403, "IMMUTABLE_TAG", "Tags are always immutable");
+    }
+    const previous = await tx.sourceReferencePolicy.findUnique({
+      where: { repositoryId_name: { repositoryId, name } },
+    });
+    if (policy.protected && name !== repo.defaultBranch && previous?.protected !== true) {
+      const ref = await tx.sourceReference.findUnique({
+        where: { repositoryId_name: { repositoryId, name } },
+      });
+      if (ref && !ref.deletedAt) await assertSignedProtectedTip(tx, repositoryId, ref.changesetId);
     }
     const saved = await tx.sourceReferencePolicy.upsert({
       where: { repositoryId_name: { repositoryId, name } },

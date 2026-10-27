@@ -11,7 +11,7 @@ import { testSession } from "./support/identities";
 test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and rollback", { timeout: 120000 }, async t => {
   const suffix = randomBytes(6).toString("hex");
   const user = await db.user.create({ data: { handle: "ref-" + suffix, email: "ref-" + suffix + "@example.invalid" } });
-  const repo = await db.repository.create({ data: { ownerId: user.id, slug: "refs", name: "Refs " + suffix, defaultBranch: "main" } });
+  const repo = await db.repository.create({ data: { ownerId: user.id, slug: "refs", name: "Refs " + suffix, defaultBranch: "bootstrap-staging" } });
   const { actor } = await testSession(user.id);
   const changes: { id: string; treeId: string }[] = [];
   const blobs: string[] = [];
@@ -51,26 +51,33 @@ test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and 
     const input = request("main", "CREATE", null, root);
     const created = await mutateReference(repo.id, actor, input);
     assert.equal(created.ref.generation, 1);
+    await db.repository.update({where:{id:repo.id},data:{defaultBranch:"main"}});
     assert.equal((await mutateReference(repo.id, actor, input)).replayed, true);
     assert.equal(await db.sourceRefMutation.count({ where: { repositoryId: repo.id, name: "main" } }), 1);
     await assert.rejects(() => mutateReference(repo.id, actor, { ...input, changesetId: left }), fail("MUTATION_ID_REUSED"));
     // The first true advance wins; the other must not overwrite it.
-    const requests = [
-      mutateReference(repo.id, actor, request("main", "UPDATE", 1, left, "race-left")),
-      mutateReference(repo.id, actor, request("main", "UPDATE", 1, right, "race-right")),
-    ];
-    const results = await Promise.allSettled(requests);
+    // No legacy direct-update API may bypass protected integration validation.
+    await assert.rejects(() => mutateReference(repo.id, actor, request("main", "UPDATE", 1, left)), fail("INTEGRATION_REQUIRED"));
+    const row = await db.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId: repo.id, name: "main" } } });
+    assert.equal(row.generation, 1);
+    assert.equal(row.changesetId, root);
+    const name = "branches/default-race";
+    await mutateReference(repo.id, actor, request(name, "CREATE", null, root));
+    const results = await Promise.allSettled([
+      mutateReference(repo.id, actor, request(name, "UPDATE", 1, left, "race-left")),
+      mutateReference(repo.id, actor, request(name, "UPDATE", 1, right, "race-right")),
+    ]);
     assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
     assert.equal(results.filter(r => r.status === "rejected").length, 1);
     const winner = results[0].status === "fulfilled" ? left : right;
-    const row = await db.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId: repo.id, name: "main" } } });
-    assert.equal(row.generation, 2);
-    assert.equal(row.changesetId, winner);
-    await assert.rejects(() => mutateReference(repo.id, actor, request("main", "UPDATE", 1, child)), fail("REFERENCE_CONFLICT"));
+    const advanced = await db.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId: repo.id, name } } });
+    assert.equal(advanced.generation, 2);
+    assert.equal(advanced.changesetId, winner);
+    await assert.rejects(() => mutateReference(repo.id, actor, request(name, "UPDATE", 1, child)), fail("REFERENCE_CONFLICT"));
     await assert.rejects(() => mutateReference(repo.id, actor, {
-      ...request("main", "UPDATE", 2, root), force: true, reason: "Try to rewrite default branch",
+      ...request("main", "UPDATE", 1, root), force: true, reason: "Try to rewrite default branch",
     }), fail("PROTECTED_REFERENCE"));
-    await assert.rejects(() => mutateReference(repo.id, actor, request("main", "DELETE", 2)), fail("PROTECTED_REFERENCE"));
+    await assert.rejects(() => mutateReference(repo.id, actor, request("main", "DELETE", 1)), fail("PROTECTED_REFERENCE"));
   });
 
   await t.test("tags never move; policy gates force and protected branches", async () => {
@@ -84,8 +91,14 @@ test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and 
     const forced = await mutateReference(repo.id, actor, { ...request("branches/preview", "UPDATE", 1, right),
       force: true, reason: "Explicitly reset preview pointer" });
     assert.equal(forced.ref.generation, 2);
-    await updateReferencePolicy(repo.id, actor, "branches/preview",
-      { protected: true, allowForce: false, allowDelete: false, requireApproval: true });
+    const protectedPolicy={ protected: true, allowForce: false, allowDelete: false, requireApproval: true };
+    await assert.rejects(() => updateReferencePolicy(repo.id, actor, "branches/preview", protectedPolicy),
+      fail("REVIEW_REQUIRED"));
+    // Fixture: simulate a previously protected ref to test deletion guards.
+    await db.sourceReferencePolicy.upsert({where:{repositoryId_name:{
+      repositoryId:repo.id,name:"branches/preview"
+    }},create:{repositoryId:repo.id,name:"branches/preview",...protectedPolicy},
+      update:protectedPolicy});
     await assert.rejects(() => mutateReference(repo.id, actor, request("branches/preview", "DELETE", 2)), fail("PROTECTED_REFERENCE"));
     await assert.rejects(() => updateReferencePolicy(repo.id, actor, "main",
       { protected: false, allowForce: true, allowDelete: true, requireApproval: false }), fail("DEFAULT_BRANCH_PROTECTED"));
