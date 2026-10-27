@@ -1,3 +1,4 @@
+import { measured } from "../observability/telemetry";
 import { db } from "../lib/prisma";
 import { claimTask, executeTask } from "./runner";
 import { refreshPipeline } from "./service";
@@ -22,7 +23,7 @@ async function main() {
           for(const id of new Set(expired.map(t=>t.pipelineId)))await refreshPipeline(id);
         }
         const task=await claimTask();
-        if(task)await executeTask(task);
+        if(task)await measured("worker.validation", () => executeTask(task));
         else await new Promise(resolve=>setTimeout(resolve,1000));
       } catch(error) {
         console.error("Validation scheduler error",error);

@@ -1,3 +1,4 @@
+import { measured } from "../observability/telemetry";
 import { db } from "../lib/prisma";
 import { Queue } from "bullmq";
 import { createQueue, redisConnection, type ProcessMessage } from "../lib/queue";
@@ -81,7 +82,7 @@ async function main() {
   process.on("SIGTERM", () => { stopping = true; });
   try {
     while (!stopping) {
-      try { const count = (await dispatchBatch(queue)) + (await dispatchReferenceBatch(refQueue)); if (!count) await pause(750); }
+      try { const count = (await measured("worker.dispatch", () => dispatchBatch(queue))) + (await measured("worker.dispatch", () => dispatchReferenceBatch(refQueue))); if (!count) await pause(750); }
       catch (error) { console.error("Dispatcher retry:", error); await pause(2000); }
     }
   } finally { await queue.close(); await refQueue.close(); await db.$disconnect(); }

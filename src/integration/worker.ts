@@ -1,3 +1,4 @@
+import { measured } from "../observability/telemetry";
 import { db } from "../lib/prisma";
 import { processNextIntegration } from "./service";
 async function main() {
@@ -8,7 +9,7 @@ async function main() {
   async function loop() {
     while (!stopped) {
       try {
-        if (await processNextIntegration()) continue;
+        if (await measured("worker.integration", () => processNextIntegration())) continue;
       } catch (err) { console.error("Integration scheduler failed", err); }
       await new Promise(resolve => setTimeout(resolve, 750));
     }

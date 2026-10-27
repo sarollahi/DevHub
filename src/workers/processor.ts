@@ -1,3 +1,4 @@
+import { measured } from "../observability/telemetry";
 import { Worker, type Job } from "bullmq";
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
@@ -52,7 +53,7 @@ export async function processPreflight(message: ProcessMessage) {
 
 export function createPreflightWorker(connection = redisConnection(), concurrency = Math.min(64, Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 4)))) {
   return new Worker<ProcessMessage>(QUEUE_NAME, async (job: Job<ProcessMessage>) => {
-    try { await processPreflight(job.data); }
+    try { await measured("worker.preflight", () => processPreflight(job.data)); }
     catch (error) {
       if (job.attemptsMade + 1 >= (job.opts.attempts || 1)) {
         await db.$transaction(async (tx) => {

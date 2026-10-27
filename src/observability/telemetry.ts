@@ -5,7 +5,7 @@ import { performance } from "node:perf_hooks";
 // Metrics and log labels are intentionally bounded. Never label by path, SHA,
 // exception message, actor, credential, or tenant identifier.
 const OPERATIONS = new Set(["blob.stage", "changeset.publish", "ref.mutate", "integration.enqueue",
-  "query.read", "validation.submit", "worker.dispatch", "worker.preflight", "reconcile"]);
+  "query.read", "validation.submit", "worker.dispatch", "worker.preflight", "worker.integration", "worker.validation", "worker.index", "reconcile"]);
 const BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60];
 type MetricRecord = { count: number; sum: number; buckets: number[]; errors: number };
 type Context = { traceId: string; spanId: string };

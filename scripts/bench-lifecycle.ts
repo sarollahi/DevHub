@@ -11,6 +11,7 @@ import { enqueueIntegration } from "../src/integration/service";
 import { submitValidation } from "../src/validation/service";
 import { SourceControlError } from "../src/source-control/contracts";
 import { measured } from "../src/observability/telemetry";
+import { benchmarkWorkspaces } from "../src/observability/workspace-benchmark";
 
 // Only real persisted objects, changesets and source-control APIs contribute to
 // results. No synthetic PR-metadata requests are counted as native throughput.
@@ -165,6 +166,7 @@ try {
   durations.monorepo_publication = [totals.monorepo_publication];
   const snapshot = await getCanonicalSnapshot(repository.id, monorepoTip, actor);
   if (snapshot.entries.length !== monorepoPaths + 1) throw new Error("Monorepo snapshot lost paths");
+  const workspaces = await benchmarkWorkspaces(repository.id, actor, snapshot.entries);
   const firstBlob = await getObject(repository.id, objectIds[0], actor);
   if (firstBlob.id !== objectIds[0]) throw new Error("Object round-trip failed");
 
@@ -224,6 +226,7 @@ try {
       driverConcurrency: concurrency,
     }, input: { submissions, changesetCount, concurrency, deep, monorepoPaths, refWriters,
       integrationJobs, ciJobs, queryCount, sampleBlobs }, phases: phaseReport(),
+    workspaces,
     integrity: { expectedIndependentChangesets: changesetCount, persistedAfterIndependentPhase: persisted,
       monorepoPaths: snapshot.entries.length - 1, deepFirstParentDepth: deep,
       refCasWinners: winners, refCasStaleRejected: stale, refGeneration: after.generation,
@@ -234,7 +237,7 @@ try {
       stagedBlobPayloadBytes: stagedBytes },
     unavailable: ["Measured S3 object-store traffic: this profile uses inline canonical blobs; run storage benchmark separately",
       "Actual CI execution durations require isolated runners",
-      "Cache hit rates require cache-daemon /v1/status sampling",
+      "Multi-region cache hit rates require per-cache /v1/status; workspace fixture reports local node-cache hit/miss counts",
       "Worker process CPU and memory require per-process telemetry"],
     validationStorm: configured ? "admission attempted against configured immutable runner images"
       : "SKIPPED: immutable validation OCI image configuration not supplied",
