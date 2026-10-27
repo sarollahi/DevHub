@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtemp, rm, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { promisify } from "node:util";
 import { db } from "../src/lib/prisma";
 import { stageCanonicalBlob, createCanonicalChangeset } from "../src/source-control/canonical";
@@ -167,6 +168,40 @@ test("native binary/modes/ancestry round-trip over Git smart HTTP with fail-clos
       repositoryId_name: { repositoryId: repository.id, name: "dev" },
     } });
     assert.equal(final.changesetId, newer.id);
+    // A truncated upload must not acquire a native ref update.
+    await new Promise<void>(resolve => {
+      const request = httpRequest(remote + "/git-receive-pack", {
+        method: "POST", headers: { Authorization: "Basic " + Buffer.from("git:" + token).toString("base64"),
+          "Content-Type": "application/x-git-receive-pack-request", "Transfer-Encoding": "chunked" },
+      }, response => { response.resume(); response.on("end", resolve); });
+      request.once("error", () => resolve());
+      request.once("close", resolve);
+      request.flushHeaders();
+      request.write(Buffer.alloc(64 * 1024, 0x61));
+      // A real interrupted request: close mid-pack with no terminating pkt-line.
+      setImmediate(() => request.destroy());
+    });
+    assert.equal((await db.sourceReference.findUniqueOrThrow({ where: {
+      repositoryId_name: { repositoryId: repository.id, name: "dev" },
+    } })).changesetId, newer.id);
+
+    // Git fetch must see a native commit without rewriting its native ancestry.
+    await git(clone, "-c", "http.extraHeader=" + header, "fetch", "origin");
+    assert.equal(await git(clone, "rev-parse", "refs/remotes/origin/dev"),
+      (await db.gitInteropCommit.findUniqueOrThrow({ where: {
+        repositoryId_changesetId: { repositoryId: repository.id, changesetId: newer.id },
+      } })).gitSha);
+    await git(clone, "reset", "--hard", "refs/remotes/origin/dev");
+    assert.equal(await readFile(join(clone, "from-native.txt"), "utf8"), "native\\n");
+
+    // Revoked tokens fail closed even when the caller holds stale Git pack objects.
+    const credential = await db.gitInteropCredential.findUniqueOrThrow({ where: {
+      tokenHash: createHash("sha256").update(token).digest("hex"),
+    } });
+    await db.gitInteropCredential.update({ where: { id: credential.id },
+      data: { revokedAt: new Date() } });
+    await assert.rejects(() => git(clone, "-c", "http.extraHeader=" + header, "fetch", "origin"),
+      /Authentication failed|401|fatal:|could not read Username|requested URL returned error/i);
   } finally {
     if (server) await close(server);
     if (prevRoot === undefined) delete process.env.GIT_INTEROP_ROOT;
