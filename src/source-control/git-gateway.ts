@@ -46,8 +46,9 @@ async function authenticate(req: IncomingMessage, repositoryId: string, writing:
   if (!credential || credential.repositoryId !== repositoryId || credential.revokedAt ||
       credential.expiresAt <= new Date()) throw new SourceControlError(401, "GIT_CREDENTIAL_INVALID", "Git credential expired or revoked");
   const actor: SourceActor = { type: "HUMAN", id: credential.userId, gitCredentialId: credential.id };
-  await assertRepositoryPermission(actor, repositoryId, writing ? "changeset:write" : "source:read",
-    writing ? { allowStaging: true } : {});
+  // Advertisements disclose all refs. Require full source-read authority even for receive-pack.
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
+  if (writing) await assertRepositoryPermission(actor, repositoryId, "changeset:write", { allowStaging: true });
   // The receive hook checks ref:update against the exact target branch.
   await consumeRequestQuota(repositoryId, actor);
   void db.gitInteropCredential.updateMany({ where: { id: credential.id, revokedAt: null },
