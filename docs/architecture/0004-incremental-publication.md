@@ -9,10 +9,10 @@ by a (repository ID, changeset ID) relationship with a database-level guard.
 Parent edges, operations, published objects, validation records, audit rows,
 query-index jobs and publication events remain transactional and authoritative.
 
-The new \`SourceSnapshotNode\` table stores canonical JSON radix nodes. Each ID
+The new `SourceSnapshotNode` table stores canonical JSON radix nodes. Each ID
 is SHA-256 of a domain-separated byte representation. Each node has up to
 16 child edges indexed by hexadecimal UTF-8 path bytes; edges are compressed.
-The \`SourceSnapshotRoot\` table maps one existing changeset to exactly one
+The `SourceSnapshotRoot` table maps one existing changeset to exactly one
 root. Both tables reject UPDATE and DELETE. Root corruption, noncanonical
 serialization, missing children and incorrect child counts fail closed.
 Read clients cannot request arbitrary global nodes; access is mediated by
@@ -52,19 +52,19 @@ the stored nodes instead of replaying H changesets.
 
 ## Migration and rollout
 
-Run \`npm run db:deploy\` before deploying the writer. Existing changesets are
+Run `npm run db:deploy` before deploying the writer. Existing changesets are
 not rewritten and do not receive a guessed root ID.
 
 Deploy the schema first, then the writer. Before moving heavy production
 traffic, materialize frequently used historical heads through the authorized
 API:
 
-\`\`\`
+```
 GET  /api/v2/repositories/:id/changesets/:changesetId/snapshot
 POST /api/v2/repositories/:id/changesets/:changesetId/snapshot
-\`\`\`
+```
 
-GET returns \`materialized: false\` without replay. POST requires publication
+GET returns `materialized: false` without replay. POST requires publication
 permission; it reads the existing immutable history and atomically installs a
 derived root, or verifies an already materialized root. Publication of a new
 revision on an old first parent performs the same one-time operation. Multiple
@@ -91,17 +91,17 @@ Derived roots can coexist with v1/v2 historical revisions indefinitely.
 
 ## Evidence and benchmark protocol
 
-\`npm run bench:publication\` uses actual v2 changesets against a deployed DB
+`npm run bench:publication` uses actual v2 changesets against a deployed DB
 and S3-compatible object store. It refuses missing or mismatched fixtures.
-Provide \`BENCH_ACTOR_ID\`, \`BENCH_CREDENTIAL_ID\`,
-\`BENCH_PUBLICATION_CASES\` (JSON array) and optionally \`BENCH_SAMPLES\`,
-\`BENCH_CONCURRENCY\`, \`BENCH_TOPOLOGY\`, \`BENCH_REPORT_PATH\`.
+Provide `BENCH_ACTOR_ID`, `BENCH_CREDENTIAL_ID`,
+`BENCH_PUBLICATION_CASES` (JSON array) and optionally `BENCH_SAMPLES`,
+`BENCH_CONCURRENCY`, `BENCH_TOPOLOGY`, `BENCH_REPORT_PATH`.
 
 Each fixture case contains:
 
-\`\`\`json
+```json
 {"label":"1000/shallow","repositoryId":"<uuid>","parentId":"<sha256>","expectedFiles":1000,"editPath":"bench/edit.txt","expectedHistory":"shallow"}
-\`\`\`
+```
 
 Prepare six isolated, already-materialized parents: 1,000, 100,000 and
 1,000,000 paths, each with shallow (depth <= 10) and deep (depth >= 1,000)
