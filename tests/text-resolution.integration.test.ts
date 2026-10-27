@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeIndependentText } from "../src/integration/text-resolution.ts";
+import { mergeIndependentText } from "../src/integration/text-resolution";
 
 test("merges nonoverlapping line edits deterministically",()=>{
  const base="alpha\nbeta\ngamma\ndelta\n";
