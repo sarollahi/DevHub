@@ -1,5 +1,7 @@
 name: Performance and resilience
 on:
+  push:
+    branches: ["feature/performance-resilience-observability"]
   workflow_dispatch:
     inputs:
       profile:
@@ -44,8 +46,8 @@ jobs:
       - name: Run native real-object lifecycle
         run: |
           mkdir -p reports
-          if [ "${{ inputs.profile }}" = "scale" ]; then
-            timeout --signal=TERM 9500s npm run bench:lifecycle -- --submissions=1000 --changesets=10000 --concurrency=1000 --depth=900 --monorepo-paths=6000 --ref-writers=128 --integration-jobs=400 --ci-jobs=0 --queries=100 --output=reports/lifecycle.json
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.profile }}" = "scale" ]; then
+            timeout --signal=TERM 9500s npm run bench:lifecycle -- --submissions=1000 --changesets=10000 --concurrency=1000 --depth=900 --monorepo-paths=6000 --ref-writers=128 --integration-jobs=400 --ci-jobs=1000 --queries=100 --output=reports/lifecycle.json
           else
             timeout --signal=TERM 900s npm run bench:lifecycle -- --submissions=10 --changesets=24 --concurrency=10 --depth=8 --monorepo-paths=80 --ref-writers=12 --integration-jobs=8 --ci-jobs=0 --queries=12 --blobs=4 --output=reports/lifecycle.json
           fi

@@ -25,7 +25,11 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - name: Start isolated real dependencies
-        run: docker compose up -d --wait
+        run: docker compose up -d --wait db redis minio
+      - name: Initialize S3 bucket with tested CI command
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c \
+            'until mc alias set local http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing local/devhub-objects'
       - name: Apply schema
         run: npm run db:generate && npm run db:deploy
       - name: Publish real fixture before failures
