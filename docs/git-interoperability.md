@@ -63,9 +63,15 @@ On CAS failure, Git refuses the ref update. Already imported immutable objects/c
 ```sh
 npm run typecheck
 npm run test:integration
-npm run bench:git-interop -- --url https://git.devhub.example/git/REPOSITORY_UUID.git
+npm run bench:git-interop -- \\
+  --url=https://git.devhub.example/git/REPOSITORY_UUID.git \\
+  --native-server=https://devhub.example \\
+  --native-repository=REPOSITORY_UUID \\
+  --native-ref=main \\
+  --native-file=README.md \\
+  --native-cli=devhub
 ```
 
-The integration test exercises actual smart HTTP clone/fetch/push with PostgreSQL and object storage, binary bytes, executable modes, symlinks, a protected branch rejection, stable SHA mapping, and a stale native-vs-Git CAS race. The benchmark reports Git clone network/fetch work separately from Git checkout/materialization time and incremental fetch. Compare those metrics to a separately executed native client `sync` and `hydrate` benchmark with equivalent selected paths and a matching cold/warm cache. Git's initial pack transfer is not equivalent to a sparse native client fetch.
+The integration test exercises actual smart HTTP clone/fetch/push with PostgreSQL and object storage, binary bytes, executable modes, symlinks, a protected branch rejection, stable SHA mapping, revoked credentials, interrupted push transport, and a stale native-vs-Git CAS race. The benchmark reports Git clone network/fetch work, Git checkout/materialization, and incremental fetch as separate timings. With native flags (and `DEVHUB_TOKEN` configured), it also times native `sync` and `hydrate` independently. Run on equivalent revisions and selected paths with cold and warm caches; full Git checkout and sparse native hydration have different workloads. Git's initial pack transfer is not equivalent to a sparse native client fetch.
 
 Production rollout still requires TLS proxy hardening, threat modeling, load tests for concurrent tenants and large repositories, runner isolation for untrusted hooks beyond server-installed pre-receive, multi-node cache architecture, and full Git protocol-version compatibility testing.
