@@ -94,7 +94,7 @@ async function main() {
     const rawCommit = await gitCommand(dir, ["cat-file", "commit", sha]);
     await db.gitInteropCommit.createMany({
       data: [{ repositoryId, changesetId: published.changesetId,
-        gitSha: sha, treeSha: commit.treeSha, rawCommit }], skipDuplicates: true,
+        gitSha: sha, treeSha: commit.treeSha, rawCommit: Uint8Array.from(rawCommit) }], skipDuplicates: true,
     });
     const projection = await db.gitInteropCommit.findUniqueOrThrow({ where: {
       repositoryId_changesetId: { repositoryId, changesetId: published.changesetId },
