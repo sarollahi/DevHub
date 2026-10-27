@@ -404,6 +404,7 @@ model SourceSnapshotBuildStep {
   changesetId  String @db.Char(64)
   build        SourceSnapshotBuild @relation(fields: [targetId], references: [targetId], onDelete: Cascade)
   @@id([targetId, position])
+  @@unique([targetId, changesetId])
   @@index([changesetId])
 }
 
