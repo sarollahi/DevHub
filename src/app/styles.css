@@ -14,3 +14,31 @@
 
 /* Native source-control workspace: consistent with the existing light visual system. */
 .source-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:24px 0}.source-panel{padding:0}.source-panel-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:23px 25px;border-bottom:1px solid var(--border)}.source-panel-heading h2{font-size:15px;margin:0 0 5px}.source-panel-heading p{font-size:11.5px;color:var(--muted);margin:0}.source-count{font-variant-numeric:tabular-nums;background:#eef2f8;color:#4e6285;border-radius:6px;padding:4px 9px;font-size:11px;font-weight:700}.source-list{padding:3px 25px}.source-ref{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);gap:12px;padding:18px 0}.source-ref:last-child{border-bottom:0}.source-ref strong,.source-ref small{display:block}.source-ref strong{font-size:12px;color:var(--title)}.source-ref small{color:var(--muted);font-size:10.5px;margin-top:4px}.source-ref code{color:#596b87;background:#f5f7fa;padding:5px 7px;border-radius:4px}.source-empty{color:var(--muted);padding:25px;font-size:12px}.source-controls{display:flex;flex-direction:column;gap:10px;padding:22px 25px}.source-controls label{font-weight:650;color:#3b4b65;font-size:11.5px}.source-controls select,.source-controls input{width:100%;border:1px solid var(--border-strong);background:#fff;border-radius:7px;padding:10px;color:var(--title);font-size:12px}.source-muted{margin:0;color:var(--muted);font-size:11px}.source-action{border:1px solid var(--primary);background:var(--primary);color:white;border-radius:7px;padding:10px 14px;font-weight:650;font-size:11.5px;align-self:flex-start}.source-action.secondary{background:white;color:var(--primary)}.source-rule{height:1px;background:var(--border);margin:7px 0}.source-result{padding:10px;background:#f3f6fb;border-radius:6px;font-size:11px;color:var(--body);margin:0}.source-history{margin-top:20px}.source-message{display:block;color:var(--title)}.source-subline{display:block;margin-top:4px;font-size:10px;color:var(--muted)}@media(max-width:1000px){.source-grid{grid-template-columns:1fr}}
+
+
+/* Native review — restrained light surface, dense information hierarchy. */
+.native-board{margin-bottom:17px}.review-shortcuts{color:#8995a7;font-size:11px}
+.review-groups{padding:0 24px 12px}.review-group{border:1px solid #e7ebf2;border-radius:10px;margin:15px 0;overflow:hidden}
+.review-group-heading{display:flex;align-items:center;justify-content:space-between;background:#f7f9fc;padding:12px 17px;border-bottom:1px solid #e8ebf1}
+.review-group-heading strong{display:block;font-size:12px;text-transform:capitalize;color:#273750}
+.review-group-heading span,.review-group-index{font-size:10px;color:#8593a7}.review-group-index{font-weight:650}
+.review-row{display:flex;gap:15px;align-items:center;justify-content:space-between;padding:13px 17px;border-bottom:1px solid #edf0f4;background:#fff;min-height:88px}
+.review-row:last-child{border-bottom:0}.review-row:hover,.review-row.keyboard-current{background:#f2f6fd}
+.review-row.keyboard-current{box-shadow:inset 3px 0 0 #4970bd}.review-row-main{min-width:0;flex:1}
+.review-row-main strong{display:block;font-size:12.5px;color:#24334d;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.review-row-main span,.review-row-main small{display:block;color:#8c99aa;font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.review-row-main small{color:#53657f;margin-top:6px;max-width:700px}
+.review-row-tags{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap;max-width:340px}
+.review-pill{border:1px solid #dbe4f4;background:#f0f5ff;color:#48649a;border-radius:5px;padding:3px 7px;font-size:10px;font-weight:650;text-transform:capitalize;white-space:nowrap}
+.review-pill.completed,.review-pill.approved{background:#ecf8f1;color:#26785b;border-color:#d0ebdc}
+.review-pill.failed{background:#fff0f0;color:#a9343e;border-color:#f5d4d6}
+.review-pill.duplicate{background:#f4efff;color:#6a528f;border-color:#e4daf7}
+.review-pill.related{background:#fff8e9;color:#946b26;border-color:#f3e8cb}
+.review-pagination{display:flex;gap:10px;align-items:center;justify-content:flex-end;margin:16px 0;color:#8997a8;font-size:11px}
+.review-long-id{overflow-wrap:anywhere}.review-finding{padding:12px 15px;border-left:3px solid #c4d2ea;background:#f8fafd;margin:9px 0;border-radius:5px}
+.review-finding strong{font-size:11px;color:#2a3c59}.review-finding p{margin:5px 0;color:#485a74}.review-finding small{color:#8c97a7}
+.review-summary{white-space:pre-line;line-height:1.7;color:#46566e}.review-related{display:flex;gap:15px;justify-content:space-between;font-size:12px;border-bottom:1px solid #edf0f4;padding:6px 0}
+.review-related a{color:#395da3;font-weight:650}.review-related span{color:#8390a2}.review-actions{display:flex;flex-direction:column;align-items:stretch;gap:9px;margin-top:18px}
+.review-actions .primary-button,.review-actions .tertiary-button{padding:11px 15px}.review-action-status{margin:3px 0;color:#445b81;font-size:12px}
+.review-parent{display:block;overflow-wrap:anywhere;margin:9px 0;color:#64748b}
+@media(max-width:950px){.review-row{align-items:flex-start;flex-direction:column}.review-row-tags{justify-content:flex-start;max-width:none}}

@@ -345,6 +345,7 @@ model SourceObject {
 
 // Content-addressed changesets are never modified when references advance.
 model SourceChangeset {
+  review       SourceReview?
   id           String                  @id @db.Char(64)
   repositoryId String                  @db.Uuid
   treeId       String?                 @db.Char(64)
@@ -738,3 +739,37 @@ model GitImportBlob {
   @@id([repositoryId, gitSha])
 }
 
+
+model SourceReview {
+  changesetId      String       @id @db.Char(64)
+  repositoryId     String       @db.Uuid
+  state            ReviewState  @default(QUEUED)
+  fingerprint      String?      @db.Char(64)
+  paths            String[]     @default([])
+  regions          Json?
+  findings         Json?
+  related          Json?
+  summary          String?      @db.Text
+  groupKey         String?      @db.VarChar(64)
+  exactDuplicateOf String?      @db.Char(64)
+  riskTier         RiskTier?
+  riskScore        Int?
+  provider         String?
+  model            String?
+  confidence       Float?
+  costMicros       BigInt       @default(0)
+  latencyMs        Int?
+  embedding        Json?
+  attempts         Int          @default(0)
+  leaseUntil       DateTime?
+  nextAttemptAt    DateTime     @default(now())
+  error            String?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime     @default(now())
+  changeset        SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Cascade)
+  @@index([state, nextAttemptAt, leaseUntil])
+  @@index([repositoryId, state, createdAt(sort: Desc)])
+  @@index([repositoryId, fingerprint])
+  @@index([repositoryId, groupKey])
+}

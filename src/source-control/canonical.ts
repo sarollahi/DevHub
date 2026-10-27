@@ -275,6 +275,7 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
             position: p.position, fileMode: p.fileMode,
           })) },
           validation: { create: { state: "SUCCESS", ...meta } },
+          review: { create: { repositoryId } },
         } });
         await tx.sourceQueryIndexJob.create({ data: { repositoryId, changesetId } });
         await tx.sourceChangesetEvent.create({ data: {
