@@ -80,7 +80,7 @@ test("native binary/modes/ancestry round-trip over Git smart HTTP with fail-clos
     const token = "dvg_" + randomBytes(32).toString("base64url");
     await db.gitInteropCredential.create({ data: { repositoryId: repository.id, userId: user.id,
       tokenHash: createHash("sha256").update(token).digest("hex"),
-      scopes: ["source:read", "changeset:write", "ref:update"],
+      scopes: ["source:read", "changeset:write", "ref:update", "admin"],
       expiresAt: new Date(Date.now() + 3600000) } });
     server = createGitGateway();
     const port = await listen(server);
@@ -142,6 +142,72 @@ test("native binary/modes/ancestry round-trip over Git smart HTTP with fail-clos
       repositoryId_name: { repositoryId: repository.id, name: "tags/v1.0.0" },
     } })).changesetId, merged.changesetId);
 
+    // One --atomic push publishes both a branch and a tag as one native transaction.
+    await git(clone, "checkout", "-b", "batch-branch");
+    await git(clone, "commit", "--allow-empty", "-m", "Atomic multi-ref Git push");
+    const batchSha = await git(clone, "rev-parse", "HEAD");
+    await git(clone, "tag", "v2.0.0");
+    await git(clone, "-c", "http.extraHeader=" + header, "push", "--atomic", "origin",
+      "HEAD:refs/heads/batch-branch", "refs/tags/v2.0.0");
+    const [batchBranch, batchTag] = await Promise.all(["batch-branch", "tags/v2.0.0"].map(name =>
+      db.sourceReference.findUniqueOrThrow({ where: {
+        repositoryId_name: { repositoryId: repository.id, name },
+      } })));
+    assert.equal(batchBranch.changesetId, batchTag.changesetId);
+    assert.equal((await db.gitInteropCommit.findUniqueOrThrow({ where: {
+      repositoryId_gitSha: { repositoryId: repository.id, gitSha: batchSha },
+    } })).changesetId, batchBranch.changesetId);
+
+    // The entire native batch fails if a tag is being rewritten.
+    await git(clone, "tag", "-f", "v2.0.0", "HEAD~1");
+    await assert.rejects(() => git(clone, "-c", "http.extraHeader=" + header, "push",
+      "--atomic", "--force", "origin", "HEAD:refs/heads/unpublished", "refs/tags/v2.0.0"),
+      /rejected|failed|hook declined/i);
+    assert.equal(await db.sourceReference.findUnique({ where: {
+      repositoryId_name: { repositoryId: repository.id, name: "unpublished" },
+    } }), null);
+
+    // Deletion is persisted as a native tombstone, not an independent Git state.
+    await git(clone, "-c", "http.extraHeader=" + header, "push", "origin", ":refs/heads/batch-branch");
+    assert.ok((await db.sourceReference.findUniqueOrThrow({ where: {
+      repositoryId_name: { repositoryId: repository.id, name: "batch-branch" },
+    } })).deletedAt);
+
+    // Non-fast-forward updates require a scoped admin token, explicit old-SHA
+    // lease, an audited reason, and opt-in native reference policy.
+    await git(clone, "checkout", "dev");
+    await git(clone, "checkout", "-b", "rewritable");
+    await git(clone, "commit", "--allow-empty", "-m", "Before rewrite");
+    await git(clone, "-c", "http.extraHeader=" + header, "push", "origin", "HEAD:rewritable");
+    const leaseSha = await git(clone, "rev-parse", "HEAD");
+    await db.sourceReferencePolicy.create({ data: {
+      repositoryId: repository.id, name: "rewritable", protected: false, allowForce: true,
+    } });
+    await git(clone, "reset", "--hard", "HEAD~1");
+    await git(clone, "commit", "--allow-empty", "-m", "Rewritten history");
+    const rewrittenSha = await git(clone, "rev-parse", "HEAD");
+    await assert.rejects(() => git(clone, "-c", "http.extraHeader=" + header,
+      "push", "--force-with-lease=refs/heads/rewritable:" + leaseSha,
+      "origin", "HEAD:rewritable"), /rejected|failed|hook declined/i);
+    await git(clone, "-c", "http.extraHeader=" + header, "push",
+      "--force-with-lease=refs/heads/rewritable:" + leaseSha,
+      "-o", "devhub-force-reason=Reviewed replacement for invalid history",
+      "-o", "devhub-lease=refs/heads/rewritable:" + leaseSha,
+      "origin", "HEAD:rewritable");
+    const rewritten = await db.sourceReference.findUniqueOrThrow({ where: {
+      repositoryId_name: { repositoryId: repository.id, name: "rewritable" },
+    } });
+    assert.equal(rewritten.changesetId, (await db.gitInteropCommit.findUniqueOrThrow({
+      where: { repositoryId_gitSha: { repositoryId: repository.id, gitSha: rewrittenSha } },
+    })).changesetId);
+    const forceAudit = await db.sourceRefMutation.findFirstOrThrow({ where: {
+      repositoryId: repository.id, name: "rewritable", operation: "UPDATE" },
+      orderBy: { createdAt: "desc" },
+    });
+    assert.equal(forceAudit.forced, true);
+    assert.match(forceAudit.reason ?? "", /Reviewed replacement/);
+
+    await git(clone, "checkout", "dev");
     await writeFile(join(clone, "protected.txt"), "cannot create protected main with direct push");
     await git(clone, "add", "protected.txt");
     await git(clone, "commit", "-m", "Protected branch attempt");
