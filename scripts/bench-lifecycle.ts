@@ -133,16 +133,18 @@ try {
 
   let tip = root.id;
   const deepStart = performance.now();
+  durations.deep_ancestry_publication = [];
   for (let i = 0; i < deep; i++) {
+    const itemStart = performance.now();
     const result = await measured("changeset.publish", () => createCanonicalChangeset(repository.id, actor, {
       apiVersion: 2, parents: [tip], description: "deep-" + i,
       operations: [{ kind: "ADD", path: "history/" + i + ".txt", objectId: objectIds[i % objectIds.length] }],
     }));
+    durations.deep_ancestry_publication.push(performance.now() - itemStart);
     tip = result.id;
   }
   totals.deep_ancestry_publication = performance.now() - deepStart;
   succeeded.deep_ancestry_publication = deep;
-  durations.deep_ancestry_publication = [totals.deep_ancestry_publication];
   await runAuthorizedQuery(actor, repository.id, async () => {
     const ancestorResult = await ancestryQuery(repository.id, tip, undefined, 20);
     if (ancestorResult.ancestorCount !== deep) throw new Error("Deep ancestry lost parents");
@@ -150,7 +152,9 @@ try {
 
   let monorepoTip = root.id;
   const monoStart = performance.now();
+  durations.monorepo_publication = [];
   for (let offset = 0; offset < monorepoPaths; offset += 100) {
+    const itemStart = performance.now();
     const operations = Array.from({ length: Math.min(100, monorepoPaths - offset) }, (_, index) => {
       const n = offset + index;
       return { kind: "ADD" as const, path: "packages/pkg" + String(n % 80).padStart(3, "0") +
@@ -160,10 +164,10 @@ try {
       apiVersion: 2, parents: [monorepoTip], description: "monorepo-paths-" + offset, operations,
     }));
     monorepoTip = result.id;
+    durations.monorepo_publication.push(performance.now() - itemStart);
   }
   totals.monorepo_publication = performance.now() - monoStart;
   succeeded.monorepo_publication = Math.ceil(monorepoPaths / 100);
-  durations.monorepo_publication = [totals.monorepo_publication];
   const snapshot = await getCanonicalSnapshot(repository.id, monorepoTip, actor);
   if (snapshot.entries.length !== monorepoPaths + 1) throw new Error("Monorepo snapshot lost paths");
   const workspaces = await benchmarkWorkspaces(repository.id, actor, snapshot.entries);

@@ -1,0 +1,45 @@
+name: Isolated dependency fault drills
+on:
+  push:
+    branches: ["feature/performance-resilience-observability"]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      REDIS_URL: redis://localhost:6379
+      APP_SECRET: ci-only-long-random-testing-secret-123456789
+      DEVHUB_FAULT_DRILL: isolated-local-only
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Start isolated real dependencies
+        run: docker compose up -d --wait
+      - name: Apply schema
+        run: npm run db:generate && npm run db:deploy
+      - name: Publish real fixture before failures
+        run: npm run bench:lifecycle -- --submissions=4 --changesets=8 --concurrency=4 --depth=3 --monorepo-paths=8 --ref-writers=4 --integration-jobs=2 --ci-jobs=0 --queries=4 --blobs=3
+      - name: Redis outage, restart, reconciliation
+        run: npm run ops:fault-drill -- --service=redis --seconds=2
+      - name: Object-store outage, restart, reconciliation
+        run: npm run ops:fault-drill -- --service=minio --seconds=2
+      - name: PostgreSQL outage, restart, reconciliation
+        run: npm run ops:fault-drill -- --service=db --seconds=2
+      - name: Regional TCP partition and cache restart
+        run: node --test tests/resilience-partition.test.mjs
+      - name: Final invariant checks
+        run: npm run ops:reconcile -- --sample=100
+      - name: Show dependency states
+        if: always()
+        run: docker compose ps
