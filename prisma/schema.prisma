@@ -102,6 +102,7 @@ model Repository {
   sourceObjectGrants    SourceObjectGrant[]
   sourceEvents          SourceChangesetEvent[]
   sourcePublicationKeys SourcePublicationKey[]
+  validationPipelines ValidationPipeline[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -145,6 +146,7 @@ model PullRequest {
   targetBranch   String
   targetSha      String            @db.VarChar(40)
   patch          String            @db.Text
+  nativeChangesetId String?        @db.Char(64)
   changedFiles   String[]
   state          PullRequestState  @default(QUEUED)
   riskTier       RiskTier?
@@ -355,6 +357,8 @@ model SourceChangeset {
   references   SourceReference[]
   publicationKeys SourcePublicationKey[]
   publicationEvent SourceChangesetEvent?
+  validationPipelines ValidationPipeline[] @relation("ValidationSubject")
+  validationTargets ValidationPipeline[] @relation("ValidationTarget")
   queryIndexJob SourceQueryIndexJob?
   queryPathTouches SourceQueryPathTouch[]
   @@index([repositoryId, createdAt(sort: Desc)])
@@ -578,4 +582,95 @@ model BlobTransfer {
   updatedAt    DateTime           @updatedAt
   repository   Repository         @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
   @@index([state, updatedAt])
+}
+
+// Execution findings are separate from structural SourceValidation metadata.
+enum ValidationExecutionState {
+  QUEUED
+  RUNNING
+  PASSED
+  FAILED
+  ERRORED
+  TIMED_OUT
+  CANCELLED
+}
+enum ValidationKind {
+  COMPILE
+  TEST
+  LINT
+  SECURITY
+  SECRETS
+  DEPENDENCIES
+}
+model ValidationPipeline {
+  id                String        @id @default(uuid()) @db.Uuid
+  repositoryId      String        @db.Uuid
+  changesetId       String        @db.Char(64)
+  targetChangesetId String?       @db.Char(64)
+  idempotencyKey    String
+  requestedBy       String
+  snapshotDigest    String        @db.Char(64)
+  dependencyDigest  String        @db.Char(64)
+  configurationDigest String      @db.Char(64)
+  state             ValidationExecutionState @default(QUEUED)
+  createdAt         DateTime      @default(now())
+  finishedAt        DateTime?
+  repository        Repository    @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  changeset         SourceChangeset @relation("ValidationSubject", fields: [changesetId], references: [id], onDelete: Restrict)
+  targetChangeset   SourceChangeset? @relation("ValidationTarget", fields: [targetChangesetId], references: [id], onDelete: Restrict)
+  tasks             ValidationTask[]
+  @@unique([repositoryId, idempotencyKey])
+  @@index([repositoryId, changesetId, createdAt(sort: Desc)])
+}
+model ValidationTask {
+  id            String           @id @default(uuid()) @db.Uuid
+  pipelineId    String           @db.Uuid
+  kind          ValidationKind
+  state         ValidationExecutionState @default(QUEUED)
+  fingerprint   String           @db.Char(64)
+  image         String
+  command       String           @db.Text
+  timeoutSeconds Int
+  attempt       Int              @default(0)
+  maxAttempts   Int              @default(3)
+  nextAttemptAt DateTime         @default(now())
+  leaseToken    String?          @db.Uuid
+  leaseUntil    DateTime?
+  runnerId      String?
+  exitCode      Int?
+  summary       String?
+  logDigest     String?          @db.Char(64)
+  artifactDigest String?         @db.Char(64)
+  signature     String?          @db.Text
+  reusedFromId  String?          @db.Uuid
+  createdAt     DateTime         @default(now())
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  pipeline      ValidationPipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  logs          ValidationLogChunk[]
+  artifacts     ValidationArtifact[]
+  @@unique([pipelineId, kind])
+  @@index([state, nextAttemptAt, leaseUntil])
+  @@index([fingerprint, state])
+}
+model ValidationLogChunk {
+  taskId     String         @db.Uuid
+  attempt    Int
+  sequence   Int
+  content    String         @db.Text
+  createdAt  DateTime       @default(now())
+  task       ValidationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  @@id([taskId, attempt, sequence])
+}
+model ValidationArtifact {
+  id         String         @id @default(uuid()) @db.Uuid
+  taskId     String         @db.Uuid
+  attempt    Int
+  name       String
+  mediaType  String
+  digest     String         @db.Char(64)
+  content    Bytes          @db.ByteA
+  createdAt  DateTime       @default(now())
+  task       ValidationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  @@unique([taskId, attempt, name])
 }

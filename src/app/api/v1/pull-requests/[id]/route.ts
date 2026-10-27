@@ -7,5 +7,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const { id } = await params;
   const item = await db.pullRequest.findUnique({ where: { id }, include: { checks: true, fingerprints: true } });
   if (!item) return NextResponse.json({ error: "NOT_FOUND" }, { status: 404 });
-  return NextResponse.json(item);
+  const validation = item.nativeChangesetId ? await db.validationPipeline.findFirst({
+    where: { repositoryId:item.repositoryId, changesetId:item.nativeChangesetId,
+      targetChangesetId:null }, orderBy:{createdAt:"desc"},
+    include:{tasks:{select:{id:true,kind:true,state:true,summary:true,
+      fingerprint:true,finishedAt:true,signature:true}}}
+  }) : null;
+  return NextResponse.json({ ...item, executableValidation:validation });
 }

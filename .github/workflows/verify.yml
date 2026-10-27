@@ -100,6 +100,12 @@ jobs:
         run: timeout --signal=TERM 600s npm run storage:stress
       - name: Source-control DAG benchmark smoke test
         run: npm run bench:source-query -- --depth=900 --width=16 --layers=12
+      - name: Real disposable runner integration
+        run: |
+          docker pull busybox:1.37
+          export VALIDATION_FIXTURE_IMAGE="$(docker image inspect busybox:1.37 --format='{{index .RepoDigests 0}}')"
+          export RUN_VALIDATION_CONTAINER_TEST=1
+          npx tsx --test tests/validation.integration.test.ts
       - name: Production build
         run: npm run build
       - name: Start server against real database

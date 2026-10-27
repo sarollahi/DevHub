@@ -18,6 +18,12 @@ export async function ingestPullRequest(agent: AgentIdentity, body: unknown, key
       const repo = await tx.repository.findFirst({ where: { slug, owner: { handle } } });
       if (!repo) throw new IngestError(404, "REPOSITORY_NOT_FOUND", "Repository not found");
       if (repo.ownerId !== agent.ownerId) throw new IngestError(403, "REPOSITORY_FORBIDDEN", "Agent does not own this repository");
+      if (input.nativeChangesetId) {
+        const native = await tx.sourceChangeset.findFirst({ where: {
+          id: input.nativeChangesetId, repositoryId: repo.id,
+        }, select: { id: true } });
+        if (!native) throw new IngestError(422, "UNKNOWN_NATIVE_CHANGESET", "Native changeset does not belong to the repository");
+      }
       // Serialize admission per repository to enforce quotas during simultaneous bursts.
       await tx.$queryRaw`SELECT id FROM "Repository" WHERE id = ${repo.id}::uuid FOR UPDATE`;
       const existing = await tx.pullRequest.findUnique({ where: { agentId_idempotencyKey: { agentId: agent.id, idempotencyKey: key } } });
@@ -40,7 +46,7 @@ export async function ingestPullRequest(agent: AgentIdentity, body: unknown, key
       const item = await tx.pullRequest.create({ data: { repositoryId: repo.id, agentId: agent.id, idempotencyKey: key,
         requestHash, title: input.title, description: input.description, sourceBranch: input.sourceBranch,
         sourceSha: input.sourceSha, targetBranch: input.targetBranch, targetSha: input.targetSha,
-        changedFiles: input.changedFiles, patch: input.patch,
+        changedFiles: input.changedFiles, patch: input.patch, nativeChangesetId: input.nativeChangesetId,
       } });
       const job = await tx.queueJob.create({ data: { pullId: item.id, kind: "PR_PREFLIGHT", idempotencyKey: `PR_PREFLIGHT:${item.id}:1` } });
       await tx.outboxEvent.create({ data: { aggregateType: "PullRequest", aggregateId: item.id, kind: "PR_PREFLIGHT_REQUESTED",

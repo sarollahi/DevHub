@@ -101,7 +101,7 @@ test("real PostgreSQL and Redis: admission, outbox, durable retries and human ap
     assert.equal(await db.checkRun.count({ where: { pullId: first.item.id, state: "SUCCESS" } }), 1);
   });
 
-  await t.test("only a human administrator can approve the current checked version", async () => {
+  await t.test("metadata-only PR cannot be approved without signed executable checks", async () => {
     const endpoint = `http://localhost:3000/api/v1/pull-requests/${first.item.id}/approve`;
     const params = { params: Promise.resolve({ id: first.item.id }) };
     const denied = await approve(new NextRequest(endpoint, { method: "POST", headers: { authorization: `Bearer ${secret}` } }), params);
@@ -110,9 +110,9 @@ test("real PostgreSQL and Redis: admission, outbox, durable retries and human ap
     const accepted = await approve(new NextRequest(endpoint, { method: "POST", headers: {
       authorization: `Bearer ${process.env.ADMIN_TOKEN}`,
     } }), params);
-    assert.equal(accepted.status, 200);
-    assert.equal(await db.approval.count({ where: { pullId: first.item.id, userId: user.id, decision: "APPROVED", version: 1 } }), 1);
-    assert.equal((await db.pullRequest.findUniqueOrThrow({ where: { id: first.item.id } })).state, "APPROVED");
+    assert.equal(accepted.status, 409);
+    assert.equal(await db.approval.count({ where: { pullId: first.item.id } }), 0);
+    assert.equal((await db.pullRequest.findUniqueOrThrow({ where: { id: first.item.id } })).state, "REVIEW_REQUIRED");
     assert.equal((await approve(new NextRequest(endpoint, { method: "POST", headers: {
       authorization: `Bearer ${process.env.ADMIN_TOKEN}`,
     } }), params)).status, 409);
