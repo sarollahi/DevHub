@@ -23,9 +23,9 @@ async function readChunk(request: Request) {
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string; objectId: string }> }) {
   try {
     const { id, objectId } = await params;
-    await requireRepositoryAccess(req, id, "changesets:write");
+    const { actor } = await requireRepositoryAccess(req, id, "changesets:write");
     const raw = req.headers.get("upload-offset");
     if (!raw || !/^\d+$/.test(raw)) throw new SourceControlError(422, "INVALID_OFFSET", "Provide numeric Upload-Offset");
-    return NextResponse.json({ apiVersion: 2, ...(await appendUpload(id, objectId, Number(raw), await readChunk(req))) });
+    return NextResponse.json({ apiVersion: 2, ...(await appendUpload(id, objectId, Number(raw), await readChunk(req), actor)) });
   } catch (error) { return sourceFailure(error); }
 }

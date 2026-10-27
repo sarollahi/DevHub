@@ -55,7 +55,13 @@ test("real repository with merges, symlinks, executable mode and >4 MiB blobs su
     const suffix = randomBytes(6).toString("hex");
     const user = await db.user.create({ data: { handle: "gitimport-" + suffix, email: "import-" + suffix + "@example.test" } });
     const repo = await db.repository.create({ data: { ownerId: user.id, slug: "gitimport-" + suffix, name: "Git import test" } });
-    const job = await createGitImport(repo.id, directory);
+    const session = await db.humanSession.create({ data: {
+      userId: user.id, tokenHash: randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 3600000),
+    } });
+    const job = await createGitImport(repo.id, directory, {
+      type: "HUMAN", id: user.id, sessionId: session.id,
+    });
     const first = await runGitImport(job.id);
     assert.ok(first.commits >= 7);
     assert.ok(first.treesVerified >= 2);

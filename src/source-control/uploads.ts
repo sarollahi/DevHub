@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { db } from "../lib/prisma";
 import { stageCanonicalBlob } from "./canonical";
-import { SourceControlError } from "./contracts";
+import { SourceControlError, type SourceActor } from "./contracts";
 import { objectId } from "./storage";
 const valid = /^[a-f0-9]{64}$/;
 const limit = 4 * 1024 * 1024;
-export async function startUpload(repo: string, id: string, size: number) {
+export async function startUpload(repo: string, id: string, size: number, actor: SourceActor) {
   if (!valid.test(id) || !Number.isSafeInteger(size) || size < 0 || size > limit)
     throw new SourceControlError(422, "INVALID_UPLOAD", "Invalid object identity or size (max 4 MiB)");
   const grant = await db.sourceObjectGrant.findUnique({ where: { repositoryId_objectId: { repositoryId: repo, objectId: id } } });
@@ -20,20 +20,20 @@ export async function startUpload(repo: string, id: string, size: number) {
     });
   }
   if (session.received === size) {
-    await finalize(repo, id, session.data);
+    await finalize(repo, id, session.data, actor);
     return { id, received: size, complete: true, chunkSize: 262144 };
   }
   return { id, received: session.received, complete: false, chunkSize: 262144 };
 }
-async function finalize(repo: string, id: string, bytes: Uint8Array) {
+async function finalize(repo: string, id: string, bytes: Uint8Array, actor: SourceActor) {
   if (objectId("BLOB", bytes) !== id) {
     await db.sourceObjectUpload.deleteMany({ where: { repositoryId: repo, objectId: id } });
     throw new SourceControlError(409, "CHECKSUM_MISMATCH", "Upload checksum mismatch; restart the upload");
   }
-  await stageCanonicalBlob(repo, Buffer.from(bytes).toString("base64"));
+  await stageCanonicalBlob(repo, actor, Buffer.from(bytes).toString("base64"));
   await db.sourceObjectUpload.deleteMany({ where: { repositoryId: repo, objectId: id } });
 }
-export async function appendUpload(repo: string, id: string, offset: number, bytes: Buffer) {
+export async function appendUpload(repo: string, id: string, offset: number, bytes: Buffer, actor: SourceActor) {
   if (!valid.test(id) || !Number.isSafeInteger(offset) || offset < 0 || bytes.length === 0 || bytes.length > 262144)
     throw new SourceControlError(422, "INVALID_CHUNK", "Invalid upload chunk or offset");
   const session = await db.$transaction(async tx => {
@@ -48,7 +48,7 @@ export async function appendUpload(repo: string, id: string, offset: number, byt
     return { received: offset + bytes.length, byteSize: current.byteSize, data: combined };
   });
   if (session.received === session.byteSize) {
-    await finalize(repo, id, session.data);
+    await finalize(repo, id, session.data, actor);
     return { id, received: session.received, complete: true };
   }
   return { id, received: session.received, complete: false };

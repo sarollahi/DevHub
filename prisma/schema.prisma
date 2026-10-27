@@ -711,6 +711,8 @@ model GitImportJob {
   id           String          @id @default(uuid()) @db.Uuid
   repositoryId String          @db.Uuid
   sourcePath   String
+  authorizedUserId String? @db.Uuid
+  authorizedSessionId String? @db.Uuid
   status       GitImportStatus @default(QUEUED)
   workerId     String?         @db.Uuid
   leaseUntil   DateTime?
