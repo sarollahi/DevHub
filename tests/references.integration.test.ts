@@ -11,7 +11,7 @@ import { testSession } from "./support/identities";
 test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and rollback", { timeout: 120000 }, async t => {
   const suffix = randomBytes(6).toString("hex");
   const user = await db.user.create({ data: { handle: "ref-" + suffix, email: "ref-" + suffix + "@example.invalid" } });
-  const repo = await db.repository.create({ data: { ownerId: user.id, slug: "refs", name: "Refs " + suffix, defaultBranch: "main" } });
+  const repo = await db.repository.create({ data: { ownerId: user.id, slug: "refs", name: "Refs " + suffix, defaultBranch: "bootstrap-staging" } });
   const { actor } = await testSession(user.id);
   const changes: { id: string; treeId: string }[] = [];
   const blobs: string[] = [];
@@ -51,6 +51,7 @@ test("authoritative refs: CAS, immutable tags, policy, tombstones, history, and 
     const input = request("main", "CREATE", null, root);
     const created = await mutateReference(repo.id, actor, input);
     assert.equal(created.ref.generation, 1);
+    await db.repository.update({where:{id:repo.id},data:{defaultBranch:"main"}});
     assert.equal((await mutateReference(repo.id, actor, input)).replayed, true);
     assert.equal(await db.sourceRefMutation.count({ where: { repositoryId: repo.id, name: "main" } }), 1);
     await assert.rejects(() => mutateReference(repo.id, actor, { ...input, changesetId: left }), fail("MUTATION_ID_REUSED"));
