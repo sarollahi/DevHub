@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ensureIndexJob } from "../workers/query-indexer";
+import { enqueueDerived } from "./derived-index";
+import { indexedFileHistory, indexedLinearAncestry, indexedLinearMergeBases, IndexedWalk } from "./derived-queries";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
@@ -50,6 +52,7 @@ export async function resolveRevision(repositoryId: string, revision: string): P
     throw new SourceControlError(404, "REVISION_NOT_FOUND", "Revision does not exist in this repository");
   }
   await ensureIndexJob(repositoryId, id);
+  await enqueueDerived(repositoryId, id, ["ancestry", "history", "changed-paths", "impact", "directory"]);
   return id;
 }
 
@@ -72,6 +75,9 @@ export async function ancestors(repositoryId: string, revision: string): Promise
 
 export async function isAncestor(repositoryId: string, ancestor: string, descendant: string): Promise<boolean> {
   const [a, d] = await Promise.all([resolveRevision(repositoryId, ancestor), resolveRevision(repositoryId, descendant)]);
+  const walk = new IndexedWalk(repositoryId);
+  if (await walk.onFirstParentChain(d, a)) return true;
+  if ((await walk.summary(d))?.linear) return false;
   const rows = await db.$queryRaw<{ found: boolean }[]>`
     WITH RECURSIVE reachable(id) AS (
       SELECT id FROM "SourceChangeset" WHERE id = ${d} AND "repositoryId" = ${repositoryId}::uuid
@@ -88,6 +94,8 @@ export async function mergeBases(repositoryId: string, leftRevision: string, rig
   const [left, right] = await Promise.all([
     resolveRevision(repositoryId, leftRevision), resolveRevision(repositoryId, rightRevision),
   ]);
+  const accelerated = await indexedLinearMergeBases(repositoryId, left, right);
+  if (accelerated !== null) return accelerated;
   const rows = await db.$queryRaw<{ id: string }[]>`
     WITH RECURSIVE lhs(id) AS (
       SELECT id FROM "SourceChangeset" WHERE id = ${left} AND "repositoryId" = ${repositoryId}::uuid
@@ -107,6 +115,9 @@ export async function mergeBases(repositoryId: string, leftRevision: string, rig
 export async function ancestryQuery(repositoryId: string, revision: string, other?: string, max = 100) {
   const resolved = await resolveRevision(repositoryId, revision);
   const size = limitQuery(max, 1000);
+  const accelerated = await indexedLinearAncestry(repositoryId, resolved, size);
+  if (accelerated) return { ...accelerated,
+    mergeBases: other ? await mergeBases(repositoryId, resolved, other) : [] };
   const rows = await db.$queryRaw<{ id: string; total: bigint }[]>`
     WITH RECURSIVE reachable(id) AS (
       SELECT id FROM "SourceChangeset" WHERE id = ${resolved} AND "repositoryId" = ${repositoryId}::uuid
@@ -277,6 +288,8 @@ export async function fileHistory(repositoryId: string, revision: string, path: 
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
   const size = limitQuery(max, 1000);
+  const accelerated = await indexedFileHistory(repositoryId, id, path, followRenames, size);
+  if (accelerated) return accelerated;
   const events: FileHistoryRow[] = [];
   let current = path;
   let fromDepth = 0;
@@ -366,6 +379,8 @@ export async function pathImpactQuery(repositoryId: string, revision: string, pa
 }
 
 export async function blameQuery(repositoryId: string, revision: string, path: string, maxHistory = 500) {
+  const resolved = await resolveRevision(repositoryId, revision);
+  await enqueueDerived(repositoryId, resolved, ["blame"]);
   const entry = await resolvePath(repositoryId, revision, path);
   if (entry.kind !== "file" || !entry.objectId) throw new SourceControlError(422, "NOT_A_FILE", "Blame requires a file");
   const history = await fileHistory(repositoryId, revision, path, true, maxHistory);
