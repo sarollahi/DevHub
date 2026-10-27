@@ -6,7 +6,8 @@ import { NextRequest } from "next/server";
 import { db } from "../src/lib/prisma";
 import { tokenHash } from "../src/lib/auth";
 import { createCanonicalChangeset, stageCanonicalBlob, getCanonicalChangeset, getCanonicalSnapshot, listCanonicalEvents } from "../src/source-control/canonical";
-import { getObject } from "../src/source-control/service";
+import { getObject, createChangeset } from "../src/source-control/service";
+import { SnapshotTree } from "../src/source-control/snapshot-tree";
 import { runAuthorizedQuery, ancestryQuery, compareQuery, treeQuery, resolvePath, fileHistory, blameQuery, pathImpactQuery } from "../src/source-control/query";
 import { SourceControlError } from "../src/source-control/contracts";
 import { POST as publishApi } from "../src/app/api/v2/repositories/[id]/changesets/route";
@@ -71,6 +72,27 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     await assert.rejects(() => getObject(repo.id, orphan, actor), expects("NOT_FOUND"));
     await assert.rejects(() => db.sourceChangeset.delete({ where: { id: root.id } }));
     await assert.rejects(() => db.sourceObject.update({ where: { id: alpha }, data: { byteSize: 8 } }));
+  });
+
+  await t.test("persistent root, integrity and bounded copy-on-write for single edit", async () => {
+    const rootRecord = await db.sourceSnapshotRoot.findUniqueOrThrow({ where: { changesetId: root.id } });
+    assert.equal(rootRecord.repositoryId, repo.id);
+    const before = await db.sourceSnapshotNode.count();
+    const edit = await make("bounded edit", [root.id],
+      [{ kind: "MODIFY", path: "docs/a.txt", objectId: beta }]);
+    const after = await db.sourceSnapshotNode.count();
+    assert.ok(after - before <= 32, "a single small-path edit must not rewrite the full tree");
+    const changed = await db.sourceSnapshotRoot.findUniqueOrThrow({ where: { changesetId: edit.id } });
+    assert.notEqual(changed.rootId, rootRecord.rootId);
+    assert.equal((await getCanonicalSnapshot(repo.id, root.id, actor)).entries.find(x => x.path === "docs/a.txt")?.objectId, alpha);
+    assert.equal((await getCanonicalSnapshot(repo.id, edit.id, actor)).entries.find(x => x.path === "docs/a.txt")?.objectId, beta);
+    const damaged = new SnapshotTree({ sourceSnapshotNode: {
+      findUnique: async () => ({ data: Buffer.from("not a valid snapshot") }),
+    } } as never);
+    await assert.rejects(() => damaged.count(rootRecord.rootId), expects("CORRUPT_SNAPSHOT"));
+    await assert.rejects(() => db.sourceSnapshotNode.update({
+      where: { id: rootRecord.rootId }, data: { data: Buffer.from("tampered") },
+    }));
   });
 
   const left = await make("left", [root.id], [{ kind: "MODIFY", path: "docs/a.txt", objectId: beta }]);
@@ -200,6 +222,32 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
       assert.deepEqual(actual, expected, "seed " + seed + ", case " + i + ", operation " + action.kind);
       assert.equal((await getCanonicalChangeset(repo.id, created.id, actor)).treeId, null);
     }
+  });
+
+  await t.test("lazy migration of v1 trees without changing identity, bytes or ancestry", async () => {
+    const legacy = await createChangeset(repo.id, actor, {
+      apiVersion: 1, parents: [], message: "legacy tree", operations: [
+        { kind: "PUT", path: "legacy/original.txt", dataBase64: encode("original v1 bytes"), fileMode: "100755" },
+      ],
+    });
+    assert.ok(legacy.treeId);
+    assert.equal(await db.sourceSnapshotRoot.count({ where: { changesetId: legacy.id } }), 0);
+    const extended = await make("extend historical v1", [legacy.id], [
+      { kind: "COPY", path: "legacy/copied.txt", previousPath: "legacy/original.txt" },
+    ]);
+    const migrated = await db.sourceSnapshotRoot.findUniqueOrThrow({ where: { changesetId: legacy.id } });
+    assert.ok(migrated.rootId);
+    const unchanged = await getCanonicalSnapshot(repo.id, legacy.id, actor);
+    const current = await getCanonicalSnapshot(repo.id, extended.id, actor);
+    assert.equal(unchanged.treeId, legacy.treeId);
+    assert.deepEqual(unchanged.entries, [{ path: "legacy/original.txt",
+      objectId: current.entries[1].objectId, mode: "100755" }]);
+    assert.deepEqual(current.entries.map(x => x.path), ["legacy/copied.txt", "legacy/original.txt"]);
+    assert.equal((await getCanonicalChangeset(repo.id, extended.id, actor)).parents[0].parentId, legacy.id);
+    await assert.rejects(() => createCanonicalChangeset(foreign.id,
+      { type: "AGENT", id: foreignAgent.id, credentialId: foreignCredential.id },
+      { apiVersion: 2, parents: [legacy.id], description: "foreign history", operations: [] }),
+      expects("UNKNOWN_PARENT"));
   });
 
   await t.test("HTTP authorization and new database client recovery", async () => {
