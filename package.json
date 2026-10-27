@@ -24,7 +24,9 @@
     "storage:maintain": "tsx scripts/object-maintain.ts",
     "storage:stress": "tsx scripts/storage-stress.ts",
     "worker:source-index": "tsx src/workers/query-indexer.ts",
-    "bench:source-query": "tsx scripts/bench-source-query.ts"
+    "bench:source-query": "tsx scripts/bench-source-query.ts",
+    "cache:serve": "node src/cache/daemon.mjs",
+    "cache:benchmark": "node scripts/benchmark-cache.mjs"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",
