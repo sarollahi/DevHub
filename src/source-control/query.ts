@@ -121,6 +121,31 @@ export async function ancestryQuery(repositoryId: string, revision: string, othe
     truncated: count > size, mergeBases: common };
 }
 
+// Exact immutable-root reads require no complete snapshot reconstruction.
+async function indexedSnapshot<T>(
+  repositoryId: string, revision: string,
+  query: (tree: SnapshotTree, root: string) => Promise<T>,
+): Promise<T | undefined> {
+  const root = await db.sourceSnapshotRoot.findFirst({
+    where: { repositoryId, changesetId: revision }, select: { rootId: true },
+  });
+  if (!root) {
+    const change = await db.sourceChangeset.findFirst({
+      where: { repositoryId, id: revision }, select: { treeId: true },
+    });
+    if (!change?.treeId) {
+      throw new SourceControlError(409, "SNAPSHOT_NOT_MATERIALIZED",
+        "Revision requires incremental checkpoint migration before indexed reads");
+    }
+    return undefined;
+  }
+  return db.$transaction(async tx => {
+    const tree = new SnapshotTree(tx);
+    await tree.count(root.rootId);
+    return query(tree, root.rootId);
+  }, { timeout: 30000 });
+}
+
 export async function treeQuery(repositoryId: string, revision: string, directory = "", max = 200, cursor = "") {
   if (directory && !validPath(directory)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
