@@ -15,8 +15,6 @@ type ImportedOperation = {
   kind: SourceOperationKind; path: string; objectId: string | null;
   fileMode: string | null; previousPath: string | null; position: number;
 };
-type NativeEntry = { objectId: string; mode: string };
-type NativeTree = Map<string, NativeEntry>;
 const SHA = /^[a-f0-9]{40}$|^[a-f0-9]{64}$/;
 const MODES = new Set(["100644", "100755", "120000"]);
 const leaseMs = 10 * 60 * 1000;
@@ -276,55 +274,32 @@ async function publishGitRefs(repositoryId: string, cwd: string, pulse: () => Pr
   return refs;
 }
 
-function applyNative(state: NativeTree, op: ImportedOperation) {
-  const original = state.get(op.path);
-  if (op.kind === "ADD" || op.kind === "PUT" || op.kind === "MODIFY") {
-    if (!op.objectId) throw new Error("Native change missing blob");
-    state.set(op.path, { objectId: op.objectId, mode: op.fileMode || original?.mode || "100644" });
-  } else if (op.kind === "DELETE") {
-    if (!state.delete(op.path)) throw new Error("Native deletion without source path: " + op.path);
-  } else if (op.kind === "CHMOD") {
-    if (!original || !op.fileMode) throw new Error("Native mode change without source");
-    state.set(op.path, { ...original, mode: op.fileMode });
-  } else if (op.kind === "COPY" || op.kind === "RENAME" || op.kind === "MOVE") {
-    const prior = state.get(op.previousPath!);
-    if (!prior) throw new Error("Native rename/copy without source");
-    if (op.kind !== "COPY") state.delete(op.previousPath!);
-    state.set(op.path, prior);
-  } else throw new Error("Unsupported native operation");
-}
-
+// Verification traverses Git's full tree once but never replays native
+// ancestry or materializes a repository-size JavaScript path map.
 async function verifyNativeTree(repositoryId: string, cwd: string, sha: string) {
-  const state: NativeTree = new Map();
-  for await (const ancestorSha of gitLines(cwd, ["rev-list", "--first-parent", "--reverse", sha])) {
-    const mapped = await db.gitImportCommit.findUniqueOrThrow({
-      where: { repositoryId_gitSha: { repositoryId, gitSha: ancestorSha } },
-    });
-    let cursor = 0;
-    while (true) {
-      const ops = await db.sourceFileOperation.findMany({
-        where: { changesetId: mapped.changesetId, position: { gte: cursor } },
-        orderBy: { position: "asc" }, take: 500,
-      });
-      if (!ops.length) break;
-      for (const op of ops) applyNative(state, op);
-      cursor = ops[ops.length - 1].position + 1;
-    }
-  }
+  const mapped = await db.gitImportCommit.findUniqueOrThrow({
+    where: { repositoryId_gitSha: { repositoryId, gitSha: sha } },
+  });
+  const root = await db.sourceSnapshotRoot.findFirst({
+    where: { repositoryId, changesetId: mapped.changesetId }, select: { rootId: true },
+  });
+  if (!root) throw new SourceControlError(409, "SNAPSHOT_NOT_MATERIALIZED",
+    "Imported native snapshot root is missing");
+  const tree = new SnapshotTree(db);
+  const nativeCount = await tree.count(root.rootId);
   let count = 0;
   for await (const entry of gitTreeEntries(cwd, sha)) {
     normalizedPath(entry.path, entry.mode);
     const expected = await db.gitImportBlob.findUnique({
       where: { repositoryId_gitSha: { repositoryId, gitSha: entry.sha } },
     });
-    const actual = state.get(entry.path);
+    const actual = await tree.get(root.rootId, entry.path);
     if (!expected || !actual || actual.objectId !== expected.objectId || actual.mode !== entry.mode) {
       throw new Error("Imported native tree differs from Git: " + sha + " " + entry.path);
     }
-    state.delete(entry.path);
     count++;
   }
-  if (state.size) throw new Error("Imported native tree contains paths absent in Git: " + sha);
+  if (count !== nativeCount) throw new Error("Imported native snapshot has unexpected extra paths: " + sha);
   return count;
 }
 
