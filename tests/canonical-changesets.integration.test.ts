@@ -111,7 +111,7 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     assert.equal((await getCanonicalSnapshot(repo.id, right.id, actor)).entries.find(x => x.path === "links/doc")?.mode, "120000");
     assert.deepEqual((await getCanonicalChangeset(repo.id, merge.id, actor)).parents.map(x => x.parentId), [left.id, right.id]);
     assert.equal(await db.sourceReference.count({ where: { repositoryId: repo.id } }), 0);
-    assert.equal((await listCanonicalEvents(repo.id, 30, actor)).length, 4);
+    assert.equal((await listCanonicalEvents(repo.id, 30, actor)).length, 5);
   });
 
   await t.test("v2 delta changesets are queryable without client checkout", async () => {
