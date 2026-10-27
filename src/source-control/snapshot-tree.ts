@@ -187,7 +187,7 @@ export class SnapshotTree {
     return root;
   }
 
-  async persist(root: string): Promise<number> {
+  async persist(root: string) {
     // Retain only pending nodes reachable from the final root; intermediate
     // copy-on-write versions never enter the database.
     const visited = new Set<string>();
@@ -207,7 +207,8 @@ export class SnapshotTree {
     for (let i = 0; i < rows.length; i += 500) {
       this.nodeWriteQueries++;
       const created = await this.tx.sourceSnapshotNode.createManyAndReturn({
-        data: rows.slice(i, i + 500), skipDuplicates: true, select: { id: true },
+        data: rows.slice(i, i + 500).map(row => ({ id: row.id, data: Uint8Array.from(row.data) })),
+        skipDuplicates: true, select: { id: true },
       });
       newNodeCount += created.length;
       for (const node of created) newNodeBytes += this.pending.get(node.id)!.byteLength;
