@@ -209,9 +209,9 @@ async function exportCommit(repositoryId: string, dir: string, changesetId: stri
       authorId: change.authorId, date: change.createdAt, imported: original ?? undefined,
     });
     if (mapped?.rawCommit) {
-      const header = bytes.toString("utf8").split("\\n\\n")[0];
-      const treeHeader = header.split("\\n").find(line => line.startsWith("tree "));
-      const parentHeaders = header.split("\\n").filter(line => line.startsWith("parent ")).map(line => line.slice(7));
+      const header = bytes.toString("utf8").split("\n\n")[0];
+      const treeHeader = header.split("\n").find(line => line.startsWith("tree "));
+      const parentHeaders = header.split("\n").filter(line => line.startsWith("parent ")).map(line => line.slice(7));
       if (treeHeader !== "tree " + treeSha || parentHeaders.join(",") !== parents.join(",")) {
         throw new Error("Raw Git commit does not match authoritative native parents and tree");
       }
