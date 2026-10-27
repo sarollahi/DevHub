@@ -340,6 +340,7 @@ model SourceObject {
   trees       SourceChangeset[]     @relation("ChangesetTree")
   operations  SourceFileOperation[] @relation("FileObject")
   grants      SourceObjectGrant[]
+  importedBlobs GitImportBlob[]
 }
 
 // Content-addressed changesets are never modified when references advance.
@@ -364,7 +365,6 @@ model SourceChangeset {
   validationTargets ValidationPipeline[] @relation("ValidationTarget")
   queryIndexJob SourceQueryIndexJob?
   queryPathTouches SourceQueryPathTouch[]
-  importedBlobs GitImportBlob[]
   importedGitCommits GitImportCommit[]
   @@index([repositoryId, createdAt(sort: Desc)])
 }
