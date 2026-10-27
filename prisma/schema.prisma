@@ -1117,3 +1117,53 @@ model GitInteropCredential {
   lastUsedAt   DateTime?
   @@index([repositoryId, userId])
 }
+
+
+/// Rebuildable, non-authoritative indexes keyed to immutable changeset identity.
+/// A published SUCCEEDED row is immutable; obsolete versions remain readable only
+/// for diagnostics. A worker lease only authorizes publication, never source edits.
+model SourceDerivedIndex {
+  repositoryId  String    @db.Uuid
+  changesetId   String    @db.Char(64)
+  kind          String    @db.VarChar(32)
+  version       Int
+  state         String    @default("QUEUED") @db.VarChar(16)
+  payload       Json?
+  checksum      String?   @db.Char(64)
+  leaseToken    String?   @db.Uuid
+  leaseUntil    DateTime?
+  nextAttemptAt DateTime  @default(now())
+  attempts      Int       @default(0)
+  lastError     String?
+  finishedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  @@id([changesetId, kind, version])
+  @@index([state, nextAttemptAt, leaseUntil])
+  @@index([repositoryId, kind, version, state])
+}
+
+/// Binary lifting over immutable first-parent edges. One row per power of two.
+model SourceDerivedJump {
+  repositoryId String @db.Uuid
+  changesetId  String @db.Char(64)
+  level        Int
+  ancestorId   String @db.Char(64)
+  @@id([changesetId, level])
+  @@index([repositoryId, ancestorId])
+}
+
+/// Sparse changed-path postings; no per-revision copy of the path namespace.
+model SourceDerivedPathEvent {
+  repositoryId  String @db.Uuid
+  changesetId   String @db.Char(64)
+  position      Int
+  role          String @db.VarChar(16)
+  path          String
+  generation    Int
+  kind          String @db.VarChar(16)
+  previousPath  String?
+  objectId      String? @db.Char(64)
+  @@id([changesetId, position, role])
+  @@index([repositoryId, path, generation(sort: Desc)])
+  @@index([repositoryId, changesetId])
+}
