@@ -85,7 +85,7 @@ export default async function Browse({ params, searchParams }: {
     if (kind === "directory" || !available.has(childPath)) available.set(childPath,
       { path: childPath, kind, objectId: kind === "file" ? entry.objectId : undefined });
   }
-  const sorted = [...available.values()].sort((a,b) => a.path.localeCompare(b.path));
+  const sorted = [...available.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   const accessible: typeof sorted = [];
   for (const entry of sorted) {
     const probe = entry.kind === "file" ? [entry.path] :

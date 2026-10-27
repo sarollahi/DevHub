@@ -35,7 +35,6 @@ async function main() {
       operations: { create: [
         { path: "src/hello.ts", kind: "MODIFY", objectId: hashes[1], fileMode: "100644", position: 0 },
         { path: "README.md", kind: "ADD", objectId: hashes[2], fileMode: "100644", position: 1 },
-        { path: "src/secret.ts", kind: "ADD", objectId: hashes[3], fileMode: "100644", position: 2 },
       ] } }, update: {} });
   await db.sourceReference.upsert({ where: { repositoryId_name: { repositoryId: repo.id, name: "main" } },
     create: { repositoryId: repo.id, name: "main", changesetId: second, kind: "BRANCH" },
@@ -44,10 +43,7 @@ async function main() {
     create: { changesetId: second, repositoryId: repo.id, state: "COMPLETED",
       paths: ["src/hello.ts", "README.md"], riskTier: "LOW", riskScore: 12, groupKey: "browser-fixture",
       summary: "Fixture source revision", confidence: 1 }, update: {} });
-  await db.repositoryGrant.upsert({ where: { id: "28caf91e-7681-4310-bf5d-64718549a273" },
-    create: { id: "28caf91e-7681-4310-bf5d-64718549a273",
-      repositoryId: repo.id, subjectType: "USER", subjectId: user.id, capability: "source:read",
-      effect: "DENY", pathPrefix: "src/secret.ts" }, update: {} });
+  // The unpublished secret blob may be indexed but must never appear in this repository snapshot.
   await enqueueSearchObjects(hashes);
   await indexSearchBatch(20);
   console.log(JSON.stringify({ repositoryId: repo.id, base: first, head: second }));

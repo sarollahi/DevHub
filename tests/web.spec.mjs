@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, request } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
 test.describe("Enterprise repository user journeys", () => {
@@ -32,12 +32,17 @@ test.describe("Enterprise repository user journeys", () => {
     await page.getByRole("link", { name: "File history" }).click();
     await expect(page.getByRole("table")).toContainText("Extend greeting");
   });
-  test("native path and content search filter denied files", async ({ page }) => {
+  test("native search excludes unreferenced objects and rejects unauthenticated access", async ({ page }) => {
     await openRepository(page);
     await page.getByRole("navigation", { name: "Repository sections" }).getByRole("link", { name: "Search" }).click();
     await page.getByLabel("Search this repository").fill("hello");
     await page.getByRole("button", { name: "Search" }).click();
     await expect(page.getByRole("table")).toContainText("src/hello.ts");
+    const repositoryId = new URL(page.url()).pathname.split("/")[2];
+    const guest = await request.newContext();
+    const denied = await guest.get("http://localhost:3000/api/v2/repositories/" + repositoryId + "/search?q=hello&mode=path");
+    expect(denied.status()).toBe(401);
+    await guest.dispose();
     await page.getByLabel("Search this repository").fill("internal-only");
     await page.getByLabel("In").selectOption("content");
     await page.getByRole("button", { name: "Search" }).click();

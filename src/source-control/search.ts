@@ -28,7 +28,7 @@ export async function searchRepository(args: {
   if (snapshot.entries.length > limitPaths)
     throw new SourceControlError(413, "REPOSITORY_TOO_LARGE", "Search snapshot path limit exceeded");
 
-  const candidates = snapshot.entries.filter(entry => entry.path > (args.cursor || "")).sort((a, b) => a.path.localeCompare(b.path));
+  const candidates = snapshot.entries.filter(entry => entry.path > (args.cursor || "")).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   const ids = [...new Set(snapshot.entries.map(entry => entry.objectId))];
   let stale = false;
   let excluded = false;
