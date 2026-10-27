@@ -1166,6 +1166,6 @@ model SourceDerivedPathEvent {
   previousPath  String?
   objectId      String? @db.Char(64)
   @@id([changesetId, version, position, role])
-  @@index([repositoryId, path, generation(sort: Desc)])
+  @@index([repositoryId, version, path, generation(sort: Desc)])
   @@index([repositoryId, changesetId])
 }
