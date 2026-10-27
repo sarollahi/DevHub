@@ -48,11 +48,23 @@ export async function assertRepositoryPermission(
   let elevated = false;
 
   if (actor.type === "HUMAN") {
-    if (!actor.sessionId) throw new SourceControlError(401, "UNAUTHORIZED", "Human session required");
-    const session = await tx.humanSession.findUnique({ where: { id: actor.sessionId },
-      include: { user: { select: { disabledAt: true } } } });
-    if (!session || session.userId !== actor.id || session.revokedAt || session.expiresAt <= now || session.user.disabledAt) {
-      throw new SourceControlError(401, "SESSION_EXPIRED", "Session expired or revoked");
+    if (actor.gitCredentialId) {
+      const token = await tx.gitInteropCredential.findUnique({ where: { id: actor.gitCredentialId },
+        include: { user: { select: { disabledAt: true } } } });
+      if (!token || token.userId !== actor.id || token.repositoryId !== repositoryId ||
+          token.revokedAt || token.expiresAt <= now || token.user.disabledAt) {
+        throw new SourceControlError(401, "GIT_CREDENTIAL_REVOKED", "Git credential expired or revoked");
+      }
+      if (!token.scopes.includes(capability)) {
+        throw new SourceControlError(403, "GIT_SCOPE_DENIED", "Git credential does not permit this operation");
+      }
+    } else {
+      if (!actor.sessionId) throw new SourceControlError(401, "UNAUTHORIZED", "Human session required");
+      const session = await tx.humanSession.findUnique({ where: { id: actor.sessionId },
+        include: { user: { select: { disabledAt: true } } } });
+      if (!session || session.userId !== actor.id || session.revokedAt || session.expiresAt <= now || session.user.disabledAt) {
+        throw new SourceControlError(401, "SESSION_EXPIRED", "Session expired or revoked");
+      }
     }
     const membership = repo.organizationId ? await tx.organizationMembership.findUnique({
       where: { organizationId_userId: { organizationId: repo.organizationId, userId: actor.id } },
