@@ -50,19 +50,19 @@ test("PostgreSQL validation provenance, idempotency, lease, isolation and retrie
     ]});
   let pipelineId="";
   await t.test("durable submission has six jobs and source-specific admission",async()=>{
-    const result=await submitValidation(repo.id,change.id,null,"validation-once-"+suffix,"HUMAN:"+user.id);
+    const result=await submitValidation(repo.id,change.id,null,"validation-once-"+suffix,actor);
     pipelineId=result.pipeline.id;
     assert.equal(result.created,true);
-    const again=await submitValidation(repo.id,change.id,null,"validation-once-"+suffix,"HUMAN:"+user.id);
+    const again=await submitValidation(repo.id,change.id,null,"validation-once-"+suffix,actor);
     assert.equal(again.created,false);
     assert.equal(again.pipeline.id,pipelineId);
     assert.equal(await db.validationTask.count({where:{pipelineId}}),6);
-    await assert.rejects(()=>submitValidation(other.id,change.id,null,"other-run-"+suffix,"HUMAN:"+user.id),
+    await assert.rejects(()=>submitValidation(other.id,change.id,null,"other-run-"+suffix,actor),
       (e:unknown)=>e instanceof SourceControlError&&e.code==="NOT_FOUND");
-    await assert.rejects(()=>submitValidation(repo.id,change.id,change.id,"bad-target-"+suffix,"HUMAN:"+user.id),
+    await assert.rejects(()=>submitValidation(repo.id,change.id,change.id,"bad-target-"+suffix,actor),
       (e:unknown)=>e instanceof SourceControlError&&e.code==="NOT_FOUND");
     process.env.VALIDATION_TENANT_MAX_PENDING="6";
-    await assert.rejects(()=>submitValidation(repo.id,change.id,null,"overquota-"+suffix,"HUMAN:"+user.id),
+    await assert.rejects(()=>submitValidation(repo.id,change.id,null,"overquota-"+suffix,actor),
       (e:unknown)=>e instanceof SourceControlError&&e.code==="TENANT_QUEUE_QUOTA");
     delete process.env.VALIDATION_TENANT_MAX_PENDING;
     assert.equal(await hasVerifiedChecks(repo.id,change.id,null),false);
@@ -94,7 +94,7 @@ test("PostgreSQL validation provenance, idempotency, lease, isolation and retrie
       assert.equal(await hasVerifiedChecks(repo.id,change.id,null),false);
     });
     await t.test("failing build records signed nonzero exit and does not poison other jobs",async()=>{
-      const run=await submitValidation(repo.id,change.id,null,"run-failure-"+suffix,"HUMAN:"+user.id);
+      const run=await submitValidation(repo.id,change.id,null,"run-failure-"+suffix,actor);
       const task=await db.validationTask.findFirstOrThrow({where:{pipelineId:run.pipeline.id,kind:"COMPILE"}});
       await db.validationTask.updateMany({where:{pipelineId:run.pipeline.id,NOT:{id:task.id}},data:{state:"CANCELLED"}});
       const claimed=await claimTask();
@@ -114,7 +114,7 @@ test("PostgreSQL validation provenance, idempotency, lease, isolation and retrie
     assert.equal(current?.tasks.some(c=>c.state==="QUEUED"),false);
   });
   await t.test("expired leases are reclaimed and superseded workers cannot publish",async()=>{
-    const run=await submitValidation(repo.id,change.id,null,"worker-recovery-"+suffix,"HUMAN:"+user.id);
+    const run=await submitValidation(repo.id,change.id,null,"worker-recovery-"+suffix,actor);
     const target=await db.validationTask.findFirstOrThrow({where:{pipelineId:run.pipeline.id,kind:"COMPILE"}});
     await db.validationTask.updateMany({where:{pipelineId:run.pipeline.id,NOT:{id:target.id}},data:{state:"CANCELLED"}});
     const originalLease=await claimTask();
@@ -132,7 +132,7 @@ test("PostgreSQL validation provenance, idempotency, lease, isolation and retrie
   });
   if(process.env.RUN_VALIDATION_CONTAINER_TEST==="1"){
     await t.test("timeout forcibly terminates an isolated container and signs the failure",async()=>{
-      const run=await submitValidation(repo.id,change.id,null,"timeout-"+suffix,"HUMAN:"+user.id);
+      const run=await submitValidation(repo.id,change.id,null,"timeout-"+suffix,actor);
       const task=await db.validationTask.findFirstOrThrow({where:{pipelineId:run.pipeline.id,kind:"COMPILE"}});
       await db.validationTask.updateMany({where:{pipelineId:run.pipeline.id,NOT:{id:task.id}},data:{state:"CANCELLED"}});
       const p=await db.validationPipeline.findUniqueOrThrow({where:{id:run.pipeline.id}});
@@ -147,7 +147,7 @@ test("PostgreSQL validation provenance, idempotency, lease, isolation and retrie
       assert.ok(verifyTask(done));
     });
     await t.test("oversized output is rejected and infrastructure failure remains retryable",async()=>{
-      const run=await submitValidation(repo.id,change.id,null,"artifact-quota-"+suffix,"HUMAN:"+user.id);
+      const run=await submitValidation(repo.id,change.id,null,"artifact-quota-"+suffix,actor);
       const task=await db.validationTask.findFirstOrThrow({where:{pipelineId:run.pipeline.id,kind:"COMPILE"}});
       await db.validationTask.updateMany({where:{pipelineId:run.pipeline.id,NOT:{id:task.id}},data:{state:"CANCELLED"}});
       const p=await db.validationPipeline.findUniqueOrThrow({where:{id:run.pipeline.id}});

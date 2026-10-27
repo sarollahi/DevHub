@@ -358,6 +358,17 @@ export async function getCanonicalSnapshotForReview(
     .map(([path, entry]) => ({ path, ...entry })) };
 }
 
+// Trusted validation workers consume immutable revisions after their calling service
+// has authorized admission. Public source-control APIs still require an actor.
+export async function readCanonicalSnapshotForValidation(repositoryId: string, changesetId: string) {
+  const change = await db.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId },
+    select: { treeId: true } });
+  if (!change) throw new SourceControlError(404, "NOT_FOUND", "Validation revision not found");
+  const state = await db.$transaction(tx => snapshot(tx, repositoryId, changesetId), { timeout: 20000 });
+  return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, entry]) => ({ path, ...entry })) };
+}
+
 export async function listCanonicalEvents(repositoryId: string, limit = 30, actor?: SourceActor) {
   if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
   await assertRepositoryPermission(actor, repositoryId, "source:read");

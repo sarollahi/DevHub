@@ -10,7 +10,7 @@ type Database = Prisma.TransactionClient;
 const scopeAliases: Record<string, Capability> = {
   "changesets:read": "source:read", "source:read": "source:read",
   "changesets:write": "changeset:write", "pull_requests:write": "changeset:write",
-  "changeset:write": "changeset:write", "refs:write": "ref:update",
+  "changeset:write": "changeset:write", "validations:run": "changeset:write", "refs:write": "ref:update",
   "ref:update": "ref:update", "changesets:approve": "review",
   review: "review", admin: "admin",
 };

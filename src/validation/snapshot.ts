@@ -1,4 +1,4 @@
-import { getTree } from "../source-control/service";
+import { readCanonicalSnapshotForValidation } from "../source-control/canonical";
 import { db } from "../lib/prisma";
 import { objectId } from "../source-control/storage";
 import { Readable } from "node:stream";
@@ -12,15 +12,15 @@ const locks = /(^|\/)(package(-lock)?\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml
 const same = (a: Entry | undefined, b: Entry | undefined) => !a && !b || !!a && !!b && a.objectId === b.objectId && a.mode === b.mode;
 function sorted(entries: Iterable<Entry>) { return [...entries].sort((a,b)=>a.path.localeCompare(b.path, "en")); }
 export async function snapshotFor(repositoryId: string, changesetId: string, targetId: string | null): Promise<Snapshot> {
-  const subject = await getTree(repositoryId, changesetId);
+  const subject = await readCanonicalSnapshotForValidation(repositoryId, changesetId);
   let entries = sorted(subject.entries.map(e => ({ path: e.path, objectId: e.objectId, mode: "mode" in e ? String(e.mode) : "100644" })));
   if (targetId) {
     const subjectChange = await db.sourceChangeset.findFirst({ where: { id: changesetId, repositoryId },
       include: { parents: { where: { position: 0 } } } });
     if (!subjectChange) throw new SourceControlError(404, "NOT_FOUND", "Changeset does not exist");
     const baseId = subjectChange.parents[0]?.parentId;
-    const baseEntries = baseId ? (await getTree(repositoryId, baseId)).entries : [];
-    const targetEntries = (await getTree(repositoryId, targetId)).entries;
+    const baseEntries = baseId ? (await readCanonicalSnapshotForValidation(repositoryId, baseId)).entries : [];
+    const targetEntries = (await readCanonicalSnapshotForValidation(repositoryId, targetId)).entries;
     const baseline = new Map(baseEntries.map(e => [e.path, { path:e.path, objectId:e.objectId, mode:"mode" in e ? String(e.mode):"100644" }]));
     const desired = new Map(entries.map(e => [e.path, e]));
     const target = new Map(targetEntries.map(e => [e.path, { path:e.path, objectId:e.objectId, mode:"mode" in e ? String(e.mode):"100644" }]));
