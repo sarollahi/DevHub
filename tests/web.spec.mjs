@@ -3,10 +3,13 @@ import AxeBuilder from "@axe-core/playwright";
 
 test.describe("Enterprise repository user journeys", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("http://127.0.0.1:3000/login");
+    await page.goto("http://localhost:3000/login");
     await page.getByLabel("Email address").fill("ahmad.sarollahi@gmail.com");
     await page.getByLabel("Password").fill(process.env.BOOTSTRAP_USER_PASSWORD);
+    const submitted = page.waitForResponse(response => response.url().endsWith("/api/auth/login"));
     await page.getByRole("button", { name: /Continue to workspace/i }).click();
+    const login = await submitted;
+    if (login.status() >= 400) throw Error("Browser sign-in rejected: HTTP " + login.status() + " " + (await login.text()).slice(0,200));
     await expect(page).toHaveURL(/\/repositories/);
   });
   async function openRepository(page) {
@@ -48,7 +51,7 @@ test.describe("Enterprise repository user journeys", () => {
     await page.getByRole("navigation", { name: "Repository sections" }).getByRole("link", { name: "History" }).click();
     const hrefs = await page.locator("table tbody tr td:last-child a").evaluateAll(nodes => nodes.map(node => node.getAttribute("href")));
     expect(hrefs.length).toBeGreaterThan(1);
-    const baseRevision = new URL(hrefs[1], "http://127.0.0.1:3000").searchParams.get("revision");
+    const baseRevision = new URL(hrefs[1], "http://localhost:3000").searchParams.get("revision");
     await page.getByRole("navigation", { name: "Repository sections" }).getByRole("link", { name: "Compare" }).click();
     await page.getByLabel("Base revision").fill(baseRevision);
     await page.getByRole("button", { name: "Compare" }).click();
