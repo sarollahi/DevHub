@@ -1045,6 +1045,7 @@ model GitInteropCommit {
   changesetId  String @db.Char(64)
   gitSha       String @db.Char(40)
   treeSha      String @db.Char(40)
+  rawCommit    Bytes? @db.ByteA
   createdAt    DateTime @default(now())
   @@id([repositoryId, changesetId])
   @@unique([repositoryId, gitSha])
