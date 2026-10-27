@@ -321,7 +321,7 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
           persisted.push({ kind: op.kind, path: op.path, previousPath: original, objectId: objectRef,
             fileMode: requestedMode, position });
         }
-        await tree.persist(rootId);
+        const snapshotStats = await tree.persist(rootId);
         const meta = deriveChangesetMetadata(persisted.map(op => ({
           kind: op.kind as "PUT", path: op.path, previousPath: op.previousPath ?? undefined,
           objectId: op.objectId ?? undefined,
@@ -344,7 +344,7 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
         } });
         await tx.auditEvent.create({ data: {
           repositoryId, actorType: actor.type, actorId: actor.id, action: "changeset.published", subjectId: changesetId,
-          metadata: { apiVersion: 2, operationCount: persisted.length },
+          metadata: { apiVersion: 2, operationCount: persisted.length, snapshotStats },
         } });
       }
       if (input.idempotencyKey) await tx.sourcePublicationKey.create({ data: {
