@@ -51,9 +51,14 @@ jobs:
       - name: Install isolated browser test dependencies
         run: |
           npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund @playwright/test@1.58.2 @axe-core/playwright@4.11.1
-          npx playwright install --with-deps chromium
+          docker pull mcr.microsoft.com/playwright:v1.58.2-noble
       - name: Exercise repository journeys and accessibility
-        run: npx playwright test tests/web.spec.mjs --reporter=line --workers=2
+        run: |
+          docker run --rm --ipc=host --network=host \
+            -v "$PWD:/workspace" -w /workspace \
+            -e BOOTSTRAP_USER_PASSWORD="$BOOTSTRAP_USER_PASSWORD" \
+            mcr.microsoft.com/playwright:v1.58.2-noble \
+            npx playwright test tests/web.spec.mjs --reporter=line --workers=2
       - name: Server output on failure
         if: failure()
         run: tail -n 200 /tmp/devhub-web.log || true
