@@ -306,41 +306,38 @@ export async function fileHistory(repositoryId: string, revision: string, path: 
 export async function pathImpactQuery(repositoryId: string, revision: string, path: string, max = 100) {
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
-  const reachable = await ancestors(repositoryId, id);
-  const seen = new Set<string>();
-  const records: { changesetId: string; path: string; operationPath: string; role: string }[] = [];
-  const add = (changesetId: string, operationPath: string, role: string) => {
-    const key = changesetId + ":" + operationPath + ":" + role;
-    if (!seen.has(key)) { seen.add(key); records.push({ changesetId, path, operationPath, role }); }
-  };
-  for (const batch of chunks(reachable)) {
-    const complete = await db.sourceQueryIndexJob.findMany({
-      where: { changesetId: { in: batch }, state: "SUCCEEDED" }, select: { changesetId: true },
-    });
-    const indexedIds = complete.map(e => e.changesetId);
-    const indexed = new Set(indexedIds);
-    if (indexedIds.length) {
-      const touches = await db.sourceQueryPathTouch.findMany({ where: {
-        changesetId: { in: indexedIds }, path,
-      }, select: { changesetId: true, operationPath: true, role: true } });
-      for (const touch of touches) add(touch.changesetId, touch.operationPath, touch.role);
-    }
-    const missing = batch.filter(cid => !indexed.has(cid));
-    if (missing.length) {
-      const raw = await db.sourceFileOperation.findMany({ where: {
-        changesetId: { in: missing }, OR: [{ path }, { previousPath: path }],
-      }, select: { changesetId: true, path: true, previousPath: true } });
-      for (const op of raw) {
-        if (op.path === path) add(op.changesetId, op.path, "destination");
-        if (op.previousPath === path) add(op.changesetId, op.path, "source");
-      }
-    }
-  }
-  const order = new Map(reachable.map((value, index) => [value, index]));
-  records.sort((a, b) => order.get(a.changesetId)! - order.get(b.changesetId)!);
   const size = limitQuery(max, 1000);
-  return { revision: id, path, records: records.slice(0, size), total: records.length,
-    truncated: records.length > size };
+  // Use authoritative operations for revisions without a completed touch index.
+  // A failed/stale index must never replace those operations. Only a bounded
+  // result page leaves the database even for million-revision histories.
+  const rows = await db.$queryRaw<{
+    changesetId: string; operationPath: string; role: string; total: bigint;
+  }[]>`
+    WITH RECURSIVE reachable(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
+      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON p."changesetId" = r.id
+    ), touched AS (
+      SELECT t."changesetId", t."operationPath", t.role
+      FROM reachable r JOIN "SourceQueryIndexJob" job ON job."changesetId" = r.id AND job.state = 'SUCCEEDED'
+      JOIN "SourceQueryPathTouch" t ON t."changesetId" = r.id AND t.path = ${path}
+      UNION ALL
+      SELECT op."changesetId", op.path AS "operationPath",
+        CASE WHEN op.path = ${path} THEN 'destination' ELSE 'source' END AS role
+      FROM reachable r JOIN "SourceFileOperation" op ON op."changesetId" = r.id
+      WHERE (op.path = ${path} OR op."previousPath" = ${path})
+        AND NOT EXISTS (SELECT 1 FROM "SourceQueryIndexJob" job
+          WHERE job."changesetId" = r.id AND job.state = 'SUCCEEDED')
+    ), distinct_touch AS (SELECT DISTINCT "changesetId", "operationPath", role FROM touched)
+    SELECT d."changesetId", d."operationPath", d.role, COUNT(*) OVER () AS total
+    FROM distinct_touch d JOIN "SourceChangeset" c ON c.id = d."changesetId"
+    ORDER BY c."createdAt" DESC, d."changesetId", d.role
+    LIMIT ${size + 1}
+  `;
+  const total = Number(rows[0]?.total ?? 0n);
+  const records = rows.slice(0, size).map(row => ({
+    changesetId: row.changesetId, path, operationPath: row.operationPath, role: row.role,
+  }));
+  return { revision: id, path, records, total, truncated: total > size };
 }
 
 export async function blameQuery(repositoryId: string, revision: string, path: string, maxHistory = 500) {
