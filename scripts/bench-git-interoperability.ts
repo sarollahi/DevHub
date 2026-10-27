@@ -15,7 +15,7 @@ function positive(name: string, fallback: number, max: number) {
   if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new Error("Invalid --" + name);
   return value;
 }
-const url = option("url");
+const url = option("url") ?? "";
 if (!url) throw new Error("Provide --url=https://gateway.example/git/REPOSITORY_UUID.git");
 const endpoint = new URL(url);
 if (endpoint.username || endpoint.password ||
