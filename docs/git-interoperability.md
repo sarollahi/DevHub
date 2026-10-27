@@ -38,40 +38,57 @@ If the native default branch has not been created, use `git clone -b EXISTING_BR
 
 ## Push admission
 
-`git-receive-pack` runs in a quarantine object directory. The synchronous server-installed pre-receive hook:
-1. Demands exactly one ref update (heads or lightweight tags), rejects delete/force/non-fast-forward and unrecognized refs.
-2. Verifies that the advertised old Git object matches the exact native reference generation and target.
-3. Rechecks authenticated human token, organization membership, operation scopes, explicit DENY grants, and branch/path policies.
-4. Validates each new commit's DAG, tree modes, symlinks, path count, referenced objects and Git hashes through the existing native importer. New blobs stream into the immutable S3-backed store, with SHA-1 and native SHA-256 verification.
-5. Persists immutable native changesets, original Git identity mappings, and audit events. Then invokes the native reference CAS. **Only this CAS can admit a ref update.** Protected refs still require the validated integration pathway; the hook never invents an approval or execution result.
+Git receive-pack uses quarantine object storage and a server-installed synchronous pre-receive hook. Requests are limited to **1–32 ref commands** and 2,000 newly imported commits. The hook validates every path, symlink, blob digest, tenant grant and short-lived credential before invoking the authoritative native policy engine.
 
-On CAS failure, Git refuses the ref update. Already imported immutable objects/changesets may be unreferenced and later handled by existing GC policy. On a Git ref write failure *after* successful native CAS, the native update remains authoritative; a subsequent gateway operation repairs the derived Git ref. Clients should fetch when a push has an ambiguous transport failure. There is no claim of atomicity across a Git cache ref update and the separate PostgreSQL CAS.
+All native reference changes in a push run in **one PostgreSQL transaction**. Any stale generation, forbidden ref, unsigned check, missing approval, or failed object verification rolls back the entire native ref batch, including audit events. Only a fully accepted batch may be reported as accepted by the Git hook. Run `git push --atomic` for all-or-nothing semantics in Git's **separate disposable cache** as well.
+
+- Branch creation, fast-forward changes, deletion and restoration are supported; native tombstone versions and authorization still apply.
+- Immutable tags can be created, but not edited or deleted.
+- **Controlled non-fast-forward branches** require all of: an administrator-scoped Git credential, native `allowForce=true` for that unprotected branch, an exact observed-old-SHA lease, and an explicit 10+ character reason. Protected/default branches never accept forced changes. Non-fast-forward is **not** accepted just because the user passed `git push --force`.
+- Direct Git fast-forwards onto existing protected branches require an already-completed independent review, human approval, signed validation of the exact new source/revision, and signed checks for the proposed new snapshot against the observed old target. The checks are verified under the final native reference transaction. No checks are fabricated or run in a receive hook. Bootstrap of a missing protected branch still uses the separately authorized native signed bootstrap API.
+
+Example for an explicitly permitted force-with-lease, after inspecting the remote old commit and enabling the native branch policy:
+
+```sh
+OLD_SHA=$(git rev-parse refs/remotes/origin/topic)
+git push --force-with-lease=refs/heads/topic:$OLD_SHA \
+  -o "devhub-force-reason=Reviewed replacement for incorrect history" \
+  -o "devhub-lease=refs/heads/topic:$OLD_SHA" \
+  origin HEAD:refs/heads/topic
+```
+
+On rejection, native refs remain unchanged. Already staged immutable objects/changesets may be unreferenced; they do not grant any authority. If a network or Git cache write fails *after* the native transaction committed, native state still wins and the next gateway synchronization repairs derived refs. This is deliberately **not** a distributed two-phase commit across PostgreSQL and Git's cache. Inspect the authoritative native ref and fetch before retrying an ambiguous transfer.
 
 ## Scope and limitations
 
-- Requires standard Git SHA-1 repositories. Git SHA-256 object-format repositories, shallow/partial clones, Git protocol SSH, Git LFS storage endpoints, submodules/gitlinks and replace refs are not supported.
-- Branch names and lightweight tags are exported. Annotated tags imported by the migration tool are projected as lightweight tags to their target commits; tag annotations/signatures are not round-tripped. Exported native-only changesets get deterministic synthetic Git committers plus a native identity trailer. The original Git SHA of previously imported history may change on projection when full raw Git objects were not retained by the importer; tree contents and ancestry are authoritative.
-- Git **push** is fast-forward-only, single-ref-only, and capped at 2,000 new commits per request. Immutable tags cannot be moved or deleted. Pushing to protected or default refs is rejected unless future work integrates the full review/validation admission protocol with receive-pack.
-- Native changeset limits (including per-revision file/path limits), path normalization and unsafe symlink restrictions are enforced. Unsupported Git trees are rejected rather than being silently corrupted.
-- A Git client cannot publish Git-originated authorship as an authorization identity. Authorship is source metadata; only the authenticated Git credential owner authorizes mutations.
-- Export is incremental: already materialized Git commit SHA mappings and Git blob cache identities are reused; each new changeset is projected by applying its file operations onto the first-parent Git index and preserving all ordered merge parents. Rebuilding the lost disposable cache necessarily re-reads native history and objects.
-- The gateway currently serializes Git RPCs **per repository** to avoid a partially refreshed local object cache being served concurrently with receive-pack; native changeset integration does not use this lock. This deployment is a single-replica baseline, not a multi-node Git front end.
-- A Git client may see transfer failure after native ref CAS if its socket drops; retry only after fetching and inspecting the native reference. No distributed dual-write transaction is claimed.
+- Supports Git smart HTTP SHA-1 format. Git SHA-256 object-format repos, SSH transport, shallow/partial clones, Git LFS storage endpoints, submodules/gitlinks, and replace refs are unsupported.
+- Branches and lightweight tags are exported. Imported annotated tags project as lightweight refs; annotation and tag signatures do not round-trip. Historical Git importer objects without retained raw commit bytes may be re-encoded with different Git SHAs; content and ancestry remain native-authoritative.
+- Up to 32 Git refs and 2,000 newly imported commits per push; immutable tags remain non-rewritable. Direct creation of a protected branch stays under the native signed bootstrap flow. Protected pushes with missing evidence are rejected, not silently queued or merged.
+- Filesystem path validation, content-size limits, and unsafe symlink checks stay enforced. Git commit authorship never grants DevHub permissions.
+- Export reuses persistent Git identities and delta-based tree generation. A lost cache is regenerated from native contents and persisted mappings.
+- The gateway serializes Git cache RPCs **per repository**, while native expensive validation and merge preparation stay concurrent. Production multi-replica coordination is not implemented. Native batch transaction semantics do not imply that a non-`--atomic` Git client has opted into atomic local-cache ref writes.
+- An interrupted or ambiguous transport may leave committed native refs with stale disposable Git refs. Retry only after inspecting the authoritative native ref and fetching.
 
 ## Verification and performance
 
 ```sh
 npm run typecheck
 npm run test:integration
-npm run bench:git-interop -- \\
-  --url=https://git.devhub.example/git/REPOSITORY_UUID.git \\
-  --native-server=https://devhub.example \\
-  --native-repository=REPOSITORY_UUID \\
-  --native-ref=main \\
-  --native-file=README.md \\
-  --native-cli=devhub
+npm run bench:git-interop -- \
+  --url=https://git.devhub.example/git/REPOSITORY_UUID.git \
+  --native-server=https://devhub.example \
+  --native-repository=REPOSITORY_UUID \
+  --native-ref=main \
+  --native-file=README.md \
+  --native-cli=devhub \
+  --iterations=50 --concurrency=8 --warmup=5 \
+  --output=git-load-results.json
 ```
 
-The integration test exercises actual smart HTTP clone/fetch/push with PostgreSQL and object storage, binary bytes, executable modes, symlinks, a protected branch rejection, stable SHA mapping, revoked credentials, interrupted push transport, and a stale native-vs-Git CAS race. The benchmark reports Git clone network/fetch work, Git checkout/materialization, and incremental fetch as separate timings. With native flags (and `DEVHUB_TOKEN` configured), it also times native `sync` and `hydrate` independently. Run on equivalent revisions and selected paths with cold and warm caches; full Git checkout and sparse native hydration have different workloads. Git's initial pack transfer is not equivalent to a sparse native client fetch.
+A load run collects p50/p95/p99/min/max/mean **independently** for Git clone/fetch, Git checkout, incremental Git fetch, sparse native metadata sync, and native hydration. It supports up to 100 measured iterations, 16 clients and 20 warmups. Optional `--max-p95-gitCloneFetch=10000`, `--max-p95-gitCheckout=5000`, and equivalent per-metric thresholds fail a load run when exceeded. Credentials are supplied via a trusted OS Git credential helper or `GIT_ASKPASS`, never URL literals. `DEVHUB_TOKEN` supplies native auth. The harness rejects plaintext non-loopback URLs. A Git full checkout and a sparse native hydration are *different workloads*: compare revision, path counts, byte volume, warm/cold cache and concurrency before drawing conclusions.
 
-Production rollout still requires TLS proxy hardening, threat modeling, load tests for concurrent tenants and large repositories, runner isolation for untrusted hooks beyond server-installed pre-receive, multi-node cache architecture, and full Git protocol-version compatibility testing.
+For controlled load against a deployed gateway, use the **Git interoperability benchmark** manual workflow with environment-protected credentials and a permitted test repository. Results are uploaded as JSON; do not aim load testing at a shared production tenant without an approved capacity window. Workflow CI integration tests use a temporary local gateway with PostgreSQL and object storage, exercising multi-ref atomicity, protected checks, force-with-lease, binary identity, merge ancestry, branch deletion/restoration, transport failures and stale races.
+
+A real production-scale result cannot be claimed until the gateway is deployed and benchmark JSON is generated for that environment. This repository supplies a reproducible, auditable process rather than invented throughput figures.
+
+Remaining rollout work includes multi-replica cache coordination, formal security assessment, production sizing/capacity approval, and compatibility tests across diverse Git clients.
