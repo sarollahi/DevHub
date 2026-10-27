@@ -9,7 +9,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const { id } = await params;
     const { actor } = await requireRepositoryAccess(request, id, "changesets:write");
-    const body = await readBoundedJson(request, 512_000);
+    const body = await readBoundedJson(request, 8_388_608);
     const result = await createCanonicalChangeset(id, actor, body);
     return NextResponse.json({ apiVersion: 2, ...result }, { status: result.created ? 201 : 200 });
   } catch (error) { return sourceFailure(error); }
