@@ -128,7 +128,7 @@ type Change = { id: string; authorId: string; message: string; createdAt: Date; 
     kind: string; path: string; previousPath: string | null; objectId: string | null; fileMode: string | null;
   }> };
 
-async function existingIndex(dir: string, env: NodeJS.ProcessEnv, paths: string[]) {
+async function existingIndex(dir: string, env: Record<string, string | undefined>, paths: string[]) {
   const found = new Map<string, { sha: string; mode: string }>();
   if (!paths.length) return found;
   // Read only paths needed by mode changes/renames; never enumerate full ancestry.
