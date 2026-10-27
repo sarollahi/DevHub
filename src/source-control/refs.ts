@@ -118,7 +118,38 @@ export async function mutateReference(repositoryId: string, actor: SourceActor, 
   };
   const existing = await replay();
   if (existing) return existing;
-  const transact = async () => db.$transaction(async tx => {
+  const transact = async () => db.$transaction(tx =>
+    mutateWithinTransaction(tx, repositoryId, actor, input, hash, byMutation),
+    { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 15000, timeout: 30000 });
+  // The only automatic retry is a PostgreSQL serialization/deadlock failure.
+  // Version conflicts are never retried against a newer version.
+  for (let i = 0; i < 3; i++) {
+    try { return await transact(); }
+    catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        const committed = await replay();
+        if (committed) return committed;
+        throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference was concurrently changed");
+      }
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2034" && i < 2) continue;
+      throw err;
+    }
+  }
+  throw new Error("Unreachable transaction retry state");
+}
+
+
+type MutationKey = { repositoryId_name_mutationId: { repositoryId: string; name: string; mutationId: string } };
+function mutationHash(input: RefMutationRequest) {
+  return sha([input.operation, input.name, input.mutationId, input.expectedGeneration,
+    input.expectedChangesetId ?? null, input.changesetId ?? null, input.kind ?? null,
+    !!input.force, input.reason?.trim() ?? null]);
+}
+
+// Shared native policy engine. All Git batch mutations use exactly the same
+// authorization, protected ref, approval, validation, and audit rules.
+async function mutateWithinTransaction(tx: Prisma.TransactionClient, repositoryId: string,
+  actor: SourceActor, input: RefMutationRequest, hash: string, byMutation: MutationKey) {
     await assertRepositoryPermission(actor, repositoryId, "ref:update", { branch: input.name }, tx);
     if (input.force) await assertRepositoryPermission(actor, repositoryId, "admin", {}, tx);
     // Recheck inside the transaction. Unique constraints close the simultaneous
@@ -228,22 +259,54 @@ export async function mutateReference(repositoryId: string, actor: SourceActor, 
       kind: `source.ref.${input.operation.toLowerCase()}`, payload,
     } });
     return { ref: snapshot(mutation), replayed: false, eventId: mutation.id };
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 15000, timeout: 30000 });
-  // The only automatic retry is a PostgreSQL serialization/deadlock failure.
-  // Version conflicts are never retried against a newer version.
-  for (let i = 0; i < 3; i++) {
-    try { return await transact(); }
-    catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-        const committed = await replay();
-        if (committed) return committed;
-        throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference was concurrently changed");
+
+}
+
+
+// A Git receive-pack can update several independent native refs atomically.
+// A policy failure or version race rolls back the entire set and its audit log.
+export async function mutateReferencesBatch(repositoryId: string, actor: SourceActor,
+  requested: RefMutationRequest[]) {
+  if (!requested.length || requested.length > 32) {
+    throw new SourceControlError(422, "INVALID_BATCH", "Git pushes may change 1 to 32 refs");
+  }
+  const names = requested.map(x => x.name);
+  if (new Set(names).size !== names.length) {
+    throw new SourceControlError(422, "DUPLICATE_REFERENCE", "One update per Git ref is allowed");
+  }
+  const inputs = [...requested].sort((a, b) => a.name.localeCompare(b.name));
+  for (const input of inputs) {
+    validateMutation(input);
+    await assertRepositoryPermission(actor, repositoryId, "ref:update", { branch: input.name });
+    if (input.force) await assertRepositoryPermission(actor, repositoryId, "admin");
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await db.$transaction(async tx => {
+        const results = [];
+        for (const input of inputs) {
+          const key = { repositoryId_name_mutationId: {
+            repositoryId, name: input.name, mutationId: input.mutationId,
+          } };
+          results.push(await mutateWithinTransaction(tx, repositoryId, actor, input,
+            mutationHash(input), key));
+        }
+        if (results.some(x => x.replayed) && !results.every(x => x.replayed)) {
+          throw new SourceControlError(409, "BATCH_REPLAY_CONFLICT",
+            "Git batch replay does not match an already committed atomic update");
+        }
+        return results;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        maxWait: 15000, timeout: 120000 });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034" && attempt < 2) continue;
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        throw new SourceControlError(409, "REFERENCE_CONFLICT", "Native ref changed during Git batch");
       }
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2034" && i < 2) continue;
-      throw err;
+      throw error;
     }
   }
-  throw new Error("Unreachable transaction retry state");
+  throw new SourceControlError(409, "REFERENCE_CONFLICT", "Git batch could not acquire a stable native ref");
 }
 
 export async function listReferences(repositoryId: string, includeDeleted = false, actor?: SourceActor) {
