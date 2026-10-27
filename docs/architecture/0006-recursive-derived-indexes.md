@@ -16,7 +16,7 @@ change publication, validation, merge authorization or object ownership.
 | directory | None | Immutable snapshot root | Verified root identifier and availability |
 | history | All parents | Operations and ancestry generation | Sparse changed-path postings, with explicit rename source roles |
 | impact | Parent's impact | Operations and path summary | Per-change impact and first-parent cumulative work |
-| blame | Parent's blame | Change history | Provenance dependency marker; line mapping remains on-demand |
+| blame | Parent's blame | Changed files and parent line state | Bounded sparse per-file immutable line origins, with explicit unavailable markers |
 
 The computation interface is generic: a kind declares whether it needs parent
 results, which same-revision computations must complete first, and a deterministic
@@ -61,7 +61,7 @@ a background index must not invent one. Historical v2 root migration is the
 separate resumable process documented in
 `docs/architecture/0005-scalable-snapshot-indexes.md`.
 
-File-history postings are sparse (O(changed paths)), jump rows are O(log history
+File-history and blame postings are sparse (O(changed paths)), jump rows are O(log history
 depth) per changeset, and worker batches and read-page sizes are bounded. The
 posting scan has a 20,000-candidate guard, after which the canonical query is
 used. This can still be expensive on cold and highly branched histories.
