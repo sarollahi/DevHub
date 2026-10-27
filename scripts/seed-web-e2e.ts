@@ -2,6 +2,8 @@
 import { createHash } from "node:crypto";
 import { db } from "../src/lib/prisma";
 import { objectId } from "../src/source-control/storage";
+import { SnapshotTree } from "../src/source-control/snapshot-tree";
+import { applyHistoricalOperations } from "../src/source-control/snapshot-backfill";
 import { enqueueSearchObjects, indexSearchBatch } from "../src/workers/search-indexer";
 
 async function main() {
@@ -36,6 +38,29 @@ async function main() {
         { path: "src/hello.ts", kind: "MODIFY", objectId: hashes[1], fileMode: "100644", position: 0 },
         { path: "README.md", kind: "ADD", objectId: hashes[2], fileMode: "100644", position: 1 },
       ] } }, update: {} });
+  // Browser fixtures bypass native publication, so publish their exact derived
+  // immutable roots before any UI indexed read.
+  await db.$transaction(async tx => {
+    const tree = new SnapshotTree(tx);
+    let root = await applyHistoricalOperations(tree, tree.empty(), [{
+      kind: "ADD", path: "src/hello.ts", previousPath: null,
+      objectId: hashes[0], fileMode: "100644",
+    }]);
+    await tree.persist(root);
+    await tx.sourceSnapshotRoot.createMany({
+      data: [{ repositoryId: repo.id, changesetId: first, rootId: root }], skipDuplicates: true,
+    });
+    root = await applyHistoricalOperations(tree, root, [
+      { kind: "MODIFY", path: "src/hello.ts", previousPath: null,
+        objectId: hashes[1], fileMode: "100644" },
+      { kind: "ADD", path: "README.md", previousPath: null,
+        objectId: hashes[2], fileMode: "100644" },
+    ]);
+    await tree.persist(root);
+    await tx.sourceSnapshotRoot.createMany({
+      data: [{ repositoryId: repo.id, changesetId: second, rootId: root }], skipDuplicates: true,
+    });
+  });
   await db.sourceReference.upsert({ where: { repositoryId_name: { repositoryId: repo.id, name: "main" } },
     create: { repositoryId: repo.id, name: "main", changesetId: second, kind: "BRANCH" },
     update: { changesetId: second } });
