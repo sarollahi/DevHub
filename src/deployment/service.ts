@@ -108,7 +108,8 @@ export async function processNextDeployment():Promise<boolean> {
        data:{state:terminal?"FAILED":blocked?"WAITING_VALIDATION":"RETRY",
        leaseToken:null,leaseUntil:null,
        nextAttemptAt:future(blocked?30000:Math.min(120000,1000*2**job.attempts)),
-       lastError:message,...(terminal?{completedAt:new Date()}:{})}});
+       lastError:message,...(blocked?{attempts:{decrement:1}}:{}),
+       ...(terminal?{completedAt:new Date()}:{})}});
      if(updated.count)await tx.auditEvent.create({data:{
        repositoryId:job.repositoryId,actorType:"SYSTEM",actorId:"deployment-worker",
        action:"deployment."+ (terminal?"failed":blocked?"waiting_validation":"retry"),

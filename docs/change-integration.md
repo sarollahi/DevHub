@@ -10,7 +10,7 @@ DevHub prepares immutable native changesets concurrently and serializes only the
 4. A clean result produces a new immutable merge changeset with the observed branch revision as its first parent. No ref moves during this expensive preparation.
 5. Existing isolated validation runners must produce signed successful evidence for the source revision, the merged-target snapshot, and the final merged-result snapshot. Every protected branch requires these stages. Review and approval decisions are exact-revision bound.
 6. The final transaction rechecks current actor permissions, branch policies, ref generation and revision, all signed validation evidence, and human approvals for both source and result. It atomically increments the ref generation, writes ref mutation history and the outbox event, records audit history, and marks integration complete.
-7. A competing ref update causes a bounded rebase/retry against its new immutable head, including fresh checks. Conflicting changes require explicit resolution. No two writers simultaneously publish into the same reference generation.
+7. A competing ref update causes a bounded rebase/retry against its new immutable head, including fresh checks. Nonoverlapping UTF-8 line changes can be automatically reconciled after independent bounded object verification; ambiguous content and binary conflicts require explicit resolution. No two writers simultaneously publish into the same reference generation.
 
 ## Protected ref rules
 
@@ -35,10 +35,14 @@ Run migrations, review and validation workers, and `npm run worker:integration`.
 
 The light-themed `/merge-queue` UI supports requests, retries, conflict resolutions, reverts and pre-deployment checks.
 
+## Trusted deployment execution
+
+A signed deployment controller is used instead of executing arbitrary scripts inside the web process. An administrator configures `DEPLOYMENT_CONTROLLERS_JSON` with an HTTPS controller and repository allowlist, plus its HMAC key in a server-side environment variable. A human administrator submits `POST /api/v2/repositories/:id/deployments` with `integrationId`, `environment`, and `requestKey`. Start `npm run worker:deployment`. The worker rechecks the exact integrated branch revision and signed pre-deployment gate before dispatch; controllers must deduplicate deployment UUIDs and return signed receipts. Receipt callback: `POST /api/v2/deployments/:deploymentId/receipt`. See [deployment threat model](security/integration-threat-model.md).
+
 ## Explicit limitations
 
-- This is conservative whole-file identity merging, not automatic line-level or semantic conflict resolution.
-- Pre-deployment readiness is not a deployment executor. A deployment system must independently recheck current target revision and policies when executing.
-- The initial protected/default-ref bootstrap is handled by existing authorization code, which predates signed integration checks. Restrict bootstrap privileges in production; this milestone does not add a new signed bootstrap mechanism.
+- Automatic content merging is limited to safely disjoint edits in bounded UTF-8 text; semantic equivalence, binary and rename ambiguity still require independent reviewed resolution.
+- A durable controller dispatch/receipt system executes authorized deployment requests. Deployment succeeds only on a valid signed success receipt from the configured controller; external rollout availability and independent end-to-end controller testing remain deployment prerequisites.
+- Initial protected/default-ref creation now requires `POST /api/v2/repositories/:id/refs/bootstrap`, a human administrator, completed review, exact approval, and authenticated signed validation tasks. Legacy protected CREATE is rejected.
 - Incremental Git synchronization into an existing protected ref is rejected by the older direct-update path. Import into a nonprotected staging branch, then promote via integration.
-- Production load testing under millions of changes and cross-service deployment authorization are future operational work.
+- The included repeatable synthetic performance benchmark is not proof of production-scale end-to-end throughput. Independent penetration testing and production-like distributed load testing remain release gates.

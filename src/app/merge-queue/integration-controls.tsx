@@ -7,6 +7,7 @@ export default function IntegrationControls({repositoryId,refs=[],jobId,status,c
  const [source,setSource]=useState("");
  const [target,setTarget]=useState(refs[0]??"");
  const [resolution,setResolution]=useState("");
+ const [environment,setEnvironment]=useState("production");
  const [busy,setBusy]=useState(false);
  const [message,setMessage]=useState("");
  const api="/api/v2/repositories/"+repositoryId+"/integrations";
@@ -27,6 +28,13 @@ export default function IntegrationControls({repositoryId,refs=[],jobId,status,c
    <button disabled={busy} onClick={()=>void send(api+"/"+jobId+"/retry")}>Retry / reauthorize</button>:null}
   {status==="INTEGRATED"?<>
    <button disabled={busy} onClick={()=>void send(api+"/"+jobId+"/deployment")}>Pre-deploy checks</button>
+   <div className="integration-resolution">
+    <input aria-label="Deployment environment" placeholder="Environment"
+      value={environment} onChange={e=>setEnvironment(e.target.value)}/>
+    <button disabled={busy||!/^[a-z0-9][a-z0-9_-]{0,79}$/.test(environment)}
+      onClick={()=>void send("/api/v2/repositories/"+repositoryId+"/deployments",{
+        integrationId:jobId,environment,requestKey:"deploy-"+crypto.randomUUID()})}>Deploy via controller</button>
+   </div>
    <button disabled={busy} onClick={()=>void send(api+"/"+jobId+"/revert")}>Create revert</button>
   </>:null}
   {status==="CONFLICTED"?<div className="integration-resolution">

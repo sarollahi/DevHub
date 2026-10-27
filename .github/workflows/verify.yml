@@ -99,6 +99,8 @@ jobs:
       - name: Multi-gigabyte streaming and bounded-RSS verification
         if: github.ref_name == 'feature/immutable-object-storage' || github.head_ref == 'feature/immutable-object-storage'
         run: timeout --signal=TERM 600s npm run storage:stress
+      - name: Integration merge-tree performance and correctness
+        run: npm run bench:integration -- --count=12000 --workers=16 --paths=80
       - name: Source-control DAG benchmark smoke test
         run: npm run bench:source-query -- --depth=900 --width=16 --layers=12
       - name: Shared object cache cold and warm CI benchmark
