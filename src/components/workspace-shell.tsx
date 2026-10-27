@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import Icon, { type IconName } from "./icons";
 
 const nav: { title: string; href: string; icon: IconName }[] = [
+  { title: "Intelligent review", href: "/reviews", icon: "shield" },
   { title: "Contribution inbox", href: "/inbox", icon: "inbox" },
   { title: "Merge queue", href: "/merge-queue", icon: "git-merge" },
   { title: "Repositories", href: "/repositories", icon: "folder-git" },
