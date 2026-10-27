@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { validPath } from "@/lib/review-logic";
 import { requireRepositoryAccess, sourceFailure } from "@/source-control/http";
-import { getCanonicalSnapshot } from "@/source-control/canonical";
+import { getCanonicalSnapshot, getCanonicalSnapshotPage } from "@/source-control/canonical";
 import { SourceControlError } from "@/source-control/contracts";
 export const runtime = "nodejs";
 
@@ -13,6 +13,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (selects.length > 128 || selects.some(x => !/^[fd]:/.test(x) ||
       (x !== "d:." && !validPath(x.slice(2))))) {
       throw new SourceControlError(422, "INVALID_SELECTION", "Expected select=f:path or select=d:path");
+    }
+    const q = request.nextUrl.searchParams;
+    if (q.has("limit") || q.has("cursor") || q.has("directory")) {
+      if (selects.length) throw new SourceControlError(422, "INVALID_SELECTION",
+        "Use directory/limit/cursor for paginated reads, or select for the legacy response");
+      const limit = Number(q.get("limit") ?? 200);
+      const result = await getCanonicalSnapshotPage(id, changesetId, actor,
+        limit, q.get("cursor") ?? "", q.get("directory") ?? "");
+      return NextResponse.json({ apiVersion: 2, ...result });
     }
     const state = await getCanonicalSnapshot(id, changesetId, actor);
     const entries = selects.length ? state.entries.filter(entry => selects.some(selector => {
