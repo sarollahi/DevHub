@@ -30,11 +30,11 @@ export async function GET(req: NextRequest, { params }: Context) {
 export async function PUT(req: NextRequest, { params }: Context) {
   try {
     const { id } = await params;
-    const { ownerId } = await requireRepositoryAccess(req, id, "refs:write", true);
+    const { actor } = await requireRepositoryAccess(req, id, "admin", true);
     const parsed = policySchema.safeParse(await req.json().catch(() => null));
     if (!parsed.success) throw new SourceControlError(422, "INVALID_INPUT", "Invalid reference policy");
     const { name, ...settings } = parsed.data;
-    const policy = await updateReferencePolicy(id, ownerId, name, settings);
+    const policy = await updateReferencePolicy(id, actor, name, settings);
     return NextResponse.json({ apiVersion: 1, policy });
   } catch (error) { return sourceFailure(error); }
 }

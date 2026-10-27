@@ -7,7 +7,7 @@ import { db } from "../src/lib/prisma";
 import { tokenHash } from "../src/lib/auth";
 import { createCanonicalChangeset, stageCanonicalBlob, getCanonicalChangeset, getCanonicalSnapshot, listCanonicalEvents } from "../src/source-control/canonical";
 import { getObject } from "../src/source-control/service";
-import { ancestryQuery, compareQuery, treeQuery, resolvePath, fileHistory, blameQuery, pathImpactQuery } from "../src/source-control/query";
+import { runAuthorizedQuery, ancestryQuery, compareQuery, treeQuery, resolvePath, fileHistory, blameQuery, pathImpactQuery } from "../src/source-control/query";
 import { SourceControlError } from "../src/source-control/contracts";
 import { POST as publishApi } from "../src/app/api/v2/repositories/[id]/changesets/route";
 import { POST as blobApi } from "../src/app/api/v2/repositories/[id]/objects/route";
@@ -27,11 +27,18 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
   const token = randomBytes(32).toString("hex");
   const foreignToken = randomBytes(32).toString("hex");
   await db.agentCredential.createMany({ data: [
-    { agentId: agent.id, tokenHash: tokenHash(token), label: "integration" },
-    { agentId: foreignAgent.id, tokenHash: tokenHash(foreignToken), label: "integration" },
+    { agentId: agent.id, tokenHash: tokenHash(token), label: "integration", scopes: ["changesets:read", "changesets:write"], expiresAt: new Date(Date.now()+3600000) },
+    { agentId: foreignAgent.id, tokenHash: tokenHash(foreignToken), label: "integration", scopes: ["changesets:read", "changesets:write"], expiresAt: new Date(Date.now()+3600000) },
   ] });
-  const actor = { type: "AGENT" as const, id: agent.id };
-  const stage = async (raw: string | Buffer) => (await stageCanonicalBlob(repo.id, encode(raw))).id;
+  const credential = await db.agentCredential.findUniqueOrThrow({ where: { tokenHash: tokenHash(token) } });
+  const foreignCredential = await db.agentCredential.findUniqueOrThrow({ where: { tokenHash: tokenHash(foreignToken) } });
+  await db.agentDelegation.createMany({ data: [
+    { agentId: agent.id, repositoryId: repo.id, delegatedBy: user.id, scopes: ["changesets:read","changesets:write"], expiresAt: new Date(Date.now()+3600000) },
+    { agentId: foreignAgent.id, repositoryId: foreign.id, delegatedBy: stranger.id, scopes: ["changesets:read","changesets:write"], expiresAt: new Date(Date.now()+3600000) },
+  ] });
+  const actor = { type: "AGENT" as const, id: agent.id, credentialId: credential.id };
+  await runAuthorizedQuery(actor, repo.id, async () => {
+  const stage = async (raw: string | Buffer) => (await stageCanonicalBlob(repo.id, actor, encode(raw))).id;
   const alpha = await stage("alpha");
   const beta = await stage("beta");
   const empty = await stage("");
@@ -50,7 +57,7 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
   await t.test("content identity, delta-only persistence, events, and immutable replay", async () => {
     assert.equal(root.created, true);
     assert.match(root.id, /^[a-f0-9]{64}$/);
-    const read = await getCanonicalChangeset(repo.id, root.id);
+    const read = await getCanonicalChangeset(repo.id, root.id, actor);
     assert.equal(read.treeId, null);
     assert.equal(read.operations.length, 3);
     assert.equal(read.authorId, "AGENT:" + agent.id);
@@ -58,10 +65,10 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     assert.equal((await make("root", [], rootOps, "root-key")).created, false);
     await assert.rejects(() => make("different", [], [], "root-key"), expects("IDEMPOTENCY_CONFLICT"));
     assert.equal(await db.sourceChangesetEvent.count({ where: { changesetId: root.id } }), 1);
-    assert.deepEqual((await getCanonicalSnapshot(repo.id, root.id)).entries.map(x => x.path),
+    assert.deepEqual((await getCanonicalSnapshot(repo.id, root.id, actor)).entries.map(x => x.path),
       ["assets/binary.bin", "docs/a.txt", "docs/empty"]);
-    assert.equal((await getObject(repo.id, binary)).dataBase64, encode(Buffer.from([0, 255, 1, 128])));
-    await assert.rejects(() => getObject(repo.id, orphan), expects("NOT_FOUND"));
+    assert.equal((await getObject(repo.id, binary, actor)).dataBase64, encode(Buffer.from([0, 255, 1, 128])));
+    await assert.rejects(() => getObject(repo.id, orphan, actor), expects("NOT_FOUND"));
     await assert.rejects(() => db.sourceChangeset.delete({ where: { id: root.id } }));
     await assert.rejects(() => db.sourceObject.update({ where: { id: alpha }, data: { byteSize: 8 } }));
   });
@@ -75,14 +82,14 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     { kind: "DELETE", path: "docs/empty" },
   ]);
   await t.test("branching DAG, merge resolution, symlinks, executable bits and binary contents", async () => {
-    const snapshot = await getCanonicalSnapshot(repo.id, merge.id);
+    const snapshot = await getCanonicalSnapshot(repo.id, merge.id, actor);
     assert.deepEqual(snapshot.entries.map(x => x.path), ["assets/binary.bin", "docs/copy", "docs/renamed"]);
     assert.equal(snapshot.entries.find(x => x.path === "docs/copy")?.objectId, beta);
     assert.equal(snapshot.entries.find(x => x.path === "assets/binary.bin")?.mode, "100644");
-    assert.equal((await getCanonicalSnapshot(repo.id, right.id)).entries.find(x => x.path === "links/doc")?.mode, "120000");
-    assert.deepEqual((await getCanonicalChangeset(repo.id, merge.id)).parents.map(x => x.parentId), [left.id, right.id]);
+    assert.equal((await getCanonicalSnapshot(repo.id, right.id, actor)).entries.find(x => x.path === "links/doc")?.mode, "120000");
+    assert.deepEqual((await getCanonicalChangeset(repo.id, merge.id, actor)).parents.map(x => x.parentId), [left.id, right.id]);
     assert.equal(await db.sourceReference.count({ where: { repositoryId: repo.id } }), 0);
-    assert.equal((await listCanonicalEvents(repo.id)).length, 4);
+    assert.equal((await listCanonicalEvents(repo.id, 30, actor)).length, 4);
   });
 
   await t.test("v2 delta changesets are queryable without client checkout", async () => {
@@ -148,7 +155,7 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     let seed = 1731;
     const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed; };
     type Entry = { objectId: string; mode: string };
-    const starting = await getCanonicalSnapshot(repo.id, root.id);
+    const starting = await getCanonicalSnapshot(repo.id, root.id, actor);
     const states = new Map<string, Map<string, Entry>>([[root.id, new Map(starting.entries.map(e =>
       [e.path, { objectId: e.objectId, mode: e.mode }]))]]);
     const history: string[] = [];
@@ -186,12 +193,12 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
       const created = await make("generated property " + i, [parent], [action]);
       history.push(created.id);
       states.set(created.id, state);
-      const actual = (await getCanonicalSnapshot(repo.id, created.id)).entries
+      const actual = (await getCanonicalSnapshot(repo.id, created.id, actor)).entries
         .map(e => [e.path, e.objectId, e.mode]);
       const expected = [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
         .map(([path, entry]) => [path, entry.objectId, entry.mode]);
       assert.deepEqual(actual, expected, "seed " + seed + ", case " + i + ", operation " + action.kind);
-      assert.equal((await getCanonicalChangeset(repo.id, created.id)).treeId, null);
+      assert.equal((await getCanonicalChangeset(repo.id, created.id, actor)).treeId, null);
     }
   });
 
@@ -219,7 +226,7 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
       body: JSON.stringify({ dataBase64: encode("HTTP payload") }),
     }), params);
     assert.equal(uploaded.status, 201);
-    await assert.rejects(() => createCanonicalChangeset(foreign.id, { type: "AGENT", id: foreignAgent.id },
+    await assert.rejects(() => createCanonicalChangeset(foreign.id, { type: "AGENT", id: foreignAgent.id, credentialId: foreignCredential.id },
       { apiVersion: 2, parents: [], description: "foreign read", operations: [
         { kind: "ADD", path: "private", objectId: alpha },
       ] }), expects("OBJECT_UNAVAILABLE"));
@@ -235,4 +242,5 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
 
   // The v2 log is append-only. Tests require an isolated database and do not
   // delete canonical fixture records after publication.
+  });
 });

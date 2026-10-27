@@ -1,12 +1,22 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { ensureIndexJob } from "../workers/query-indexer";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
-import { SourceControlError, type TreeEntry } from "./contracts";
+import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
 import { decodeTree, encodeTree, objectId } from "./storage";
 import { getTree as readTree } from "./service";
 import { verifiedBlobStream } from "../object-store/service";
 import { blameLines, compareEntries, mergeEntries, textPatch } from "./query-algorithms";
 
+const queryContext = new AsyncLocalStorage<{ actor: SourceActor; repositoryId: string }>();
+export function runAuthorizedQuery<T>(actor: SourceActor, repositoryId: string, task: () => Promise<T>): Promise<T> {
+  return queryContext.run({ actor, repositoryId }, task);
+}
+function requireQueryActor(repositoryId: string): SourceActor {
+  const access = queryContext.getStore();
+  if (!access || access.repositoryId !== repositoryId) throw new SourceControlError(401, "UNAUTHORIZED", "Authenticated query context required");
+  return access.actor;
+}
 const digest = /^[a-f0-9]{64}$/;
 const chunks = <T>(values: T[], size = 800): T[][] =>
   Array.from({ length: Math.ceil(values.length / size) }, (_, i) => values.slice(i * size, (i + 1) * size));
@@ -20,7 +30,7 @@ async function cachedTree(repositoryId: string, id: string): Promise<TreeResult>
   const key = repositoryId + ":" + id;
   const cached = treeCache.get(key);
   if (cached) { treeCache.delete(key); treeCache.set(key, cached); return cached; }
-  const value = await readTree(repositoryId, id);
+  const value = await readTree(repositoryId, id, requireQueryActor(repositoryId));
   treeCache.set(key, value);
   if (treeCache.size > 24) treeCache.delete(treeCache.keys().next().value!);
   return value;
@@ -28,6 +38,7 @@ async function cachedTree(repositoryId: string, id: string): Promise<TreeResult>
 
 
 export async function resolveRevision(repositoryId: string, revision: string): Promise<string> {
+  requireQueryActor(repositoryId);
   if (!revision || revision.length > 200) throw new SourceControlError(422, "INVALID_REVISION", "A revision digest or reference name is required");
   const id = digest.test(revision)
     ? revision

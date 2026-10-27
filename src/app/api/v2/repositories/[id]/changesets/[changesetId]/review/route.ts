@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "@/lib/prisma";
 import { requireRepositoryAccess, sourceFailure, readBoundedJson } from "@/source-control/http";
 import { SourceControlError } from "@/source-control/contracts";
+import { assertRepositoryPermission } from "@/lib/authorization";
 
 export const runtime = "nodejs";
 type Context = { params: Promise<{ id: string; changesetId: string }> };
@@ -30,23 +31,24 @@ export async function GET(request: NextRequest, { params }: Context) {
 export async function POST(request: NextRequest, { params }: Context) {
   try {
     const { id, changesetId } = await params;
-    const { ownerId } = await requireRepositoryAccess(request, id, "changesets:approve", true);
+    const { actor } = await requireRepositoryAccess(request, id, "changesets:approve", true);
     const input = decision.safeParse(await readBoundedJson(request, 2048));
     if (!input.success) throw new SourceControlError(422, "INVALID_DECISION", "A decision and exact changeset ID are required");
     if (input.data.expectedChangesetId !== changesetId)
       throw new SourceControlError(409, "STALE_CHANGESET", "Decision does not match the reviewed immutable revision");
     const result = await db.$transaction(async tx => {
+      await assertRepositoryPermission(actor, id, "review", {}, tx);
       const change = await tx.sourceChangeset.findFirst({ where: { id: changesetId, repositoryId: id },
         include: { validation: true, review: true } });
       if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found in repository");
       if (input.data.decision === "APPROVED" && (
         change.validation?.state !== "SUCCESS" || change.review?.state !== "COMPLETED"
       )) throw new SourceControlError(409, "REVIEW_INCOMPLETE", "Integrity checks and native analysis must finish before approval");
-      await tx.sourceChangeApproval.upsert({ where: { changesetId_userId: { changesetId, userId: ownerId } },
-        create: { changesetId, userId: ownerId, decision: input.data.decision },
+      await tx.sourceChangeApproval.upsert({ where: { changesetId_userId: { changesetId, userId: actor.id } },
+        create: { changesetId, userId: actor.id, decision: input.data.decision },
         update: { decision: input.data.decision, createdAt: new Date() },
       });
-      await tx.auditEvent.create({ data: { repositoryId: id, actorType: "HUMAN", actorId: ownerId,
+      await tx.auditEvent.create({ data: { repositoryId: id, actorType: "HUMAN", actorId: actor.id,
         action: input.data.decision === "APPROVED" ? "changeset.review.approved" : "changeset.review.changes_requested",
         subjectId: changesetId,
         metadata: { changesetId, reviewedFingerprint: change.review?.fingerprint ?? null,

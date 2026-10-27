@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    await requireRepositoryAccess(request, id, "changesets:write");
+    const { actor } = await requireRepositoryAccess(request, id, "changesets:write");
     // Decode only after checking JSON API size. Large-object uploads require a
     // separately bounded streaming storage endpoint.
     if (Number(request.headers.get("content-length") || "0") > 6_000_000) {
@@ -14,7 +14,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
     const body = await readBoundedJson(request, 6_000_000);
     const dataBase64 = body && typeof body === "object" && "dataBase64" in body ? body.dataBase64 : undefined;
-    const result = await stageCanonicalBlob(id, dataBase64);
+    const result = await stageCanonicalBlob(id, actor, dataBase64);
     return NextResponse.json({ apiVersion: 2, ...result }, { status: 201 });
   } catch (error) { return sourceFailure(error); }
 }

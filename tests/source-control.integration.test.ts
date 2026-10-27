@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { NextRequest } from "next/server";
 import { db } from "../src/lib/prisma";
 import { tokenHash } from "../src/lib/auth";
+import { testSession } from "./support/identities";
 import { createChangeset, getChangeset, getObject, getTree, approveChangeset, advanceReference } from "../src/source-control/service";
 import { SourceControlError } from "../src/source-control/contracts";
 import { objectId, encodeTree } from "../src/source-control/storage";
@@ -22,20 +23,23 @@ test("native source control against real PostgreSQL, with immutable branchless h
   const secret = randomBytes(32).toString("hex");
   const foreignSecret = randomBytes(32).toString("hex");
   await db.agentCredential.createMany({ data: [
-    { agentId: agent.id, tokenHash: tokenHash(secret), label: "test" },
-    { agentId: foreignAgent.id, tokenHash: tokenHash(foreignSecret), label: "foreign" },
+    { agentId: agent.id, tokenHash: tokenHash(secret), label: "test", scopes: ["changesets:read", "changesets:write"], expiresAt: new Date(Date.now()+3600000) },
+    { agentId: foreignAgent.id, tokenHash: tokenHash(foreignSecret), label: "foreign", scopes: ["changesets:read", "changesets:write"], expiresAt: new Date(Date.now()+3600000) },
   ] });
+  const credential = await db.agentCredential.findUniqueOrThrow({ where: { tokenHash: tokenHash(secret) } });
+  await db.agentDelegation.create({ data: { agentId: agent.id, repositoryId: repo.id, delegatedBy: user.id,
+    scopes: ["changesets:read", "changesets:write"], expiresAt: new Date(Date.now()+3600000) } });
+  const human = await testSession(user.id);
   const ids: string[] = [];
   const blobs: string[] = [];
   const rootUri = `http://localhost:3000/api/v1/repositories/${repo.id}`;
   const routes = { params: Promise.resolve({ id: repo.id }) };
-  const ownerToken = process.env.ADMIN_TOKEN!;
   const headers = { authorization: `Bearer ${secret}`, "content-type": "application/json" };
-  const adminHeaders = { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" };
+  const adminHeaders = { ...human.headers, "content-type": "application/json" };
   const dataBase64 = (text: string) => Buffer.from(text, "utf8").toString("base64");
   const firstInput = { apiVersion: 1 as const, parents: [], message: "Initial immutable document",
     operations: [{ kind: "PUT" as const, path: "docs/intro.md", dataBase64: dataBase64("hello native storage") }] };
-  const actor = { id: agent.id, type: "AGENT" as const };
+  const actor = { id: agent.id, type: "AGENT" as const, credentialId: credential.id };
   const inserted = async (body: unknown) => {
     const receipt = await createChangeset(repo.id, actor, body);
     ids.push(receipt.id);
@@ -51,6 +55,7 @@ test("native source control against real PostgreSQL, with immutable branchless h
     await db.sourceChangeset.deleteMany({ where: { id: { in: ids } } });
     await db.sourceObject.deleteMany({ where: { id: { in: blobs } } });
     await db.auditEvent.deleteMany({ where: { repositoryId: { in: [repo.id, otherRepo.id] } } });
+    await db.humanSession.deleteMany({ where: { userId: user.id } });
     await db.agentIdentity.deleteMany({ where: { ownerId: { in: [user.id, outsider.id] } } });
     await db.repository.deleteMany({ where: { id: { in: [repo.id, otherRepo.id] } } });
     await db.user.deleteMany({ where: { id: { in: [user.id, outsider.id] } } });
@@ -63,12 +68,12 @@ test("native source control against real PostgreSQL, with immutable branchless h
     assert.equal(first.created, true);
     assert.match(first.id, /^[a-f0-9]{64}$/);
     assert.equal(first.treeId, objectId("TREE", encodeTree([{ path: "docs/intro.md", objectId: blobs[1] }])));
-    assert.deepEqual((await getTree(repo.id, first.id)).entries, [{ path: "docs/intro.md", objectId: blobs[1] }]);
-    assert.equal((await getObject(repo.id, blobs[1])).dataBase64, dataBase64("hello native storage"));
+    assert.deepEqual((await getTree(repo.id, first.id, actor)).entries, [{ path: "docs/intro.md", objectId: blobs[1] }]);
+    assert.equal((await getObject(repo.id, blobs[1], actor)).dataBase64, dataBase64("hello native storage"));
     assert.equal((await inserted(firstInput)).created, false);
     assert.equal(await db.sourceChangeset.count({ where: { repositoryId: repo.id } }), 1);
     assert.equal(await db.sourceReference.count({ where: { repositoryId: repo.id } }), 0);
-    const snapshot = await getChangeset(repo.id, first.id);
+    const snapshot = await getChangeset(repo.id, first.id, actor);
     assert.equal(snapshot?.validation?.state, "SUCCESS");
     assert.equal(snapshot?.operations.length, 1);
   });
@@ -88,7 +93,7 @@ test("native source control against real PostgreSQL, with immutable branchless h
     assert.equal((await listChangesets(new NextRequest(`${rootUri}/changesets`, { headers: {
       authorization: `Bearer ${foreignSecret}`,
     } }), routes)).status, 403);
-    await assert.rejects(() => getObject(otherRepo.id, blobs[1]), (e: unknown) => e instanceof SourceControlError && e.status === 404);
+    await assert.rejects(() => getObject(otherRepo.id, blobs[1], actor), (e: unknown) => e instanceof SourceControlError && e.status === 403);
   });
 
   const updatedInput = { apiVersion: 1 as const, parents: [first.id], message: "Move and edit history",
@@ -100,9 +105,9 @@ test("native source control against real PostgreSQL, with immutable branchless h
   blobs.push(updated.treeId, objectId("BLOB", Buffer.from("export const value = 7;")));
 
   await t.test("parent chains, file operations and tree state are persisted correctly", async () => {
-    const child = await getChangeset(repo.id, updated.id);
+    const child = await getChangeset(repo.id, updated.id, actor);
     assert.deepEqual(child?.parents.map(p => p.parentId), [first.id]);
-    assert.deepEqual((await getTree(repo.id, updated.id)).entries.map(x => x.path), ["docs/moved.md", "src/entry.ts"]);
+    assert.deepEqual((await getTree(repo.id, updated.id, actor)).entries.map(x => x.path), ["docs/moved.md", "src/entry.ts"]);
     assert.equal(child?.operations.find(o => o.path === "docs/moved.md")?.previousPath, "docs/intro.md");
     assert.equal(await db.sourceReference.count({ where: { repositoryId: repo.id } }), 0);
     await assert.rejects(() => inserted({ ...updatedInput, parents: ["f".repeat(64)] }),
@@ -114,34 +119,34 @@ test("native source control against real PostgreSQL, with immutable branchless h
   await t.test("database enforces immutability of both objects and committed changesets", async () => {
     await assert.rejects(() => db.sourceObject.update({ where: { id: first.treeId }, data: { byteSize: 1 } }));
     await assert.rejects(() => db.sourceChangeset.update({ where: { id: first.id }, data: { message: "tamper" } }));
-    assert.equal((await getChangeset(repo.id, first.id))?.message, firstInput.message);
-    assert.equal((await getTree(repo.id, first.id)).entries.length, 1);
+    assert.equal((await getChangeset(repo.id, first.id, actor))?.message, firstInput.message);
+    assert.equal((await getTree(repo.id, first.id, actor)).entries.length, 1);
   });
 
   await t.test("human approval gates reference creation and CAS conflict detection", async () => {
-    await assert.rejects(() => advanceReference(repo.id, "main", first.id, null, user.id),
+    await assert.rejects(() => advanceReference(repo.id, "main", first.id, null, human.actor),
       (e: unknown) => e instanceof SourceControlError && e.code === "HUMAN_APPROVAL_REQUIRED");
     assert.equal((await putReference(new NextRequest(`${rootUri}/refs/main`, {
       method: "PUT", headers, body: JSON.stringify({ changesetId: first.id, expectedGeneration: null }),
-    }), { params: Promise.resolve({ id: repo.id, name: ["main"] }) })).status, 401);
+    }), { params: Promise.resolve({ id: repo.id, name: ["main"] }) })).status, 403);
     assert.equal((await postApproval(new NextRequest(`${rootUri}/changesets/${first.id}/approve`, {
       method: "POST", headers,
-    }), { params: Promise.resolve({ id: repo.id, changesetId: first.id }) })).status, 401);
+    }), { params: Promise.resolve({ id: repo.id, changesetId: first.id }) })).status, 403);
     const approval = await postApproval(new NextRequest(`${rootUri}/changesets/${first.id}/approve`, {
       method: "POST", headers: adminHeaders,
     }), { params: Promise.resolve({ id: repo.id, changesetId: first.id }) });
     assert.equal(approval.status, 200);
-    const ref = await advanceReference(repo.id, "main", first.id, null, user.id);
+    const ref = await advanceReference(repo.id, "main", first.id, null, human.actor);
     assert.equal(ref.generation, 1);
-    await assert.rejects(() => advanceReference(repo.id, "main", first.id, null, user.id),
+    await assert.rejects(() => advanceReference(repo.id, "main", first.id, null, human.actor),
       (e: unknown) => e instanceof SourceControlError && e.code === "REFERENCE_CONFLICT");
-    await assert.rejects(() => advanceReference(repo.id, "main", updated.id, 1, user.id),
+    await assert.rejects(() => advanceReference(repo.id, "main", updated.id, 1, human.actor),
       (e: unknown) => e instanceof SourceControlError && e.code === "HUMAN_APPROVAL_REQUIRED");
-    await approveChangeset(repo.id, updated.id, user.id);
-    const next = await advanceReference(repo.id, "main", updated.id, 1, user.id);
+    await approveChangeset(repo.id, updated.id, human.actor);
+    const next = await advanceReference(repo.id, "main", updated.id, 1, human.actor);
     assert.equal(next.generation, 2);
     assert.equal(next.changesetId, updated.id);
-    await assert.rejects(() => advanceReference(repo.id, "main", first.id, 1, user.id),
+    await assert.rejects(() => advanceReference(repo.id, "main", first.id, 1, human.actor),
       (e: unknown) => e instanceof SourceControlError && e.code === "REFERENCE_CONFLICT");
     assert.equal((await db.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: {
       repositoryId: repo.id, name: "main",
@@ -157,12 +162,12 @@ test("native source control against real PostgreSQL, with immutable branchless h
     assert.equal(new Set(results.map(x => x.id)).size, 5);
     for (let n = 0; n < results.length; n++) {
       blobs.push(results[n].treeId, objectId("BLOB", Buffer.from(`candidate ${n}`)));
-      assert.equal((await getChangeset(repo.id, results[n].id))?.parents[0].parentId, updated.id);
+      assert.equal((await getChangeset(repo.id, results[n].id, actor))?.parents[0].parentId, updated.id);
     }
     assert.equal(await db.sourceReference.count({ where: { repositoryId: repo.id } }), 1);
     const pair = await Promise.allSettled([
-      advanceReference(repo.id, "main", results[0].id, 2, user.id),
-      advanceReference(repo.id, "main", results[1].id, 2, user.id),
+      advanceReference(repo.id, "main", results[0].id, 2, human.actor),
+      advanceReference(repo.id, "main", results[1].id, 2, human.actor),
     ]);
     assert.ok(pair.every(p => p.status === "rejected"), "Unapproved candidates cannot advance a reference");
   });

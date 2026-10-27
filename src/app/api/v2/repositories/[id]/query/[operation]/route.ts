@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/prisma";
 import { validPath } from "@/lib/review-logic";
 import { requireRepositoryAccess, sourceFailure } from "@/source-control/http";
-import { ancestryQuery, fileHistory, diffQuery, blameQuery, mergeQuery } from "@/source-control/query";
+import { runAuthorizedQuery, ancestryQuery, fileHistory, diffQuery, blameQuery, mergeQuery } from "@/source-control/query";
 import { SourceControlError } from "@/source-control/contracts";
 
 export const runtime = "nodejs";
@@ -13,7 +13,8 @@ const necessary = (value: string | null, field: string): string => {
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string; operation: string }> }) {
   try {
     const { id, operation } = await params;
-    await requireRepositoryAccess(request, id, "changesets:read");
+    const { actor } = await requireRepositoryAccess(request, id, "changesets:read");
+    return runAuthorizedQuery(actor, id, async () => {
     const q = request.nextUrl.searchParams;
     const path = q.get("path");
     if (path && !validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid path");
@@ -45,5 +46,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       default: throw new SourceControlError(404, "NOT_FOUND", "Unknown query");
     }
     return NextResponse.json({ apiVersion: 2, ...result });
+    });
   } catch (error) { return sourceFailure(error); }
 }

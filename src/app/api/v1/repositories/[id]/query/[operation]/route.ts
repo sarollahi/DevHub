@@ -5,6 +5,7 @@ import {
   blameQuery, resolvePath, mergeQuery, rebaseQuery, pathImpactQuery,
 } from "@/source-control/query";
 import { SourceControlError } from "@/source-control/contracts";
+import { runAuthorizedQuery } from "@/source-control/query";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,7 +15,7 @@ export async function GET(req: NextRequest, { params }: {
 }) {
   try {
     const { id, operation } = await params;
-    await requireRepositoryAccess(req, id, "changesets:read");
+    const { actor } = await requireRepositoryAccess(req, id, "changesets:read");
     const q = req.nextUrl.searchParams;
     const required = (name: string) => {
       const value = q.get(name);
@@ -23,6 +24,7 @@ export async function GET(req: NextRequest, { params }: {
     };
     const count = Number(q.get("limit") ?? 50);
     let result: unknown;
+    return runAuthorizedQuery(actor, id, async () => {
     switch (operation) {
       case "ancestry":
         result = await ancestryQuery(id, required("revision"), q.get("other") ?? undefined, count);
@@ -59,6 +61,7 @@ export async function GET(req: NextRequest, { params }: {
     }
     return NextResponse.json({ apiVersion: 1, result }, {
       headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+    });
     });
   } catch (error) { return sourceFailure(error); }
 }

@@ -16,7 +16,7 @@ export async function POST(request:NextRequest,{params}:{params:Promise<{id:stri
     const parsed=input.safeParse(await readBoundedJson(request,4096));
     if(!parsed.success)return NextResponse.json({error:"INVALID_INPUT",issues:parsed.error.issues},{status:422});
     const {pipeline,created}=await submitValidation(id,parsed.data.changesetId,
-      parsed.data.targetChangesetId||null,parsed.data.idempotencyKey,actor.type+":"+actor.id);
+      parsed.data.targetChangesetId||null,parsed.data.idempotencyKey,actor);
     return NextResponse.json({apiVersion:2,id:pipeline.id,state:pipeline.state,
       statusUrl:"/api/v2/repositories/"+id+"/validations/"+pipeline.id},
       {status:created?202:200});

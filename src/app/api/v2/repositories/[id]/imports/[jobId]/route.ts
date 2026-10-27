@@ -20,7 +20,7 @@ export async function GET(request: NextRequest, { params }: Context) {
 export async function POST(request: NextRequest, { params }: Context) {
   try {
     const { id, jobId } = await params;
-    await requireRepositoryAccess(request, id, "changesets:write", true);
+    const { actor } = await requireRepositoryAccess(request, id, "changesets:write", true);
     await findJob(id, jobId);
     const input = await readBoundedJson(request, 1024);
     if (!input || typeof input !== "object" || !("action" in input)
@@ -28,7 +28,7 @@ export async function POST(request: NextRequest, { params }: Context) {
       throw new SourceControlError(422, "INVALID_INPUT", "Action must be resume or verify");
     }
     try {
-      const job = await requestGitImport(jobId, input.action === "verify");
+      const job = await requestGitImport(jobId, input.action === "verify", actor);
       return NextResponse.json({ apiVersion: 2, job }, { status: 202 });
     } catch (error) {
       throw new SourceControlError(409, "IMPORT_BUSY", error instanceof Error ? error.message : "Import already running");

@@ -76,6 +76,11 @@ model User {
   agents        AgentIdentity[] @relation("AgentOwner")
   approvals     Approval[]
   sourceApprovals SourceChangeApproval[]
+  passwordHash String?
+  disabledAt DateTime?
+  sessions HumanSession[]
+  memberships OrganizationMembership[]
+  teamMemberships TeamMembership[]
 }
 
 model Repository {
@@ -108,6 +113,13 @@ model Repository {
   gitImportBlobs GitImportBlob[]
   sourceReviews SourceReviewRequest[]
   sourceUploads SourceObjectUpload[]
+  organizationId String? @db.Uuid
+  maxStoredBytes BigInt @default(1073741824)
+  storedBytes BigInt @default(0)
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  accessGrants RepositoryGrant[]
+  delegations AgentDelegation[]
+  rateBuckets ApiRateBucket[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -123,6 +135,7 @@ model AgentIdentity {
   credentials  AgentCredential[]
   pullRequests PullRequest[]
   ingressBuckets IngressBucket[]
+  delegations AgentDelegation[]
   @@unique([ownerId, name])
 }
 
@@ -135,6 +148,7 @@ model AgentCredential {
   revokedAt   DateTime?
   createdAt   DateTime      @default(now())
   agent       AgentIdentity @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  scopes String[] @default([])
   @@index([agentId, revokedAt])
 }
 
@@ -697,6 +711,8 @@ model GitImportJob {
   id           String          @id @default(uuid()) @db.Uuid
   repositoryId String          @db.Uuid
   sourcePath   String
+  authorizedUserId String? @db.Uuid
+  authorizedSessionId String? @db.Uuid
   status       GitImportStatus @default(QUEUED)
   workerId     String?         @db.Uuid
   leaseUntil   DateTime?
@@ -805,4 +821,120 @@ model SourceReviewRequest {
   changeset SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Restrict)
   @@unique([repositoryId, changesetId, targetRef])
   @@index([repositoryId, createdAt(sort: Desc)])
+}
+
+enum MembershipRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum GrantEffect {
+  ALLOW
+  DENY
+}
+
+enum GrantSubject {
+  USER
+  TEAM
+  AGENT
+}
+
+model Organization {
+  id          String   @id @default(uuid()) @db.Uuid
+  slug        String   @unique
+  name        String
+  createdAt   DateTime @default(now())
+  maxRepositories Int @default(100)
+  maxRequestsPerMinute Int @default(600)
+  repositories Repository[]
+  memberships OrganizationMembership[]
+  teams       Team[]
+}
+
+model OrganizationMembership {
+  organizationId String @db.Uuid
+  userId         String @db.Uuid
+  role           MembershipRole @default(MEMBER)
+  joinedAt       DateTime @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([organizationId, userId])
+  @@index([userId])
+}
+
+model Team {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @db.Uuid
+  slug           String
+  name           String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members        TeamMembership[]
+  @@unique([organizationId, slug])
+}
+
+model TeamMembership {
+  teamId String @db.Uuid
+  userId String @db.Uuid
+  team   Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([teamId, userId])
+}
+
+model HumanSession {
+  id        String @id @default(uuid()) @db.Uuid
+  userId    String @db.Uuid
+  tokenHash String @unique @db.Char(64)
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, revokedAt])
+}
+
+model RepositoryGrant {
+  id           String @id @default(uuid()) @db.Uuid
+  repositoryId String @db.Uuid
+  subjectType  GrantSubject
+  subjectId    String @db.Uuid
+  capability   String
+  effect       GrantEffect @default(ALLOW)
+  pathPrefix   String?
+  branch       String?
+  expiresAt    DateTime?
+  createdAt    DateTime @default(now())
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@index([repositoryId, subjectType, subjectId, capability])
+}
+
+model AgentDelegation {
+  id           String @id @default(uuid()) @db.Uuid
+  agentId      String @db.Uuid
+  repositoryId String @db.Uuid
+  delegatedBy  String @db.Uuid
+  scopes       String[]
+  pathPrefix   String?
+  branch       String?
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime @default(now())
+  agent        AgentIdentity @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@index([agentId, repositoryId, revokedAt])
+}
+
+model ApiRateBucket {
+  repositoryId String @db.Uuid
+  actorKey     String
+  windowStart  DateTime
+  count        Int @default(0)
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@id([repositoryId, actorKey, windowStart])
+}
+
+model LoginRateBucket {
+  key String @db.Char(64)
+  windowStart DateTime
+  count Int @default(0)
+  @@id([key, windowStart])
 }

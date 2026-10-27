@@ -11,8 +11,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   try {
     const { id } = await params;
     const includeDeleted = req.nextUrl.searchParams.get("includeDeleted") === "true";
-    await requireRepositoryAccess(req, id, "changesets:read", includeDeleted);
-    return NextResponse.json({ apiVersion: 1, records: await listReferences(id, includeDeleted) });
+    const { actor } = await requireRepositoryAccess(req, id, "changesets:read", includeDeleted);
+    return NextResponse.json({ apiVersion: 1, records: await listReferences(id, includeDeleted, actor) });
   } catch (error) { return sourceFailure(error); }
 }
 
@@ -29,10 +29,10 @@ const restoreSchema = z.object({
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const { ownerId } = await requireRepositoryAccess(req, id, "refs:write", true);
+    const { actor } = await requireRepositoryAccess(req, id, "refs:write", false, { branch: (await req.clone().json().catch(() => null))?.name });
     const parsed = restoreSchema.safeParse(await req.json().catch(() => null));
     if (!parsed.success) throw new SourceControlError(422, "INVALID_INPUT", "Restoration requires name, changesetId and expectedGeneration");
-    const result = await mutateReference(id, ownerId, {
+    const result = await mutateReference(id, actor, {
       ...parsed.data, operation: "RESTORE", mutationId: parsed.data.mutationId ?? randomUUID(),
     });
     return NextResponse.json({ apiVersion: 1, ...result });

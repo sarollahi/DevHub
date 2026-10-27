@@ -46,3 +46,7 @@ Each Git commit is published in one PostgreSQL transaction with its native chang
 - Verification compares the currently reachable local Git source. Archived/dangling commits that are not reachable from branches or tags are not imported.
 - Configure a durable S3-compatible object store for the importer and main application. Local development and CI use MinIO.
 - User authentication and authorization are separate from Git authorship. Historical Git commit authors do not acquire DevHub permissions by being named in imported metadata.
+
+### Human authorization for imported refs
+
+Publishing Git references requires an active repository-owner human session with review and reference-update permissions. Import jobs record the authorizing user and session identifiers. Revocation or expiry fails closed and reauthorization is required on resume. The CLI requires an active `GIT_IMPORT_SESSION_TOKEN` obtained from a normal signed-in session; the import worker never impersonates an administrator. The session identifier is stored without raw session secrets.

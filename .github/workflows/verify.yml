@@ -37,6 +37,7 @@ jobs:
       REDIS_URL: redis://localhost:6379
       APP_SECRET: ci-only-long-random-testing-secret-123456789
       ADMIN_TOKEN: ci-only-long-admin-testing-secret-123456789
+      BOOTSTRAP_USER_PASSWORD: ci-only-bootstrap-unique-strong-password-012345
       BOOTSTRAP_AGENT_TOKEN: ci-only-long-agent-testing-secret-123456789
       NEXT_TELEMETRY_DISABLED: "1"
       OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000

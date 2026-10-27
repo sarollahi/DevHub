@@ -6,8 +6,8 @@ export const runtime = "nodejs";
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string; objectId: string }> }) {
   try {
     const { id, objectId } = await params;
-    await requireRepositoryAccess(req, id, "changesets:read");
-    const blob = await getObject(id, objectId);
+    const { actor } = await requireRepositoryAccess(req, id, "changesets:read");
+    const blob = await getObject(id, objectId, actor);
     if (blob.kind !== "BLOB") throw new SourceControlError(422, "INVALID_KIND", "Expected blob");
     const data = Buffer.from(blob.dataBase64, "base64");
     const etag = '"' + blob.id + '"';

@@ -13,8 +13,8 @@ export async function GET(req: NextRequest, { params }: {
 }) {
   try {
     const { id, objectId } = await params;
-    await requireRepositoryAccess(req, id, "changesets:read");
-    const object = await getObject(id, objectId);
+    const { actor } = await requireRepositoryAccess(req, id, "changesets:read");
+    const object = await getObject(id, objectId, actor);
     if (object.kind !== "BLOB") throw new SourceControlError(415, "NOT_A_BLOB", "Raw byte streaming requires a blob object");
     const bytes = Buffer.from(object.dataBase64, "base64");
     let offset = 0;

@@ -6,6 +6,8 @@ import { deriveChangesetMetadata } from "./derived";
 import { allowedGitDirectory, gitDiff, gitLines, gitText, gitTreeEntries, readGitCommit, type GitCommit } from "./git-io";
 import { stageGitBlob, verifyAndReadBlob } from "./git-import-blobs";
 import { mutateReference } from "./refs";
+import { assertRepositoryPermission } from "../lib/authorization";
+import { SourceControlError, type SourceActor } from "./contracts";
 
 type ImportedOperation = {
   kind: SourceOperationKind; path: string; objectId: string | null;
@@ -18,26 +20,45 @@ const MODES = new Set(["100644", "100755", "120000"]);
 const leaseMs = 10 * 60 * 1000;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 
-export async function createGitImport(repositoryId: string, sourcePath: string) {
+async function assertImportAuthority(repositoryId: string, actor: SourceActor) {
+  if (actor.type !== "HUMAN" || !actor.sessionId) {
+    throw new SourceControlError(403, "HUMAN_REQUIRED", "Import requires an authenticated human session");
+  }
+  const repo = await db.repository.findUnique({ where: { id: repositoryId }, select: { ownerId: true } });
+  if (!repo || repo.ownerId !== actor.id) {
+    throw new SourceControlError(403, "IMPORT_OWNER_REQUIRED", "Only the owner may approve imported references");
+  }
+  await assertRepositoryPermission(actor, repositoryId, "admin");
+  await assertRepositoryPermission(actor, repositoryId, "review");
+}
+
+export async function createGitImport(repositoryId: string, sourcePath: string, actor: SourceActor) {
+  await assertImportAuthority(repositoryId, actor);
   const directory = await allowedGitDirectory(sourcePath);
   const repository = await db.repository.findUnique({ where: { id: repositoryId } });
   if (!repository) throw new Error("Destination repository does not exist");
   const existing = await db.gitImportJob.findUnique({
     where: { repositoryId_sourcePath: { repositoryId, sourcePath: directory } },
   });
-  if (existing) return existing;
-  return db.gitImportJob.create({ data: { repositoryId, sourcePath: directory } });
+  if (existing) return db.gitImportJob.update({ where: { id: existing.id }, data: {
+    authorizedUserId: actor.id, authorizedSessionId: actor.sessionId,
+  } });
+  return db.gitImportJob.create({ data: { repositoryId, sourcePath: directory,
+    authorizedUserId: actor.id, authorizedSessionId: actor.sessionId } });
 }
 
-export async function requestGitImport(jobId: string, verifyOnly = false) {
+export async function requestGitImport(jobId: string, verifyOnly = false, actor?: SourceActor) {
   const job = await db.gitImportJob.findUniqueOrThrow({ where: { id: jobId } });
+  if (actor) await assertImportAuthority(job.repositoryId, actor);
   const updated = await db.gitImportJob.updateMany({
     where: { id: jobId, OR: [
       { status: { in: ["COMPLETED", "FAILED", "QUEUED", "VERIFY_QUEUED"] } },
       { status: { in: ["RUNNING", "VERIFYING"] }, leaseUntil: { lt: new Date() } },
     ] },
     data: { status: verifyOnly ? "VERIFY_QUEUED" : "QUEUED",
-      leaseUntil: null, workerId: null, lastError: null, completedAt: null },
+      leaseUntil: null, workerId: null, lastError: null, completedAt: null,
+      ...(actor ? { authorizedUserId: actor.id, authorizedSessionId: actor.sessionId } : {}),
+    },
   });
   if (!updated.count) throw new Error("Import is already owned by a live worker");
   return db.gitImportJob.findUniqueOrThrow({ where: { id: job.id } });
@@ -178,7 +199,8 @@ async function gitRefs(cwd: string): Promise<GitRef[]> {
   return refs;
 }
 
-async function publishGitRefs(repositoryId: string, cwd: string, pulse: () => Promise<void>) {
+async function publishGitRefs(repositoryId: string, cwd: string, pulse: () => Promise<void>, actor: SourceActor) {
+  await assertImportAuthority(repositoryId, actor);
   const refs = await gitRefs(cwd);
   const repository = await db.repository.findUniqueOrThrow({ where: { id: repositoryId }, select: { ownerId: true } });
   for (const ref of refs) {
@@ -200,8 +222,9 @@ async function publishGitRefs(repositoryId: string, cwd: string, pulse: () => Pr
       if (kind === "TAG") throw new Error("Git tag changed; immutable native tags require manual reconciliation: " + name);
       await gitText(cwd, ["merge-base", "--is-ancestor", prior.gitSha, ref.commitSha], 256);
     }
-    // Import requests are explicit administrative operations. Native refs still
-    // require an auditable approval and pass the protected-ref CAS policy.
+    // The real session is revalidated on each imported ref; revoked sessions fail closed.
+    await assertImportAuthority(repositoryId, actor);
+    await assertRepositoryPermission(actor, repositoryId, "ref:update", { branch: name });
     await db.$transaction(async tx => {
       await tx.sourceChangeApproval.upsert({ where: {
         changesetId_userId: { changesetId: mapped.changesetId, userId: repository.ownerId },
@@ -213,7 +236,7 @@ async function publishGitRefs(repositoryId: string, cwd: string, pulse: () => Pr
         metadata: { originalGitRef: ref.name, originalGitObjectSha: ref.objectSha },
       } });
     });
-    await mutateReference(repositoryId, repository.ownerId, {
+    await mutateReference(repositoryId, actor, {
       name, kind, operation: existing ? existing.deletedAt ? "RESTORE" : "UPDATE" : "CREATE",
       changesetId: mapped.changesetId, expectedGeneration: existing?.generation ?? null,
       expectedChangesetId: existing?.changesetId,
@@ -376,7 +399,12 @@ export async function runGitImport(jobId: string) {
         await pulse();
       }
       await verifyGitImport(jobId, pulse, false);
-      await publishGitRefs(job.repositoryId, cwd, pulse);
+      if (!job.authorizedUserId || !job.authorizedSessionId) {
+        throw new SourceControlError(403, "IMPORT_AUTHORIZATION_REQUIRED", "Reauthorize the import with an authenticated human session");
+      }
+      await publishGitRefs(job.repositoryId, cwd, pulse, {
+        type: "HUMAN", id: job.authorizedUserId, sessionId: job.authorizedSessionId,
+      });
     }
     const result = await verifyGitImport(jobId, pulse);
     await db.gitImportJob.updateMany({ where: { id: jobId, workerId }, data: {

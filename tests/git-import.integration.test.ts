@@ -55,7 +55,12 @@ test("real repository with merges, symlinks, executable mode and >4 MiB blobs su
     const suffix = randomBytes(6).toString("hex");
     const user = await db.user.create({ data: { handle: "gitimport-" + suffix, email: "import-" + suffix + "@example.test" } });
     const repo = await db.repository.create({ data: { ownerId: user.id, slug: "gitimport-" + suffix, name: "Git import test" } });
-    const job = await createGitImport(repo.id, directory);
+    const session = await db.humanSession.create({ data: {
+      userId: user.id, tokenHash: randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 3600000),
+    } });
+    const actor = { type: "HUMAN" as const, id: user.id, sessionId: session.id };
+    const job = await createGitImport(repo.id, directory, actor);
     const first = await runGitImport(job.id);
     assert.ok(first.commits >= 7);
     assert.ok(first.treesVerified >= 2);
@@ -67,7 +72,7 @@ test("real repository with merges, symlinks, executable mode and >4 MiB blobs su
     assert.equal(mapped.authorEmail, "historian@example.test");
     assert.equal(mapped.authorTimezone, "+0200");
     assert.equal(mapped.committerEmail, "committer@example.test");
-    const snapshot = await getCanonicalSnapshot(repo.id, mapped.changesetId);
+    const snapshot = await getCanonicalSnapshot(repo.id, mapped.changesetId, actor);
     assert.equal(snapshot.entries.find(e => e.path === "run.sh")?.mode, "100755");
     assert.equal(snapshot.entries.find(e => e.path === "readme-link")?.mode, "120000");
     assert.ok(snapshot.entries.some(e => e.path === "renamed.txt"));
@@ -77,7 +82,7 @@ test("real repository with merges, symlinks, executable mode and >4 MiB blobs su
     const binary = await db.sourceObject.findUniqueOrThrow({ where: { id: binaryId } });
     assert.equal(binary.data, null);
     assert.equal(binary.byteSize, BigInt(large.length));
-    await assert.rejects(() => getObject(repo.id, binaryId), /STREAM_REQUIRED|streaming endpoint|stream large stored blobs/);
+    await assert.rejects(() => getObject(repo.id, binaryId, actor), /STREAM_REQUIRED|streaming endpoint|stream large stored blobs/);
     const ref = await db.sourceReference.findUniqueOrThrow({
       where: { repositoryId_name: { repositoryId: repo.id, name: "tags/v1.0.0" } },
     });

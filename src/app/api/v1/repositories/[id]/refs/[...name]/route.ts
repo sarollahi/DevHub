@@ -40,11 +40,11 @@ export async function GET(req: NextRequest, { params }: Context) {
 export async function PUT(req: NextRequest, { params }: Context) {
   try {
     const { id, name } = await params;
-    const { ownerId } = await requireRepositoryAccess(req, id, "refs:write", true);
+    const { actor } = await requireRepositoryAccess(req, id, "refs:write", false, { branch: name.join("/") });
     const parsed = writeSchema.safeParse(await req.json().catch(() => null));
     if (!parsed.success) throw new SourceControlError(422, "INVALID_INPUT", "Invalid conditional reference update");
     const input = parsed.data;
-    const result = await mutateReference(id, ownerId, {
+    const result = await mutateReference(id, actor, {
       ...input, name: name.join("/"), mutationId: input.mutationId ?? randomUUID(),
       operation: input.expectedGeneration === null ? "CREATE" : "UPDATE",
     });
@@ -55,10 +55,10 @@ export async function PUT(req: NextRequest, { params }: Context) {
 export async function DELETE(req: NextRequest, { params }: Context) {
   try {
     const { id, name } = await params;
-    const { ownerId } = await requireRepositoryAccess(req, id, "refs:write", true);
+    const { actor } = await requireRepositoryAccess(req, id, "refs:write", false, { branch: name.join("/") });
     const parsed = deleteSchema.safeParse(await req.json().catch(() => null));
     if (!parsed.success) throw new SourceControlError(422, "INVALID_INPUT", "Deletion requires expectedGeneration");
-    const result = await mutateReference(id, ownerId, {
+    const result = await mutateReference(id, actor, {
       ...parsed.data, name: name.join("/"), operation: "DELETE",
       mutationId: parsed.data.mutationId ?? randomUUID(),
     });

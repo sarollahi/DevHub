@@ -4,7 +4,7 @@ Prerequisites: Node.js >= 22.18, npm, Docker with Compose, and local ports 5432,
 
 ```sh
 cp .env.example .env
-# Replace all placeholder credentials in .env with independent 32+ character secrets.
+# Set BOOTSTRAP_USER_PASSWORD (12+ characters) and BOOTSTRAP_AGENT_TOKEN (32+ random characters).
 docker compose up -d --wait
 # MinIO runs at 127.0.0.1:9000; minio-init creates devhub-objects.
 npm ci
@@ -60,3 +60,7 @@ Observed on a GitHub Actions Ubuntu 24.04 runner, Node.js 22.18, PostgreSQL 16 a
 | Final SHA-256 check and cleanup | Passed |
 
 These are observations for one CI run, not an SLA or a guarantee of throughput in other deployments. Peak RSS does not include PostgreSQL or MinIO processes, OS filesystem cache, or other containers. The larger test uses a repeated cryptographically random 64 KiB chunk, which is not highly compressible over the 32 KiB deflate window. It measures network/storage pipeline buffering rather than independent random bytes for all 3 GiB.
+
+## Human sessions and tenant setup
+
+Set `BOOTSTRAP_USER_PASSWORD`, run `npm run db:seed`, and sign in with the provisioned human account. The shared administrator bearer token is no longer accepted. Each machine token requires an explicit, revocable delegation; repository and path policies are enforced by server-side authorization. Consult [identity and authorization](security/identity-authorization.md) before production deployment.

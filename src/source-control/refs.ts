@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type SourceRefKind } from "@prisma/client";
 import { db } from "../lib/prisma";
-import { SourceControlError } from "./contracts";
+import { SourceControlError, type SourceActor } from "./contracts";
+import { assertRepositoryPermission } from "../lib/authorization";
 
 export type RefOperation = "CREATE" | "UPDATE" | "DELETE" | "RESTORE";
 export type RefMutationRequest = {
@@ -100,8 +101,10 @@ function snapshot(m: {
   };
 }
 
-export async function mutateReference(repositoryId: string, actorId: string, input: RefMutationRequest) {
+export async function mutateReference(repositoryId: string, actor: SourceActor, input: RefMutationRequest) {
   validateMutation(input);
+  await assertRepositoryPermission(actor, repositoryId, "ref:update", { branch: input.name });
+  if (input.force) await assertRepositoryPermission(actor, repositoryId, "admin");
   const hash = sha([input.operation, input.name, input.mutationId, input.expectedGeneration,
     input.expectedChangesetId ?? null, input.changesetId ?? null, input.kind ?? null,
     !!input.force, input.reason?.trim() ?? null]);
@@ -115,6 +118,8 @@ export async function mutateReference(repositoryId: string, actorId: string, inp
   const existing = await replay();
   if (existing) return existing;
   const transact = async () => db.$transaction(async tx => {
+    await assertRepositoryPermission(actor, repositoryId, "ref:update", { branch: input.name }, tx);
+    if (input.force) await assertRepositoryPermission(actor, repositoryId, "admin", {}, tx);
     // Recheck inside the transaction. Unique constraints close the simultaneous
     // first-request race, and the catch below resolves equivalent retries.
     const priorRequest = await tx.sourceRefMutation.findUnique({ where: byMutation });
@@ -126,7 +131,7 @@ export async function mutateReference(repositoryId: string, actorId: string, inp
       defaultBranch: true, ownerId: true, requireHumanApproval: true,
     } });
     if (!repo) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Repository not found");
-    if (repo.ownerId !== actorId) throw new SourceControlError(403, "FORBIDDEN", "Only the owner may mutate references");
+    // Policy authorization is checked inside this transaction; ownership does not imply global access.
     const current = await tx.sourceReference.findUnique({ where: { repositoryId_name: { repositoryId, name: input.name } } });
     const kind = input.operation === "CREATE" ? refKindFor(input.name, input.kind) : current?.kind;
     if (current && input.kind && input.kind !== current.kind) throw new SourceControlError(409, "REFERENCE_KIND_CONFLICT", "Reference kind is immutable");
@@ -168,8 +173,8 @@ export async function mutateReference(repositoryId: string, actorId: string, inp
       if (!changeset) throw new SourceControlError(404, "CHANGESET_NOT_FOUND", "Target changeset not in repository");
       if (changeset.validation?.state !== "SUCCESS") throw new SourceControlError(409, "VALIDATION_REQUIRED", "Changeset integrity validation required");
       if (repo.requireHumanApproval || protectedRef || policy?.requireApproval) {
-        const approval = await tx.sourceChangeApproval.findUnique({ where: {
-          changesetId_userId: { changesetId: target!, userId: repo.ownerId },
+        const approval = await tx.sourceChangeApproval.findFirst({ where: {
+          changesetId: target!, decision: "APPROVED",
         } });
         if (approval?.decision !== "APPROVED") {
           throw new SourceControlError(403, "HUMAN_APPROVAL_REQUIRED", "Owner approval required");
@@ -198,14 +203,14 @@ export async function mutateReference(repositoryId: string, actorId: string, inp
       repositoryId, name: input.name, mutationId: input.mutationId,
       requestHash: hash, operation: input.operation, kind,
       oldChangesetId: oldId, newChangesetId: input.operation === "DELETE" ? null : target!,
-      oldGeneration, newGeneration, actorType: "HUMAN", actorId,
+      oldGeneration, newGeneration, actorType: actor.type, actorId: actor.id,
       forced: !!input.force, reason: input.reason?.trim() ?? null,
     } });
     const payload = { apiVersion: 1, eventId: mutation.id, repositoryId, name: input.name,
       action: input.operation, kind, oldChangesetId: oldId,
       newChangesetId: input.operation === "DELETE" ? null : target,
       oldGeneration, newGeneration, forced: !!input.force };
-    await tx.auditEvent.create({ data: { repositoryId, actorType: "HUMAN", actorId,
+    await tx.auditEvent.create({ data: { repositoryId, actorType: actor.type, actorId: actor.id,
       action: `reference.${input.operation.toLowerCase()}`, subjectId: target,
       metadata: payload } });
     await tx.outboxEvent.create({ data: {
@@ -231,28 +236,33 @@ export async function mutateReference(repositoryId: string, actorId: string, inp
   throw new Error("Unreachable transaction retry state");
 }
 
-export async function listReferences(repositoryId: string, includeDeleted = false) {
+export async function listReferences(repositoryId: string, includeDeleted = false, actor?: SourceActor) {
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
   return db.sourceReference.findMany({
     where: { repositoryId, ...(includeDeleted ? {} : { deletedAt: null }) }, orderBy: { name: "asc" },
   });
 }
 
-export async function referenceHistory(repositoryId: string, name: string, limit = 100, before?: number) {
+export async function referenceHistory(repositoryId: string, name: string, limit = 100, before?: number, actor?: SourceActor) {
   validateRefName(name);
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
   return db.sourceRefMutation.findMany({
     where: { repositoryId, name, ...(before ? { newGeneration: { lt: before } } : {}) },
     orderBy: { newGeneration: "desc" }, take: Math.max(1, Math.min(200, limit)),
   });
 }
 
-export async function updateReferencePolicy(repositoryId: string, actorId: string, name: string, policy: {
+export async function updateReferencePolicy(repositoryId: string, actor: SourceActor, name: string, policy: {
   protected: boolean; allowForce: boolean; allowDelete: boolean; requireApproval: boolean;
 }) {
   validateRefName(name);
   return db.$transaction(async tx => {
+    await assertRepositoryPermission(actor, repositoryId, "admin", {}, tx);
     const repo = await tx.repository.findUnique({ where: { id: repositoryId } });
     if (!repo) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Repository not found");
-    if (repo.ownerId !== actorId) throw new SourceControlError(403, "FORBIDDEN", "Only the owner may configure reference policy");
+    if (actor.type !== "HUMAN") throw new SourceControlError(403, "HUMAN_REQUIRED", "Human administrator required");
     if (name === repo.defaultBranch && (!policy.protected || policy.allowForce || policy.allowDelete || !policy.requireApproval)) {
       throw new SourceControlError(403, "DEFAULT_BRANCH_PROTECTED", "Default branch must remain protected and require approval");
     }
@@ -263,7 +273,7 @@ export async function updateReferencePolicy(repositoryId: string, actorId: strin
       where: { repositoryId_name: { repositoryId, name } },
       create: { repositoryId, name, ...policy }, update: policy,
     });
-    await tx.auditEvent.create({ data: { repositoryId, actorType: "HUMAN", actorId,
+    await tx.auditEvent.create({ data: { repositoryId, actorType: "HUMAN", actorId: actor.id,
       action: "reference.policy.updated", subjectId: name, metadata: policy } });
     return saved;
   });

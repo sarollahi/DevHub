@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { db } from "../src/lib/prisma";
 import { tokenHash } from "../src/lib/auth";
+import { testSession } from "./support/identities";
 import { createCanonicalChangeset, stageCanonicalBlob } from "../src/source-control/canonical";
 import { advanceReference } from "../src/source-control/service";
 
@@ -29,14 +30,24 @@ async function main() {
   const agent = await db.agentIdentity.create({ data: { ownerId: user.id, name: "client-" + suffix, scopes: [
     "changesets:read", "changesets:write",
   ] } });
-  await db.agentCredential.create({ data: { agentId: agent.id, tokenHash: tokenHash(secret), label: "e2e" } });
-  const obj = await stageCanonicalBlob(repo.id, Buffer.from("base version\n").toString("base64"));
-  const first = await createCanonicalChangeset(repo.id, { id: agent.id, type: "AGENT" }, {
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  const credential = await db.agentCredential.create({ data: {
+    agentId: agent.id, tokenHash: tokenHash(secret), label: "e2e",
+    scopes: ["source:read", "changeset:write"], expiresAt,
+  } });
+  await db.agentDelegation.create({ data: {
+    agentId: agent.id, repositoryId: repo.id, delegatedBy: user.id,
+    scopes: ["source:read", "changeset:write"], expiresAt,
+  } });
+  const { actor: human } = await testSession(user.id);
+  const actor = { id: agent.id, type: "AGENT" as const, credentialId: credential.id };
+  const obj = await stageCanonicalBlob(repo.id, human, Buffer.from("base version\n").toString("base64"));
+  const first = await createCanonicalChangeset(repo.id, actor, {
     apiVersion: 2, parents: [], description: "initial", operations: [
       { kind: "ADD", path: "docs/readme.txt", objectId: obj.id },
     ],
   });
-  await advanceReference(repo.id, "main", first.id, null, user.id);
+  await advanceReference(repo.id, "main", first.id, null, human);
   const server = "http://127.0.0.1:3000";
   cli(["auth", "login", "--server", server, "--repository", repo.id, "--token-stdin"], secret + "\n");
   cli(["init", "--server", server, "--repository", repo.id]);

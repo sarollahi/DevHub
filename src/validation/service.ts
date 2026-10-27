@@ -1,13 +1,15 @@
 import { Prisma, type ValidationPipeline, type ValidationTask } from "@prisma/client";
 import { db } from "../lib/prisma";
-import { SourceControlError } from "../source-control/contracts";
+import { SourceControlError, type SourceActor } from "../source-control/contracts";
+import { assertRepositoryPermission } from "../lib/authorization";
 import { snapshotFor } from "./snapshot";
 import { configurationDigest, fingerprint, KINDS, recipes, verifyTask } from "./policy";
 
 const uuidOrKey = /^[a-zA-Z0-9_-]{8,128}$/;
 export async function submitValidation(repositoryId: string, changesetId: string, targetId: string | null,
-  idempotencyKey: string, actor: string) {
+  idempotencyKey: string, actor: SourceActor) {
   if (!uuidOrKey.test(idempotencyKey)) throw new SourceControlError(422, "INVALID_KEY", "Idempotency key must contain 8-128 safe characters");
+  await assertRepositoryPermission(actor, repositoryId, "changeset:write");
   const available = await db.sourceChangeset.findMany({
     where: { repositoryId, id: { in: targetId ? [changesetId, targetId] : [changesetId] } }, select: { id: true },
   });
@@ -18,6 +20,7 @@ export async function submitValidation(repositoryId: string, changesetId: string
   const snapshot = await snapshotFor(repositoryId, changesetId, targetId);
   const configHash = configurationDigest(policy);
   return db.$transaction(async tx => {
+    await assertRepositoryPermission(actor, repositoryId, "changeset:write", {}, tx);
     const repo = await tx.repository.findUniqueOrThrow({ where: { id: repositoryId } });
     // Lock tenant admission, not the repository contents or commit DAG.
     await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${repo.ownerId}::uuid FOR UPDATE`;
@@ -36,14 +39,14 @@ export async function submitValidation(repositoryId: string, changesetId: string
       pipeline: { repository: { ownerId: repo.ownerId } } } });
     if (count + policy.length > max) throw new SourceControlError(429, "TENANT_QUEUE_QUOTA", "Tenant has too many pending checks");
     const pipeline = await tx.validationPipeline.create({ data: {
-      repositoryId, changesetId, targetChangesetId: targetId, idempotencyKey, requestedBy: actor,
+      repositoryId, changesetId, targetChangesetId: targetId, idempotencyKey, requestedBy: actor.type + ":" + actor.id,
       snapshotDigest: snapshot.digest, dependencyDigest: snapshot.dependencyDigest, configurationDigest: configHash,
       tasks: { create: policy.map(recipe => ({
         kind: recipe.kind, image: recipe.image, command: recipe.command, timeoutSeconds: recipe.timeoutSeconds,
         fingerprint: fingerprint(repositoryId, changesetId, targetId, snapshot.digest, snapshot.dependencyDigest, recipe),
       })) },
     } });
-    await tx.auditEvent.create({ data: { repositoryId, actorType: "SYSTEM", actorId: actor,
+    await tx.auditEvent.create({ data: { repositoryId, actorType: actor.type, actorId: actor.id,
       action: "validation.submitted", subjectId: pipeline.id,
       metadata: { changesetId, targetId, snapshotDigest: snapshot.digest, configurationDigest: configHash } } });
     return { pipeline, created: true };

@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
-import { getCanonicalSnapshot } from "../source-control/canonical";
+import { getCanonicalSnapshotForReview } from "../source-control/canonical";
 import { verifyAndReadBlob } from "../source-control/git-import-blobs";
 import { assessNativeChangeset, cosineSimilarity, regionOverlap, type Entry, type Region } from "./analysis";
 import { createReviewProvider } from "./provider";
@@ -23,8 +23,8 @@ export async function processReview(changesetId: string, lease: Date, attempt: n
     });
     const parentIds = change.parents.map(p => p.parentId);
     const [base, target] = await Promise.all([
-      parentIds[0] ? getCanonicalSnapshot(change.repositoryId, parentIds[0]) : Promise.resolve({ entries: [] }),
-      getCanonicalSnapshot(change.repositoryId, changesetId),
+      parentIds[0] ? getCanonicalSnapshotForReview(change.repositoryId, parentIds[0], changesetId, lease) : Promise.resolve({ entries: [] }),
+      getCanonicalSnapshotForReview(change.repositoryId, changesetId, changesetId, lease),
     ]);
     const before = new Map<string, Entry>(base.entries.map(e => [e.path, e]));
     const after = new Map<string, Entry>(target.entries.map(e => [e.path, e]));

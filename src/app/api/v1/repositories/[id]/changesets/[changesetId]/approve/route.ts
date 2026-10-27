@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string; changesetId: string }> }) {
   try {
     const { id, changesetId } = await params;
-    const { ownerId } = await requireRepositoryAccess(req, id, "changesets:approve", true);
-    return NextResponse.json(await approveChangeset(id, changesetId, ownerId));
+    const { actor } = await requireRepositoryAccess(req, id, "changesets:approve", true);
+    return NextResponse.json(await approveChangeset(id, changesetId, actor));
   } catch (error) { return sourceFailure(error); }
 }

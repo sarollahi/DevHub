@@ -6,6 +6,7 @@ import { changesetInputSchema, SourceControlError, type SourceActor, type FileOp
 import { decodeBlob, decodeTree, encodeTree, objectId } from "./storage";
 import { deriveChangesetMetadata } from "./derived";
 import { getCanonicalSnapshot } from "./canonical";
+import { assertRepositoryPermission } from "../lib/authorization";
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const refName = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
@@ -36,7 +37,9 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
       operations.push({ kind: "DELETE", path: operation.path });
     }
   }
+  const affectedPaths = operations.flatMap(op => op.previousPath ? [op.path, op.previousPath] : [op.path]);
   const result = await db.$transaction(async (tx) => {
+    await assertRepositoryPermission(actor, repositoryId, "changeset:write", { paths: affectedPaths }, tx);
     const repository = await tx.repository.findUnique({ where: { id: repositoryId }, select: { id: true } });
     if (!repository) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Unknown repository");
     const parents = await tx.sourceChangeset.findMany({ where: { id: { in: input.parents }, repositoryId }, select: { id: true, treeId: true } });
@@ -111,26 +114,34 @@ export async function createChangeset(repositoryId: string, actor: SourceActor, 
   return result;
 }
 
-export async function listChangesets(repositoryId: string, limit = 30) {
+export async function listChangesets(repositoryId: string, limit = 30, actor?: SourceActor) {
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
   return db.sourceChangeset.findMany({ where: { repositoryId }, take: Math.min(100, Math.max(1, limit)), orderBy: { createdAt: "desc" },
     include: { parents: { orderBy: { position: "asc" } }, operations: true, validation: true, approvals: true } });
 }
 
-export async function getChangeset(repositoryId: string, id: string) {
+export async function getChangeset(repositoryId: string, id: string, actor?: SourceActor) {
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
   return db.sourceChangeset.findFirst({ where: { repositoryId, id },
     include: { parents: { orderBy: { position: "asc" } }, operations: true, validation: true, approvals: true } });
 }
 
-export async function getTree(repositoryId: string, changesetId: string) {
+export async function getTree(repositoryId: string, changesetId: string, actor?: SourceActor) {
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
   const change = await db.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId },
     include: { tree: true } });
   if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
-  if (!change.treeId || !change.tree) return getCanonicalSnapshot(repositoryId, changesetId);
+  if (!change.treeId || !change.tree) return getCanonicalSnapshot(repositoryId, changesetId, actor);
   if (!change.tree.data) throw new Error("External tree payload is forbidden");
   return { changesetId: change.id, treeId: change.treeId, entries: decodeTree(change.tree.data, change.treeId) };
 }
 
-export async function getObject(repositoryId: string, id: string) {
+export async function getObject(repositoryId: string, id: string, actor?: SourceActor) {
+  if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
+  await assertRepositoryPermission(actor, repositoryId, "source:read");
   const reachable = await db.sourceChangeset.findFirst({ where: {
     repositoryId, OR: [{ treeId: id }, { operations: { some: { objectId: id } } }],
   }, select: { id: true } });
@@ -142,21 +153,22 @@ export async function getObject(repositoryId: string, id: string) {
   return { id: object.id, kind: object.kind, byteSize: Number(object.byteSize), dataBase64: Buffer.from(object.data).toString("base64") };
 }
 
-export async function approveChangeset(repositoryId: string, id: string, ownerId: string) {
+export async function approveChangeset(repositoryId: string, id: string, actor: SourceActor) {
   const changed = await db.$transaction(async tx => {
+    await assertRepositoryPermission(actor, repositoryId, "review", {}, tx);
     const change = await tx.sourceChangeset.findFirst({ where: { repositoryId, id }, include: { validation: true } });
     if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
     if (change.validation?.state !== "SUCCESS") throw new SourceControlError(409, "VALIDATION_REQUIRED", "Integrity validation must pass");
-    await tx.sourceChangeApproval.upsert({ where: { changesetId_userId: { changesetId: id, userId: ownerId } },
-      create: { changesetId: id, userId: ownerId, decision: "APPROVED" },
+    await tx.sourceChangeApproval.upsert({ where: { changesetId_userId: { changesetId: id, userId: actor.id } },
+      create: { changesetId: id, userId: actor.id, decision: "APPROVED" },
       update: { decision: "APPROVED" } });
-    await tx.auditEvent.create({ data: { repositoryId, actorType: "HUMAN", actorId: ownerId, action: "changeset.approved", subjectId: id } });
+    await tx.auditEvent.create({ data: { repositoryId, actorType: "HUMAN", actorId: actor.id, action: "changeset.approved", subjectId: id } });
     return { id, approved: true };
   });
   return changed;
 }
 
-export async function advanceReference(repositoryId: string, name: string, changesetId: string, expectedGeneration: number | null, actorId: string) {
+export async function advanceReference(repositoryId: string, name: string, changesetId: string, expectedGeneration: number | null, actor: SourceActor) {
   if (!validPath(name) || !refName.test(name) || name.endsWith(".lock") || name.includes("..")) {
     throw new SourceControlError(422, "INVALID_REFERENCE", "Invalid reference name");
   }
@@ -164,13 +176,14 @@ export async function advanceReference(repositoryId: string, name: string, chang
     throw new SourceControlError(422, "INVALID_GENERATION", "Expected generation must be a positive integer or null");
   }
   return db.$transaction(async tx => {
+    await assertRepositoryPermission(actor, repositoryId, "ref:update", { branch: name }, tx);
     const repo = await tx.repository.findUnique({ where: { id: repositoryId } });
     if (!repo) throw new SourceControlError(404, "REPOSITORY_NOT_FOUND", "Repository not found");
     const changeset = await tx.sourceChangeset.findFirst({ where: { id: changesetId, repositoryId }, include: { validation: true } });
     if (!changeset) throw new SourceControlError(404, "CHANGESET_NOT_FOUND", "Changeset not found in this repository");
     if (changeset.validation?.state !== "SUCCESS") throw new SourceControlError(409, "VALIDATION_REQUIRED", "Integrity validation not successful");
     if (repo.requireHumanApproval) {
-      const approval = await tx.sourceChangeApproval.findUnique({ where: { changesetId_userId: { changesetId, userId: repo.ownerId } } });
+      const approval = await tx.sourceChangeApproval.findFirst({ where: { changesetId, decision: "APPROVED" } });
       if (approval?.decision !== "APPROVED") throw new SourceControlError(403, "HUMAN_APPROVAL_REQUIRED", "Owner approval required before updating a reference");
     }
     if (expectedGeneration === null) {
@@ -182,7 +195,7 @@ export async function advanceReference(repositoryId: string, name: string, chang
         data: { changesetId, generation: { increment: 1 } } });
       if (update.count !== 1) throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference generation changed; read current value");
     }
-    await tx.auditEvent.create({ data: { repositoryId, actorType: "HUMAN", actorId, action: "reference.advanced", subjectId: changesetId,
+    await tx.auditEvent.create({ data: { repositoryId, actorType: actor.type, actorId: actor.id, action: "reference.advanced", subjectId: changesetId,
       metadata: { name, previousGeneration: expectedGeneration } } });
     return tx.sourceReference.findUniqueOrThrow({ where: { repositoryId_name: { repositoryId, name } } });
   }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }).catch(error => {
