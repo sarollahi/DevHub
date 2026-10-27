@@ -26,7 +26,9 @@ export function stableJson(value: unknown): string {
   if (value !== null && typeof value === "object") return "{" +
     Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined)
       .sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => JSON.stringify(k) + ":" + stableJson(v)).join(",") + "}";
-  return JSON.stringify(value);
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new Error("INVALID_DERIVED_JSON");
+  return encoded;
 }
 export const checksum = (value: unknown) => createHash("sha256").update(stableJson(value)).digest("hex");
 const key = (changesetId: string, kind: DerivedKind) => ({ changesetId, kind, version: DERIVED_VERSION });
