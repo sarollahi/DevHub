@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { ensureIndexJob } from "../workers/query-indexer";
 import { enqueueDerived } from "./derived-index";
 import { indexedFileHistory, indexedLinearAncestry, indexedLinearMergeBases, IndexedWalk } from "./derived-queries";
+import { indexedBlameLines } from "./indexed-blame";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
@@ -383,11 +384,15 @@ export async function blameQuery(repositoryId: string, revision: string, path: s
   await enqueueDerived(repositoryId, resolved, ["blame"]);
   const entry = await resolvePath(repositoryId, revision, path);
   if (entry.kind !== "file" || !entry.objectId) throw new SourceControlError(422, "NOT_A_FILE", "Blame requires a file");
-  const history = await fileHistory(repositoryId, revision, path, true, maxHistory);
-  const ids = [entry.objectId, ...history.records.map(e => e.objectId).filter((id): id is string => !!id)];
-  const blobs = await verifiedBlobs(ids);
-  const present = textOf(blobs.get(entry.objectId)!);
+  const presentBlobs = await verifiedBlobs([entry.objectId]);
+  const present = textOf(presentBlobs.get(entry.objectId)!);
   if (present === null) throw new SourceControlError(415, "BINARY_FILE", "Blame is only available for UTF-8 text files");
+  const indexed = await indexedBlameLines(repositoryId, entry.revision, path, entry.objectId, present);
+  if (indexed) return { revision: entry.revision, path, firstParentOnly: true,
+    truncated: false, lines: indexed };
+  const history = await fileHistory(repositoryId, revision, path, true, maxHistory);
+  const ids = history.records.map(e => e.objectId).filter((id): id is string => !!id);
+  const blobs = await verifiedBlobs(ids);
   const eventData = history.records.filter(e => e.objectId).map(e => ({
     changesetId: e.changesetId, content: textOf(blobs.get(e.objectId!)!),
   }));
