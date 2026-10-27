@@ -10,8 +10,8 @@ type Payload = Record<string, unknown>;
 type Change = Awaited<ReturnType<typeof loadRevision>>;
 type Computation = {
   payload: Payload;
-  jumps?: { repositoryId: string; changesetId: string; level: number; ancestorId: string }[];
-  postings?: { repositoryId: string; changesetId: string; position: number; role: string; path: string;
+  jumps?: { repositoryId: string; changesetId: string; version: number; level: number; ancestorId: string }[];
+  postings?: { repositoryId: string; changesetId: string; version: number; position: number; role: string; path: string;
     generation: number; kind: string; previousPath: string | null; objectId: string | null }[];
 };
 type Context = { change: Change; parents: Map<string, Payload[]>; current: Map<string, Payload> };
@@ -72,9 +72,9 @@ const definitions: Record<DerivedKind, Definition> = {
     if (change.parents.length) {
       let ancestorId = change.parents[0].parentId;
       for (let level = 0; level < 54 && ancestorId; level++) {
-        jumps.push({ repositoryId: change.repositoryId, changesetId: change.id, level, ancestorId });
+        jumps.push({ repositoryId: change.repositoryId, changesetId: change.id, version: DERIVED_VERSION, level, ancestorId });
         const next = await db.sourceDerivedJump.findUnique({
-          where: { changesetId_level: { changesetId: ancestorId, level } },
+          where: { changesetId_version_level: { changesetId: ancestorId, version: DERIVED_VERSION, level } },
           select: { ancestorId: true, repositoryId: true },
         });
         if (next && next.repositoryId !== change.repositoryId) throw new Error("CROSS_REPOSITORY_JUMP");
@@ -101,11 +101,11 @@ const definitions: Record<DerivedKind, Definition> = {
     const generation = integer(current.get("ancestry")?.generation);
     const postings: NonNullable<Computation["postings"]> = [];
     for (const op of change.operations) {
-      postings.push({ repositoryId: change.repositoryId, changesetId: change.id, position: op.position,
+      postings.push({ repositoryId: change.repositoryId, changesetId: change.id, version: DERIVED_VERSION, position: op.position,
         role: "destination", path: op.path, kind: String(op.kind), generation,
         previousPath: op.previousPath, objectId: op.objectId });
       if (op.previousPath) postings.push({ repositoryId: change.repositoryId, changesetId: change.id,
-        position: op.position, role: "source", path: op.previousPath, kind: String(op.kind),
+        version: DERIVED_VERSION, position: op.position, role: "source", path: op.previousPath, kind: String(op.kind),
         generation, previousPath: op.previousPath, objectId: op.objectId });
     }
     return { payload: { generation, postings: postings.length }, postings };
