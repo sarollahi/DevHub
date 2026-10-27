@@ -5,6 +5,7 @@ import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
 import { decodeTree, encodeTree, objectId } from "./storage";
 import { getTree as readTree } from "./service";
+import { SnapshotTree, publishedSnapshotRoot } from "./snapshot-tree";
 import { verifiedBlobStream } from "../object-store/service";
 import { blameLines, compareEntries, mergeEntries, textPatch } from "./query-algorithms";
 
@@ -99,9 +100,40 @@ export async function ancestryQuery(repositoryId: string, revision: string, othe
     truncated: nodes.length > limitQuery(max, 1000), mergeBases: common };
 }
 
+// Content-addressed roots are the indexed read path. Do not synthesize a
+// million-path legacy map for an unmaterialized v2 changeset.
+async function indexedSnapshot<T>(
+  repositoryId: string, revision: string,
+  query: (tree: SnapshotTree, root: string) => Promise<T>,
+): Promise<T | undefined> {
+  const root = await db.sourceSnapshotRoot.findFirst({
+    where: { repositoryId, changesetId: revision }, select: { rootId: true },
+  });
+  if (!root) {
+    const change = await db.sourceChangeset.findFirst({
+      where: { repositoryId, id: revision }, select: { treeId: true },
+    });
+    if (!change?.treeId) {
+      throw new SourceControlError(409, "SNAPSHOT_NOT_MATERIALIZED",
+        "Revision requires incremental checkpoint migration before indexed reads");
+    }
+    return undefined; // v1 immutable tree compatibility only
+  }
+  return db.$transaction(async tx => {
+    const tree = new SnapshotTree(tx);
+    await tree.count(root.rootId); // verify root digest before following edges
+    return query(tree, root.rootId);
+  }, { timeout: 30000 });
+}
+
 export async function treeQuery(repositoryId: string, revision: string, directory = "", max = 200, cursor = "") {
   if (directory && !validPath(directory)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
+  const size = limitQuery(max, 500);
+  const indexed = await indexedSnapshot(repositoryId, id, (tree, root) =>
+    tree.directory(root, directory, size, cursor));
+  if (indexed) return { revision: id, directory, treeId: null, ...indexed };
+  // Only v1 trees lacking derived roots use the legacy stored tree payload.
   const tree = await cachedTree(repositoryId, id);
   const prefix = directory ? directory + "/" : "";
   const descendants = tree.entries.filter(e => e.path.startsWith(prefix));
@@ -114,7 +146,6 @@ export async function treeQuery(repositoryId: string, revision: string, director
     else if (!children.has(path)) children.set(path, { path, kind: "file", objectId: entry.objectId });
   }
   const sorted = [...children.values()].sort((a, b) => a.path.localeCompare(b.path));
-  const size = limitQuery(max, 500);
   const page = sorted.filter(e => e.path > cursor).slice(0, size + 1);
   return { revision: id, directory, treeId: tree.treeId, entries: page.slice(0, size),
     nextCursor: page.length > size ? page[size - 1].path : null };
@@ -123,6 +154,13 @@ export async function treeQuery(repositoryId: string, revision: string, director
 export async function resolvePath(repositoryId: string, revision: string, path: string) {
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
+  const indexed = await indexedSnapshot(repositoryId, id, async (tree, root) => {
+    const entry = await tree.get(root, path);
+    if (entry) return { revision: id, path, kind: "file" as const, objectId: entry.objectId };
+    if (await tree.hasPrefix(root, path + "/")) return { revision: id, path, kind: "directory" as const };
+    throw new SourceControlError(404, "PATH_NOT_FOUND", "Path does not exist at this revision");
+  });
+  if (indexed) return indexed;
   const tree = await cachedTree(repositoryId, id);
   const entry = tree.entries.find(e => e.path === path);
   if (entry) return { revision: id, path, kind: "file", objectId: entry.objectId };
