@@ -85,8 +85,11 @@ export function assessNativeChangeset(input: {
     if (/((^|\/)package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(op.path)) {
       note("MEDIUM", "DEPENDENCY", "Dependency manifest: " + op.path, 25);
     }
+    if (newBytes && newBytes.length > 128000) {
+      note("HIGH", "LARGE_CONTENT_REQUIRES_REVIEW", "Content exceeds bounded automated inspection for " + op.path, 60);
+    }
     if (newBytes && newBytes.length) {
-      // Examine the entire verified object for deterministic indicators, not only the model excerpt.
+      // Analyze captured content; large objects are explicitly flagged for manual review.
       const content = Buffer.from(newBytes).toString("utf8");
       if (secretPattern.test(content)) note("CRITICAL", "POTENTIAL_SECRET", "Potential credential material in " + op.path, 90);
       if (!region.binary && excerpt.join("").length < 14000 && !secretPattern.test(content)) {
