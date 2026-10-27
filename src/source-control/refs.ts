@@ -178,20 +178,7 @@ async function mutateWithinTransaction(tx: Prisma.TransactionClient, repositoryI
     if (isDefault && kind !== "BRANCH") throw new SourceControlError(422, "INVALID_REFERENCE_KIND", "Default branch must be a branch");
     const policy = await tx.sourceReferencePolicy.findUnique({ where: { repositoryId_name: { repositoryId, name: input.name } } });
     const protectedRef = isDefault || policy?.protected === true;
-    // Protected Git updates require signed approval and exact-target checks.
-    // Other writers must use the native integration worker.
     let protectedEvidence: Awaited<ReturnType<typeof assertSignedGitProtectedUpdate>> | null = null;
-    if ((input.operation === "CREATE" || input.operation === "UPDATE" || input.operation === "RESTORE") &&
-        protectedRef && !input.force) {
-      if (actor.gitCredentialId && input.operation === "UPDATE" &&
-          current && !current.deletedAt && current.kind === "BRANCH" && input.changesetId) {
-        protectedEvidence = await assertSignedGitProtectedUpdate(
-          tx, repositoryId, current.changesetId, input.changesetId);
-      } else {
-        throw new SourceControlError(403, "INTEGRATION_REQUIRED",
-          "Protected refs require signed checks and approved integration");
-      }
-    }
     if ((protectedRef || isDefault) && input.force) throw new SourceControlError(403, "PROTECTED_REFERENCE", "Force updates are forbidden on protected references");
     if (input.operation === "DELETE" && (protectedRef || policy?.allowDelete === false)) {
       throw new SourceControlError(403, "PROTECTED_REFERENCE", "Deleting this reference is forbidden");
@@ -206,6 +193,19 @@ async function mutateWithinTransaction(tx: Prisma.TransactionClient, repositoryI
     }
     if (input.expectedChangesetId && oldId !== input.expectedChangesetId) {
       throw new SourceControlError(409, "REFERENCE_CONFLICT", "Reference target changed");
+    }
+    // Protected Git updates require signed approval and exact-target checks.
+    // Other writers must use the native integration worker.
+    if ((input.operation === "CREATE" || input.operation === "UPDATE" || input.operation === "RESTORE") &&
+        protectedRef && !input.force) {
+      if (actor.gitCredentialId && input.operation === "UPDATE" &&
+          current && !current.deletedAt && current.kind === "BRANCH" && input.changesetId) {
+        protectedEvidence = await assertSignedGitProtectedUpdate(
+          tx, repositoryId, current.changesetId, input.changesetId);
+      } else {
+        throw new SourceControlError(403, "INTEGRATION_REQUIRED",
+          "Protected refs require signed checks and approved integration");
+      }
     }
     if (input.operation === "UPDATE" && current?.deletedAt) {
       throw new SourceControlError(409, "REFERENCE_DELETED", "Deleted reference requires explicit restore");
