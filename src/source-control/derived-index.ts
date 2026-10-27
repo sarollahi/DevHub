@@ -13,6 +13,8 @@ type Computation = {
   jumps?: { repositoryId: string; changesetId: string; version: number; level: number; ancestorId: string }[];
   postings?: { repositoryId: string; changesetId: string; version: number; position: number; role: string; path: string;
     generation: number; kind: string; previousPath: string | null; objectId: string | null }[];
+  blameFiles?: { repositoryId: string; changesetId: string; version: number; position: number; path: string;
+    generation: number; objectId: string; state: string; lineCount: number; spans: unknown; checksum: string | null }[];
 };
 type Context = { change: Change; parents: Map<string, Payload[]>; current: Map<string, Payload> };
 type Definition = {
@@ -120,12 +122,11 @@ const definitions: Record<DerivedKind, Definition> = {
     return { payload: { opCount, changedPaths: current.get("changed-paths")?.count ?? 0,
       firstParentOperations, mergeParents: Math.max(0, change.parents.length - 1) } };
   } },
-  blame: { parentDependency: true, prerequisites: ["history"], async compute({ change, current }) {
-    // File-level provenance is served through indexed history; existing line
-    // matching remains the bounded independent correctness implementation.
-    return { payload: { historyGeneration: current.get("history")?.generation ?? null,
-      updatedFiles: change.operations.filter(op => op.kind !== "DELETE").length,
-      lineProvenance: "ON_DEMAND" } };
+  blame: { parentDependency: true, prerequisites: ["history"], async compute({ change }) {
+    // Sparse changed-file origins only; no full-repository line snapshot.
+    const { computeBlameFiles } = await import("./indexed-blame");
+    const computed = await computeBlameFiles(change);
+    return { payload: computed.payload, blameFiles: computed.files };
   } },
 };
 
@@ -197,6 +198,13 @@ export async function processDerivedIndex(changesetId: string, kind: DerivedKind
       if (output.postings?.length) {
         for (let i = 0; i < output.postings.length; i += 250) {
           await tx.sourceDerivedPathEvent.createMany({ data: output.postings.slice(i, i + 250) });
+        }
+      }
+      if (output.blameFiles?.length) {
+        for (let i = 0; i < output.blameFiles.length; i += 100) {
+          await tx.sourceDerivedBlameFile.createMany({ data: output.blameFiles.slice(i, i + 100).map(file => ({
+            ...file, spans: file.spans === null ? Prisma.DbNull : file.spans as Prisma.InputJsonValue,
+          })) });
         }
       }
     }, { timeout: 60000 });
