@@ -214,7 +214,9 @@ async function main() {
     if (entry.newSha !== NULL && !changesetId) throw new Error("Git tip is not mapped to a native changeset");
     const operation = entry.newSha === NULL ? "DELETE" :
       current?.deletedAt ? "RESTORE" : current ? "UPDATE" : "CREATE";
-    const digest = createHash("sha256").update(JSON.stringify([entry.name, entry.oldSha, entry.newSha])).digest("hex");
+    const digest = createHash("sha256").update(JSON.stringify([
+      entry.name, operation, entry.oldSha, entry.newSha, current?.generation ?? null,
+    ])).digest("hex");
     mutations.push({
       name: entry.name, kind: entry.kind, operation,
       changesetId: changesetId ?? undefined,
