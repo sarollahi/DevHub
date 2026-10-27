@@ -199,3 +199,8 @@ Browse views use page-sized file lists and 180-line server-rendered code windows
 
 A separate workflow `.github/workflows/web-e2e.yml` seeds an isolated PostgreSQL repository fixture and exercises browser interactions, permission filtering, native search, revision comparison, review and settings navigation, an axe WCAG audit, and a basic navigation latency guard using pinned Playwright/Chromium. The fixture is only available when `WEB_E2E_FIXTURE=isolated-ci`. Local test reproduction requires a PostgreSQL instance, schema deployment, a test user and a Playwright-capable browser environment; never run the browser fixture against production data.
 
+
+
+### Git interoperability
+
+Native changesets remain authoritative. A separately deployed [Git smart-HTTP gateway](docs/git-interoperability.md) offers Git clone/fetch and policy-checked fast-forward push through a disposable, regenerable Git projection. It requires short-lived scoped Git credentials, an isolated cache and a trusted HTTPS proxy. Protected native refs do not accept direct Git pushes. See the security and interoperability limitations before enabling the service.
