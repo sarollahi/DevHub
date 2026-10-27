@@ -170,11 +170,13 @@ async function main() {
   // Import all missing ancestry for all refs once, in topological order.
   // No authoritative ref can move until every proposed object has passed checks.
   const newTips = [...new Set(requested.filter(x => x.newSha !== NULL).map(x => x.newSha))];
-  const oldTips = [...new Set(requested.filter(x => x.oldSha !== NULL).map(x => x.oldSha))];
+  // The disposable Git cache contains only native-published histories.
+  // Exclude all mapped reachable refs so a new branch on a deep base imports
+  // only its delta rather than traversing/reimporting every ancestor.
   const commits: string[] = [];
   if (newTips.length) {
     for await (const sha of gitLines(dir,
-      ["rev-list", "--topo-order", "--reverse", ...newTips, ...oldTips.map(sha => "^" + sha)])) {
+      ["rev-list", "--topo-order", "--reverse", ...newTips, "--not", "--all"])) {
       if (!SHA.test(sha)) throw new Error("Invalid Git object ID");
       if (commits.push(sha) > MAX_COMMITS) throw new Error("Push exceeds 2,000 new Git commits");
     }
