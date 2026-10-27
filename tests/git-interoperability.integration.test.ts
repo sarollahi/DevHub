@@ -173,6 +173,14 @@ test("native binary/modes/ancestry round-trip over Git smart HTTP with fail-clos
       repositoryId_name: { repositoryId: repository.id, name: "batch-branch" },
     } })).deletedAt);
 
+    await git(clone, "-c", "http.extraHeader=" + header, "push", "origin",
+      "HEAD:refs/heads/batch-branch");
+    const restored = await db.sourceReference.findUniqueOrThrow({ where: {
+      repositoryId_name: { repositoryId: repository.id, name: "batch-branch" },
+    } });
+    assert.equal(restored.deletedAt, null);
+    assert.equal(restored.changesetId, batchBranch.changesetId);
+
     // Non-fast-forward updates require a scoped admin token, explicit old-SHA
     // lease, an audited reason, and opt-in native reference policy.
     await git(clone, "checkout", "dev");
