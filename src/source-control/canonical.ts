@@ -335,6 +335,29 @@ export async function getCanonicalSnapshot(repositoryId: string, changesetId: st
     .map(([path, entry]) => ({ path, ...entry })) };
 }
 
+// Internal review-worker access is tied to an active, exact changeset review lease.
+// It never changes the authentication requirement of externally reachable read APIs.
+export async function getCanonicalSnapshotForReview(
+  repositoryId: string, changesetId: string, reviewedChangesetId: string, lease: Date,
+) {
+  const review = await db.sourceReview.findFirst({ where: {
+    repositoryId, changesetId: reviewedChangesetId, state: "RUNNING", leaseUntil: lease,
+  }, select: { changesetId: true } });
+  if (!review) throw new SourceControlError(403, "REVIEW_LEASE_REQUIRED", "An active review lease is required");
+  const reviewed = await db.sourceChangeset.findFirst({ where: {
+    id: reviewedChangesetId, repositoryId,
+  }, select: { parents: { where: { position: 0 }, select: { parentId: true } } } });
+  if (!reviewed || (changesetId !== reviewedChangesetId && changesetId !== reviewed.parents[0]?.parentId)) {
+    throw new SourceControlError(403, "REVIEW_SCOPE_DENIED", "Review may only inspect its changeset and first parent");
+  }
+  const change = await db.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId },
+    select: { treeId: true } });
+  if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
+  const state = await db.$transaction(tx => snapshot(tx, repositoryId, changesetId), { timeout: 20000 });
+  return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, entry]) => ({ path, ...entry })) };
+}
+
 export async function listCanonicalEvents(repositoryId: string, limit = 30, actor?: SourceActor) {
   if (!actor) throw new SourceControlError(401, "UNAUTHORIZED", "Authentication required");
   await assertRepositoryPermission(actor, repositoryId, "source:read");
