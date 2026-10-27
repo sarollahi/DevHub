@@ -1,13 +1,15 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { isAdminRequest } from "@/lib/auth";
+import { sessionIdentity } from "@/lib/auth";
+import { assertRepositoryPermission } from "@/lib/authorization";
 import { db } from "@/lib/prisma";
 import WorkspaceShell from "@/components/workspace-shell";
 import { RiskBadge } from "@/components/status";
 import ReviewActions from "./review-actions";
 export const dynamic="force-dynamic";
 export default async function ReviewDetail({params}:{params:Promise<{id:string}>}) {
-  if (!(await isAdminRequest())) redirect("/login");
+  const actor = await sessionIdentity();
+  if (!actor) redirect("/login");
   const {id}=await params;
   if(!/^[0-9a-f]{64}$/.test(id)) notFound();
   const record = await db.sourceReview.findUnique({where:{changesetId:id},include:{
@@ -15,6 +17,7 @@ export default async function ReviewDetail({params}:{params:Promise<{id:string}>
       validation:true,approvals:true,repository:{select:{name:true,slug:true,ownerId:true}}}},
   }});
   if(!record) notFound();
+  try { await assertRepositoryPermission(actor, record.repositoryId, "source:read"); } catch { notFound(); }
   const related = Array.isArray(record.related)?record.related as Array<{changesetId:string;kind:string;score:number}>:[];
   const findings = Array.isArray(record.findings)?record.findings as Array<{severity:string;code:string;message:string;advisory:boolean}>:[];
   const approved=record.changeset.approvals.some(a=>a.userId===record.changeset.repository.ownerId && a.decision==="APPROVED");

@@ -2,7 +2,7 @@
 
 **AI-native contribution infrastructure, designed for bursty agent-generated pull requests and human-controlled decisions.**
 
-DevHub is **not a GitHub wrapper**. Its intended product is a native Git host with identity-aware agent APIs, a durable event system, explicit review gates and serialized merge coordination. The present repository contains **milestone 1**, a functional PR-metadata ingestion and review-control prototype. It does **not yet serve Git smart HTTP**, execute external tests, perform semantic review, or merge real Git refs.
+DevHub is **not a GitHub wrapper**. Its intended product is a native Git host with identity-aware agent APIs, a durable event system, explicit review gates and serialized merge coordination. The repository now contains the original metadata ingestion workflow alongside native immutable changesets, source queries, validation, integration, and a real-data web workspace. It does not serve Git smart HTTP. Native source-control APIs, isolated validation runners, advisory semantic review providers, and guarded reference integrations are separate services; see their architecture documentation for current deployment limits.
 
 ## Current implementation
 
@@ -42,7 +42,7 @@ npm run dispatcher
 npm run worker
 ```
 
-Visit <http://localhost:3000/login> and use your `ADMIN_TOKEN`. All infrastructure ports are bound to localhost in Compose; the app is not production hardened and should not be exposed publicly.
+Visit <http://localhost:3000/login> and sign in with the human account email provisioned by the seed command and its `BOOTSTRAP_USER_PASSWORD`. All infrastructure ports are bound to localhost in Compose; the app is not production hardened and should not be exposed publicly.
 
 ### Submit a contribution
 
@@ -180,3 +180,22 @@ Native changeset publication enqueues a PostgreSQL-backed analysis job, independ
 ### Concurrent native change integration
 
 Immutable changesets can be prepared and checked concurrently. A signed, policy-controlled atomic ref CAS publishes exactly one target update per generation, with conflict detection, durable retry, audits, and safe inverse changesets. [Implementation and operations](docs/change-integration.md).
+
+
+## Enterprise repository web workspace
+
+Open `/repositories` after signing in with the provisioned human account. The source-control workspace is organized around individual repositories:
+
+- **Files:** `/repositories/{id}/browse` — tracked directories and exact file contents, revision selection, line-window paging, download, file history and blame.
+- **Refs:** `/repositories/{id}/source` — authoritative ref history and controls, plus Git import.
+- **History and compare:** `/repositories/{id}/history`, `/compare` — canonical changesets, first-parent file history and server-computed file differences.
+- **Search:** `/repositories/{id}/search` — native path search and incremental content-index search across an exact immutable revision.
+- **Reviews and checks:** `/repositories/{id}/reviews`, `/checks` — grouped review decisions, deterministic risk, asynchronous pipelines, streamed logs and artifacts.
+- **Integrations, agents, settings:** `/integrations`, `/agents`, `/settings` — durable merge/revert audit, delegated machine identities and repository/organization permissions.
+
+All result tables read persistent records and respect authenticated repository access. Content search indexes UTF-8 blobs by immutable SHA-256 identity rather than trusting user-submitted patch text. Start `npm run worker:source-index` for the restart-recoverable path and content index queues. Newly requested content can report **INDEXING** until the worker catches up; results may be incomplete during this interval. Indexed text is limited to **256 KiB per object**; binary, invalid UTF-8 and larger files do not appear in content matches. Queries are bounded to 2–128 characters, at most 100 results per page, and the current canonical snapshot limit of 10,000 paths. Every reported file is re-authorized by path, and direct content-download endpoints also enforce restricted-path checks. Protected ref updates are still enforced by the existing authoritative services; web output is not approval evidence.
+
+Browse views use page-sized file lists and 180-line server-rendered code windows, rather than mounting huge DOM tables. Search is paginated by path; comparison lists 20 changed files per page. The UI includes keyboard-focus states, a skip-to-content link, reduced-motion support, and explicit loading, missing-resource and error-retry states.
+
+A separate workflow `.github/workflows/web-e2e.yml` seeds an isolated PostgreSQL repository fixture and exercises browser interactions, permission filtering, native search, revision comparison, review and settings navigation, an axe WCAG audit, and a basic navigation latency guard using pinned Playwright/Chromium. The fixture is only available when `WEB_E2E_FIXTURE=isolated-ci`. Local test reproduction requires a PostgreSQL instance, schema deployment, a test user and a Playwright-capable browser environment; never run the browser fixture against production data.
+
