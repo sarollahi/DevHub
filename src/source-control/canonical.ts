@@ -10,6 +10,7 @@ import { deriveChangesetMetadata } from "./derived";
 import { assertRepositoryPermission } from "../lib/authorization";
 import { verifiedBlobStream } from "../object-store/service";
 import { SnapshotTree, publishedSnapshotRoot, type SnapshotEntry } from "./snapshot-tree";
+import { legacyRoot, advanceSnapshotBuild } from "./snapshot-backfill";
 
 const digest = (data: string) => createHash("sha256").update(data).digest("hex");
 const id = z.string().regex(/^[a-f0-9]{64}$/);
@@ -28,14 +29,12 @@ export const canonicalInputSchema = z.object({
   parents: z.array(id).max(8).default([]),
   description: z.string().trim().min(1).max(2000),
   idempotencyKey: z.string().min(1).max(128).optional(),
-  operations: z.array(operation).max(200),
+  operations: z.array(operation).max(5000),
 }).strict();
 export type CanonicalInput = z.infer<typeof canonicalInputSchema>;
 type Operation = CanonicalInput["operations"][number];
-type Entry = { objectId: string; mode: "100644" | "100755" | "120000" };
-type State = Map<string, Entry>;
 type Tx = Prisma.TransactionClient;
-const limits = { maxDepth: 100000, maxPaths: 2000000, maxObjectBytes: 4 * 1024 * 1024 };
+const limits = { maxObjectBytes: 4 * 1024 * 1024 };
 
 function inputOrError(input: unknown): CanonicalInput {
   const parsed = canonicalInputSchema.safeParse(input);
@@ -51,80 +50,6 @@ function canonicalId(repositoryId: string, authorId: string, input: CanonicalInp
   return digest(JSON.stringify([2, repositoryId, authorId, input.parents, input.description, input.operations]));
 }
 
-function validState(state: State) {
-  if (state.size > limits.maxPaths) throw new SourceControlError(413, "TOO_MANY_PATHS", "Repository snapshot exceeds 2,000,000 paths");
-  for (const path of state.keys()) {
-    if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH_GRAPH", "Invalid stored path");
-    const parts = path.split("/");
-    for (let n = 1; n < parts.length; n++) {
-      if (state.has(parts.slice(0, n).join("/"))) {
-        throw new SourceControlError(422, "INVALID_PATH_GRAPH", "A file cannot contain other files");
-      }
-    }
-  }
-}
-
-function apply(state: State, op: { kind: string; path: string; previousPath?: string | null; objectId?: string | null; fileMode?: string | null }) {
-  const old = state.get(op.path);
-  if (op.kind === "ADD") {
-    if (old) throw new SourceControlError(409, "DESTINATION_EXISTS", op.path);
-    state.set(op.path, { objectId: op.objectId!, mode: (op.fileMode || "100644") as Entry["mode"] });
-  } else if (op.kind === "MODIFY" || op.kind === "PUT") {
-    if (op.kind === "MODIFY" && !old) throw new SourceControlError(409, "MISSING_SOURCE", op.path);
-    state.set(op.path, { objectId: op.objectId!, mode: (op.fileMode || old?.mode || "100644") as Entry["mode"] });
-  } else if (op.kind === "DELETE") {
-    if (!old) throw new SourceControlError(409, "MISSING_SOURCE", op.path);
-    state.delete(op.path);
-  } else if (op.kind === "RENAME" || op.kind === "MOVE" || op.kind === "COPY") {
-    const from = state.get(op.previousPath!);
-    if (!from) throw new SourceControlError(409, "MISSING_SOURCE", op.previousPath!);
-    if (old || op.previousPath === op.path) throw new SourceControlError(409, "DESTINATION_EXISTS", op.path);
-    if (op.kind !== "COPY") state.delete(op.previousPath!);
-    state.set(op.path, { ...from });
-  } else if (op.kind === "CHMOD") {
-    if (!old || old.mode === "120000") throw new SourceControlError(409, "INVALID_MODE_CHANGE", op.path);
-    if (old.mode === op.fileMode) throw new SourceControlError(409, "UNCHANGED_MODE", op.path);
-    state.set(op.path, { ...old, mode: op.fileMode as Entry["mode"] });
-  } else {
-    throw new SourceControlError(422, "INVALID_OPERATION", "Unrecognized operation");
-  }
-}
-
-async function snapshot(tx: Tx, repositoryId: string, head: string | undefined): Promise<State> {
-  const chain: Array<{ operations: Array<{ kind: string; path: string; previousPath: string | null; objectId: string | null; fileMode: string | null }> }> = [];
-  const seen = new Set<string>();
-  let cursor = head;
-  let state: State = new Map();
-  while (cursor) {
-    if (seen.has(cursor) || seen.size >= limits.maxDepth) {
-      throw new SourceControlError(422, "INVALID_GRAPH", "Cyclic or excessively deep first-parent history");
-    }
-    seen.add(cursor);
-    const change = await tx.sourceChangeset.findFirst({ where: { repositoryId, id: cursor },
-      select: { id: true, treeId: true, parents: { where: { position: 0 }, select: { parentId: true } },
-        operations: { orderBy: { position: "asc" }, select: {
-          kind: true, path: true, previousPath: true, objectId: true, fileMode: true,
-        } } } });
-    if (!change) throw new SourceControlError(422, "UNKNOWN_PARENT", "Parent does not belong to the repository");
-    if (change.treeId) {
-      const tree = await tx.sourceObject.findUnique({ where: { id: change.treeId } });
-      if (!tree || tree.kind !== "TREE") throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing legacy tree");
-      if (!tree.data) throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing legacy tree payload");
-      state = new Map(decodeTree(tree.data, tree.id).map(x =>
-        [x.path, { objectId: x.objectId, mode: x.mode || "100644" }]));
-      break;
-    }
-    chain.push(change);
-    cursor = change.parents[0]?.parentId;
-  }
-  for (const change of chain.reverse()) {
-    for (const op of change.operations) apply(state, op);
-  }
-  validState(state);
-  return state;
-}
-
-
 async function rootFor(tx: Tx, repositoryId: string, head: string | undefined, tree: SnapshotTree) {
   if (!head) return tree.empty();
   const existing = await publishedSnapshotRoot(tx, repositoryId, head);
@@ -132,29 +57,33 @@ async function rootFor(tx: Tx, repositoryId: string, head: string | undefined, t
     await tree.count(existing.rootId);
     return existing.rootId;
   }
-  // One-time legacy migration. No existing identity or ancestry is rewritten.
-  const state = await snapshot(tx, repositoryId, head);
-  const computed = await tree.materialize(state);
-  await tree.persist(computed);
-  await tx.sourceSnapshotRoot.createMany({
-    data: [{ changesetId: head, repositoryId, rootId: computed }], skipDuplicates: true,
-  });
-  const actual = await publishedSnapshotRoot(tx, repositoryId, head);
-  if (!actual || actual.rootId !== computed) {
-    throw new SourceControlError(409, "CORRUPT_SNAPSHOT", "Snapshot materialization is inconsistent");
-  }
-  return actual.rootId;
+  const legacy = await tx.sourceChangeset.findFirst({ where: { id: head, repositoryId },
+    select: { treeId: true } });
+  if (!legacy) throw new SourceControlError(422, "UNKNOWN_PARENT", "Parent not in repository");
+  // A legacy v1 revision has a canonical full tree, so it needs no replay.
+  if (legacy.treeId) return legacyRoot(tx, repositoryId, head, legacy.treeId, tree);
+  throw new SourceControlError(409, "SNAPSHOT_NOT_MATERIALIZED",
+    "Parent is missing an incremental checkpoint; use the resumable snapshot backfill");
 }
 
 export async function materializeCanonicalSnapshot(repositoryId: string, changesetId: string, actor: SourceActor) {
-  return db.$transaction(async tx => {
-    await assertRepositoryPermission(actor, repositoryId, "source:read", {}, tx);
-    const change = await tx.sourceChangeset.findFirst({ where: { repositoryId, id: changesetId }, select: { id: true } });
-    if (!change) throw new SourceControlError(404, "NOT_FOUND", "Changeset not found");
-    const tree = new SnapshotTree(tx);
-    const rootId = await rootFor(tx, repositoryId, changesetId, tree);
-    return { changesetId, rootId, pathCount: await tree.count(rootId) };
-  }, { timeout: 120000, maxWait: 15000 });
+  return advanceSnapshotBuild(repositoryId, changesetId, actor);
+}
+
+async function legacySnapshotRead(tx: Tx, repositoryId: string, changesetId: string) {
+  const change = await tx.sourceChangeset.findFirst({ where: { id: changesetId, repositoryId },
+    select: { treeId: true } });
+  if (!change?.treeId) {
+    throw new SourceControlError(409, "SNAPSHOT_NOT_MATERIALIZED",
+      "Incremental checkpoint missing; explicit resumable backfill required");
+  }
+  const object = await tx.sourceObject.findUnique({ where: { id: change.treeId } });
+  if (!object?.data || object.kind !== "TREE") {
+    throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing legacy tree");
+  }
+  return decodeTree(object.data, change.treeId).map(e => ({
+    path: e.path, objectId: e.objectId, mode: e.mode || "100644",
+  }));
 }
 
 async function checkedBlob(tx: Tx, repositoryId: string, blobId: string, asSymlink = false): Promise<Uint8Array> {
@@ -335,13 +264,17 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
         await tx.sourceChangeset.create({ data: {
           id: changesetId, repositoryId, treeId: null, authorId, message: input.description,
           parents: { create: input.parents.map((parentId, position) => ({ parentId, position })) },
-          operations: { create: persisted.map(p => ({
-            kind: p.kind, path: p.path, previousPath: p.previousPath, objectId: p.objectId,
-            position: p.position, fileMode: p.fileMode,
-          })) },
           validation: { create: { state: "SUCCESS", ...meta } },
           review: { create: { repositoryId } },
         } });
+        // Persist large operation sets in bounded SQL statements, preserving
+        // the ordered canonical identity and transactional atomicity.
+        for (let offset = 0; offset < persisted.length; offset += 250) {
+          await tx.sourceFileOperation.createMany({ data: persisted.slice(offset, offset + 250).map(p => ({
+            changesetId, kind: p.kind, path: p.path, previousPath: p.previousPath,
+            objectId: p.objectId, position: p.position, fileMode: p.fileMode,
+          })) });
+        }
         await tx.sourceSnapshotRoot.create({ data: { repositoryId, changesetId, rootId } });
         await tx.sourceQueryIndexJob.create({ data: { repositoryId, changesetId } });
         await tx.sourceChangesetEvent.create({ data: {
@@ -357,7 +290,7 @@ export async function createCanonicalChangeset(repositoryId: string, actor: Sour
         repositoryId, authorId, key: input.idempotencyKey, changesetId,
       } });
       return { id: changesetId, created: !existing };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout: 20000, maxWait: 15000 });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout: 120000, maxWait: 15000 });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002" && attempt < 3) {
       return createCanonicalChangeset(repositoryId, actor, body, attempt + 1);
@@ -393,9 +326,8 @@ export async function getCanonicalSnapshot(repositoryId: string, changesetId: st
       const tree = new SnapshotTree(tx);
       return { changesetId, treeId: change.treeId, entries: await tree.entries(root.rootId) };
     }
-    const state = await snapshot(tx, repositoryId, changesetId);
-    return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
-      .map(([path, entry]) => ({ path, ...entry })) };
+    return { changesetId, treeId: change.treeId,
+      entries: await legacySnapshotRead(tx, repositoryId, changesetId) };
   }, { timeout: 120000 });
 }
 
@@ -423,9 +355,8 @@ export async function getCanonicalSnapshotForReview(
       const tree = new SnapshotTree(tx);
       return { changesetId, treeId: change.treeId, entries: await tree.entries(root.rootId) };
     }
-    const state = await snapshot(tx, repositoryId, changesetId);
-    return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
-      .map(([path, entry]) => ({ path, ...entry })) };
+    return { changesetId, treeId: change.treeId,
+      entries: await legacySnapshotRead(tx, repositoryId, changesetId) };
   }, { timeout: 120000 });
 }
 
@@ -441,9 +372,8 @@ export async function readCanonicalSnapshotForValidation(repositoryId: string, c
       const tree = new SnapshotTree(tx);
       return { changesetId, treeId: change.treeId, entries: await tree.entries(root.rootId) };
     }
-    const state = await snapshot(tx, repositoryId, changesetId);
-    return { changesetId, treeId: change.treeId, entries: [...state.entries()].sort(([a], [b]) => a.localeCompare(b))
-      .map(([path, entry]) => ({ path, ...entry })) };
+    return { changesetId, treeId: change.treeId,
+      entries: await legacySnapshotRead(tx, repositoryId, changesetId) };
   }, { timeout: 120000 });
 }
 
