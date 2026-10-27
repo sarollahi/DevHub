@@ -48,7 +48,7 @@ async function authenticate(req: IncomingMessage, repositoryId: string, writing:
   const actor: SourceActor = { type: "HUMAN", id: credential.userId, gitCredentialId: credential.id };
   await assertRepositoryPermission(actor, repositoryId, writing ? "changeset:write" : "source:read",
     writing ? { allowStaging: true } : {});
-  if (writing) await assertRepositoryPermission(actor, repositoryId, "ref:update");
+  // The receive hook checks ref:update against the exact target branch.
   await consumeRequestQuota(repositoryId, actor);
   void db.gitInteropCredential.updateMany({ where: { id: credential.id, revokedAt: null },
     data: { lastUsedAt: new Date() } }).catch(() => undefined);
