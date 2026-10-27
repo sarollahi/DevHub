@@ -175,3 +175,8 @@ See [cache architecture, configuration, security, recovery, and performance veri
 ## Native intelligent review
 
 Native changeset publication enqueues a PostgreSQL-backed analysis job, independent of the legacy patch inbox. Run `npm run worker:review` and open `/reviews` to inspect grouped changes, overlap, exact duplicates, deterministic security flags, persisted metrics and human decisions bound to immutable revision hashes. Optional provider-backed summaries and embeddings are advisory and cannot authorize a reference update. See [native review documentation](docs/native-review.md) for boundaries and deployment.
+
+
+### Concurrent native change integration
+
+Immutable changesets can be prepared and checked concurrently. A signed, policy-controlled atomic ref CAS publishes exactly one target update per generation, with conflict detection, durable retry, audits, and safe inverse changesets. [Implementation and operations](docs/change-integration.md).
