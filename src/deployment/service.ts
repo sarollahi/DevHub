@@ -101,7 +101,7 @@ export async function processNextDeployment():Promise<boolean> {
    const message=(error instanceof Error?error.message:String(error)).slice(0,1000);
    const code=error instanceof SourceControlError?error.code:"DELIVERY_FAILED";
    const terminal=["DEPLOYMENT_STALE","NOT_INTEGRATED","SESSION_EXPIRED","CREDENTIAL_REVOKED",
-     "ACCESS_DENIED","POLICY_DENIED","VALIDATION_STALE"].includes(code) || job.attempts>=job.maxAttempts;
+     "ACCESS_DENIED","POLICY_DENIED","VALIDATION_STALE","VALIDATION_FAILED"].includes(code) || job.attempts>=job.maxAttempts;
    const blocked=code==="CHECKS_NOT_READY" || code==="VALIDATION_NOT_READY";
    await db.$transaction(async tx=>{
      const updated=await tx.deploymentExecution.updateMany({where:{id:job.id,leaseToken:lease,state:"DISPATCHING"},
@@ -123,6 +123,9 @@ export async function processNextDeployment():Promise<boolean> {
    // No deployment is dispatched using historical readiness, revoked sessions or moved refs.
    const gate=await deploymentGate(job.repositoryId,job.integrationId,actor,false);
    if(gate.revision!==job.revisionId)throw new SourceControlError(409,"DEPLOYMENT_STALE","Revision changed");
+   if(["FAILED","ERRORED","TIMED_OUT","CANCELLED"].includes(gate.validationState??"")) {
+     throw new SourceControlError(409,"VALIDATION_FAILED","Pre-deployment validation failed");
+   }
    if(!gate.ready)throw new SourceControlError(409,"VALIDATION_NOT_READY","Pre-deployment checks pending");
    const controller=getController(job.repositoryId,job.environment);
    const command=JSON.stringify({apiVersion:1,deploymentId:job.id,repositoryId:job.repositoryId,

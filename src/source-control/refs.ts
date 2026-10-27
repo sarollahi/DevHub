@@ -127,6 +127,9 @@ export async function mutateReference(repositoryId: string, actor: SourceActor, 
       if (priorRequest.requestHash !== hash) throw new SourceControlError(409, "MUTATION_ID_REUSED", "Mutation ID reused");
       return { ref: snapshot(priorRequest), replayed: true, eventId: priorRequest.id };
     }
+    // SHARE permits concurrent independent final ref CAS transactions while
+    // serializing changes to branch protection and repository bootstrap policy.
+    await tx.$queryRaw`SELECT id FROM "Repository" WHERE id = ${repositoryId}::uuid FOR SHARE`;
     const repo = await tx.repository.findUnique({ where: { id: repositoryId }, select: {
       defaultBranch: true, ownerId: true, requireHumanApproval: true,
     } });
