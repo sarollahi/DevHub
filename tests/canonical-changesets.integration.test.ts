@@ -86,6 +86,15 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     assert.notEqual(changed.rootId, rootRecord.rootId);
     assert.equal((await getCanonicalSnapshot(repo.id, root.id, actor)).entries.find(x => x.path === "docs/a.txt")?.objectId, alpha);
     assert.equal((await getCanonicalSnapshot(repo.id, edit.id, actor)).entries.find(x => x.path === "docs/a.txt")?.objectId, beta);
+    // The preceding implementation validated the final state of ordered
+    // operations. Temporary path overlap must remain legal when later resolved.
+    const ordered = await make("ordered parent replacement", [root.id], [
+      { kind: "ADD", path: "docs/a.txt/child", objectId: beta },
+      { kind: "DELETE", path: "docs/a.txt" },
+    ]);
+    const orderedPaths = (await getCanonicalSnapshot(repo.id, ordered.id, actor)).entries.map(x => x.path);
+    assert.ok(orderedPaths.includes("docs/a.txt/child"));
+    assert.ok(!orderedPaths.includes("docs/a.txt"));
     const damaged = new SnapshotTree({ sourceSnapshotNode: {
       findUnique: async () => ({ data: Buffer.from("not a valid snapshot") }),
     } } as never);
@@ -111,7 +120,7 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     assert.equal((await getCanonicalSnapshot(repo.id, right.id, actor)).entries.find(x => x.path === "links/doc")?.mode, "120000");
     assert.deepEqual((await getCanonicalChangeset(repo.id, merge.id, actor)).parents.map(x => x.parentId), [left.id, right.id]);
     assert.equal(await db.sourceReference.count({ where: { repositoryId: repo.id } }), 0);
-    assert.equal((await listCanonicalEvents(repo.id, 30, actor)).length, 5);
+    assert.equal((await listCanonicalEvents(repo.id, 30, actor)).length, 6);
   });
 
   await t.test("v2 delta changesets are queryable without client checkout", async () => {
