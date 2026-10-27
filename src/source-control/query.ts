@@ -5,6 +5,7 @@ import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
 import { decodeTree, encodeTree, objectId } from "./storage";
 import { getTree as readTree } from "./service";
+import { SnapshotTree, publishedSnapshotRoot } from "./snapshot-tree";
 import { verifiedBlobStream } from "../object-store/service";
 import { blameLines, compareEntries, mergeEntries, textPatch } from "./query-algorithms";
 
@@ -54,54 +55,105 @@ export async function resolveRevision(repositoryId: string, revision: string): P
 
 // PostgreSQL's recursive UNION removes already visited vertices even in wide
 // merge-heavy DAGs. Edges are read from the parent table, not from file trees.
+// Legacy bulk ancestry helper retained for callers that explicitly request
+// the complete DAG. Ordinary history and merge-base queries avoid this map.
 export async function ancestors(repositoryId: string, revision: string): Promise<string[]> {
   const id = await resolveRevision(repositoryId, revision);
   const rows = await db.$queryRaw<{ id: string }[]>`
     WITH RECURSIVE reachable(id) AS (
       SELECT id FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
       UNION
-      SELECT p."parentId" FROM "SourceChangesetParent" p
-        JOIN reachable r ON r.id = p."changesetId"
+      SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON r.id = p."changesetId"
     )
-    SELECT id FROM reachable LIMIT 100001
+    SELECT id FROM reachable
   `;
-  if (rows.length > 100000) throw new SourceControlError(413, "HISTORY_LIMIT", "Ancestry exceeds 100,000 changesets");
   return rows.map(row => row.id);
 }
 
 export async function isAncestor(repositoryId: string, ancestor: string, descendant: string): Promise<boolean> {
-  const a = await resolveRevision(repositoryId, ancestor);
-  return (await ancestors(repositoryId, descendant)).includes(a);
+  const [a, d] = await Promise.all([resolveRevision(repositoryId, ancestor), resolveRevision(repositoryId, descendant)]);
+  const rows = await db.$queryRaw<{ found: boolean }[]>`
+    WITH RECURSIVE reachable(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${d} AND "repositoryId" = ${repositoryId}::uuid
+      UNION
+      SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON r.id = p."changesetId"
+    )
+    SELECT EXISTS(SELECT 1 FROM reachable WHERE id = ${a}) AS found
+  `;
+  return rows[0]?.found === true;
 }
 
+// Merge bases are evaluated in the database. No 100k-vertex JavaScript Sets.
 export async function mergeBases(repositoryId: string, leftRevision: string, rightRevision: string) {
-  const [left, right] = await Promise.all([ancestors(repositoryId, leftRevision), ancestors(repositoryId, rightRevision)]);
-  const leftSet = new Set(left);
-  const shared = new Set(right.filter(id => leftSet.has(id)));
-  if (!shared.size) return [];
-  // Shared is ancestry-closed. A shared parent with a shared child cannot
-  // be a lowest common ancestor; this also preserves multiple criss-cross bases.
-  const bases = new Set(shared);
-  for (const group of chunks([...shared])) {
-    const edges = await db.sourceChangesetParent.findMany({
-      where: { changesetId: { in: group } }, select: { parentId: true },
-    });
-    for (const edge of edges) if (shared.has(edge.parentId)) bases.delete(edge.parentId);
-  }
-  return [...bases].sort();
+  const [left, right] = await Promise.all([
+    resolveRevision(repositoryId, leftRevision), resolveRevision(repositoryId, rightRevision),
+  ]);
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    WITH RECURSIVE lhs(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${left} AND "repositoryId" = ${repositoryId}::uuid
+      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN lhs r ON p."changesetId" = r.id
+    ), rhs(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${right} AND "repositoryId" = ${repositoryId}::uuid
+      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN rhs r ON p."changesetId" = r.id
+    ), shared AS (SELECT id FROM lhs INTERSECT SELECT id FROM rhs)
+    SELECT s.id FROM shared s WHERE NOT EXISTS (
+      SELECT 1 FROM "SourceChangesetParent" p JOIN shared child ON child.id = p."changesetId"
+      WHERE p."parentId" = s.id
+    ) ORDER BY s.id
+  `;
+  return rows.map(r => r.id);
 }
 
 export async function ancestryQuery(repositoryId: string, revision: string, other?: string, max = 100) {
   const resolved = await resolveRevision(repositoryId, revision);
-  const nodes = await ancestors(repositoryId, resolved);
+  const size = limitQuery(max, 1000);
+  const rows = await db.$queryRaw<{ id: string; total: bigint }[]>`
+    WITH RECURSIVE reachable(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${resolved} AND "repositoryId" = ${repositoryId}::uuid
+      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON p."changesetId" = r.id
+    )
+    SELECT id, COUNT(*) OVER () AS total FROM reachable LIMIT ${size + 1}
+  `;
+  const count = Number(rows[0]?.total || 0);
   const common = other ? await mergeBases(repositoryId, resolved, other) : [];
-  return { revision: resolved, ancestorCount: nodes.length - 1, ancestors: nodes.slice(0, limitQuery(max, 1000)),
-    truncated: nodes.length > limitQuery(max, 1000), mergeBases: common };
+  return { revision: resolved, ancestorCount: Math.max(0, count - 1),
+    ancestors: rows.map(r => r.id).slice(0, size),
+    truncated: count > size, mergeBases: common };
+}
+
+// Exact immutable-root reads require no complete snapshot reconstruction.
+async function indexedSnapshot<T>(
+  repositoryId: string, revision: string,
+  query: (tree: SnapshotTree, root: string) => Promise<T>,
+): Promise<T | undefined> {
+  const root = await db.sourceSnapshotRoot.findFirst({
+    where: { repositoryId, changesetId: revision }, select: { rootId: true },
+  });
+  if (!root) {
+    const change = await db.sourceChangeset.findFirst({
+      where: { repositoryId, id: revision }, select: { treeId: true },
+    });
+    if (!change?.treeId) {
+      throw new SourceControlError(409, "SNAPSHOT_NOT_MATERIALIZED",
+        "Revision requires incremental checkpoint migration before indexed reads");
+    }
+    return undefined;
+  }
+  return db.$transaction(async tx => {
+    const tree = new SnapshotTree(tx);
+    await tree.count(root.rootId);
+    return query(tree, root.rootId);
+  }, { timeout: 30000 });
 }
 
 export async function treeQuery(repositoryId: string, revision: string, directory = "", max = 200, cursor = "") {
   if (directory && !validPath(directory)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
+  const size = limitQuery(max, 500);
+  const indexed = await indexedSnapshot(repositoryId, id, (tree, root) =>
+    tree.directory(root, directory, size, cursor));
+  if (indexed) return { revision: id, directory, treeId: null, ...indexed };
+  // Only v1 trees lacking derived roots use the legacy stored tree payload.
   const tree = await cachedTree(repositoryId, id);
   const prefix = directory ? directory + "/" : "";
   const descendants = tree.entries.filter(e => e.path.startsWith(prefix));
@@ -114,7 +166,6 @@ export async function treeQuery(repositoryId: string, revision: string, director
     else if (!children.has(path)) children.set(path, { path, kind: "file", objectId: entry.objectId });
   }
   const sorted = [...children.values()].sort((a, b) => a.path.localeCompare(b.path));
-  const size = limitQuery(max, 500);
   const page = sorted.filter(e => e.path > cursor).slice(0, size + 1);
   return { revision: id, directory, treeId: tree.treeId, entries: page.slice(0, size),
     nextCursor: page.length > size ? page[size - 1].path : null };
@@ -123,6 +174,13 @@ export async function treeQuery(repositoryId: string, revision: string, director
 export async function resolvePath(repositoryId: string, revision: string, path: string) {
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
+  const indexed = await indexedSnapshot(repositoryId, id, async (tree, root) => {
+    const entry = await tree.get(root, path);
+    if (entry) return { revision: id, path, kind: "file" as const, objectId: entry.objectId };
+    if (await tree.hasPrefix(root, path + "/")) return { revision: id, path, kind: "directory" as const };
+    throw new SourceControlError(404, "PATH_NOT_FOUND", "Path does not exist at this revision");
+  });
+  if (indexed) return indexed;
   const tree = await cachedTree(repositoryId, id);
   const entry = tree.entries.find(e => e.path === path);
   if (entry) return { revision: id, path, kind: "file", objectId: entry.objectId };
@@ -187,19 +245,19 @@ export async function diffQuery(repositoryId: string, from: string, to: string, 
 }
 
 type HistoryNode = { id: string; depth: number };
-async function firstParentChain(repositoryId: string, revision: string): Promise<HistoryNode[]> {
+// Used only by the bounded rebase preview. Never load 1m IDs to reject a
+// preview that supports at most 200 operations.
+async function firstParentChain(repositoryId: string, revision: string, maxDepth = 201): Promise<HistoryNode[]> {
   const id = await resolveRevision(repositoryId, revision);
-  const rows = await db.$queryRaw<HistoryNode[]>`
+  return db.$queryRaw<HistoryNode[]>`
     WITH RECURSIVE first_parent(id, depth) AS (
       SELECT id, 0 FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
       UNION ALL
       SELECT p."parentId", f.depth + 1 FROM "SourceChangesetParent" p
         JOIN first_parent f ON p."changesetId" = f.id WHERE p.position = 0
     )
-    SELECT id, depth FROM first_parent LIMIT 100001
+    SELECT id, depth FROM first_parent LIMIT ${maxDepth + 1}
   `;
-  if (rows.length > 100000) throw new SourceControlError(413, "HISTORY_LIMIT", "First-parent history exceeds 100,000 changesets");
-  return rows;
 }
 
 export type FileHistoryEvent = {
@@ -207,47 +265,65 @@ export type FileHistoryEvent = {
   objectId: string | null; authorId: string; message: string; createdAt: Date;
 };
 
+type FileHistoryRow = {
+  changesetId: string; path: string; kind: string; previousPath: string | null;
+  objectId: string | null; depth: number;
+};
+
+// A recursive first-parent walk is executed within PostgreSQL. Only relevant
+// file operations (up to the caller's page limit) enter JS memory. Rename
+// following resumes after the rename's depth, independent of history length.
 export async function fileHistory(repositoryId: string, revision: string, path: string, followRenames = true, max = 100) {
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
-  const chain = await firstParentChain(repositoryId, id);
-  const index = new Map(chain.map((node, i) => [node.id, i]));
-  const events: { changesetId: string; path: string; kind: string; previousPath: string | null; objectId: string | null }[] = [];
+  const size = limitQuery(max, 1000);
+  const events: FileHistoryRow[] = [];
   let current = path;
-  let offset = 0;
-  while (offset < chain.length) {
-    const candidates: typeof events = [];
-    for (const batch of chunks(chain.slice(offset).map(node => node.id))) {
-      const matches = await db.sourceFileOperation.findMany({ where: { changesetId: { in: batch },
-        OR: [{ path: current }, { previousPath: current }] },
-        select: { changesetId: true, path: true, kind: true, previousPath: true, objectId: true } });
-      candidates.push(...matches);
-    }
-    candidates.sort((a, b) => index.get(a.changesetId)! - index.get(b.changesetId)!);
-    let renamed = false;
-    for (const change of candidates) {
-      const position = index.get(change.changesetId)!;
-      if (position < offset) continue;
-      if (change.path !== current) continue; // MOVE source is represented at destination.
-      events.push(change);
-      if (followRenames && (change.kind === "MOVE" || change.kind === "RENAME") && change.previousPath) {
-        current = change.previousPath;
-        offset = position + 1;
-        renamed = true;
+  let fromDepth = 0;
+  let truncated = false;
+  // Each rename consumes at least one event, so this loop is bounded by size.
+  while (events.length <= size) {
+    const limit = size + 1 - events.length;
+    const candidates = await db.$queryRaw<FileHistoryRow[]>`
+      WITH RECURSIVE chain(id, depth) AS (
+        SELECT id, 0 FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
+        UNION ALL SELECT p."parentId", f.depth + 1
+          FROM "SourceChangesetParent" p JOIN chain f ON p."changesetId" = f.id
+          WHERE p.position = 0
+      )
+      SELECT op."changesetId", op.path, op.kind::text AS kind,
+        op."previousPath", op."objectId", chain.depth
+      FROM chain JOIN "SourceFileOperation" op ON op."changesetId" = chain.id
+      WHERE chain.depth >= ${fromDepth} AND op.path = ${current}
+      ORDER BY chain.depth, op.position LIMIT ${limit}
+    `;
+    if (!candidates.length) break;
+    let rename = false;
+    for (const candidate of candidates) {
+      events.push(candidate);
+      if (events.length > size) { truncated = true; break; }
+      if (followRenames && (candidate.kind === "MOVE" || candidate.kind === "RENAME") && candidate.previousPath) {
+        current = candidate.previousPath;
+        fromDepth = Number(candidate.depth) + 1;
+        rename = true;
         break;
       }
     }
-    if (!renamed) break;
+    if (truncated || !rename) break;
   }
-  const selected = events.slice(0, limitQuery(max, 1000));
-  const metadata = await db.sourceChangeset.findMany({ where: { repositoryId, id: { in: selected.map(e => e.changesetId) } },
+  const selected = events.slice(0, size);
+  const metadata = await db.sourceChangeset.findMany({ where: { repositoryId,
+      id: { in: selected.map(e => e.changesetId) } },
     select: { id: true, authorId: true, message: true, createdAt: true } });
   const byId = new Map(metadata.map(row => [row.id, row]));
   const records: FileHistoryEvent[] = selected.map(e => {
-    const meta = byId.get(e.changesetId)!;
-    return { ...e, authorId: meta.authorId, message: meta.message, createdAt: meta.createdAt };
+    const meta = byId.get(e.changesetId);
+    if (!meta) throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing historical revision");
+    return { changesetId: e.changesetId, path: e.path, kind: e.kind,
+      previousPath: e.previousPath, objectId: e.objectId,
+      authorId: meta.authorId, message: meta.message, createdAt: meta.createdAt };
   });
-  return { revision: id, path, firstParentOnly: true, records, truncated: events.length > selected.length };
+  return { revision: id, path, firstParentOnly: true, records, truncated };
 }
 
 // Path-impact search uses durable precomputed touches when available, with
@@ -255,41 +331,38 @@ export async function fileHistory(repositoryId: string, revision: string, path: 
 export async function pathImpactQuery(repositoryId: string, revision: string, path: string, max = 100) {
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
-  const reachable = await ancestors(repositoryId, id);
-  const seen = new Set<string>();
-  const records: { changesetId: string; path: string; operationPath: string; role: string }[] = [];
-  const add = (changesetId: string, operationPath: string, role: string) => {
-    const key = changesetId + ":" + operationPath + ":" + role;
-    if (!seen.has(key)) { seen.add(key); records.push({ changesetId, path, operationPath, role }); }
-  };
-  for (const batch of chunks(reachable)) {
-    const complete = await db.sourceQueryIndexJob.findMany({
-      where: { changesetId: { in: batch }, state: "SUCCEEDED" }, select: { changesetId: true },
-    });
-    const indexedIds = complete.map(e => e.changesetId);
-    const indexed = new Set(indexedIds);
-    if (indexedIds.length) {
-      const touches = await db.sourceQueryPathTouch.findMany({ where: {
-        changesetId: { in: indexedIds }, path,
-      }, select: { changesetId: true, operationPath: true, role: true } });
-      for (const touch of touches) add(touch.changesetId, touch.operationPath, touch.role);
-    }
-    const missing = batch.filter(cid => !indexed.has(cid));
-    if (missing.length) {
-      const raw = await db.sourceFileOperation.findMany({ where: {
-        changesetId: { in: missing }, OR: [{ path }, { previousPath: path }],
-      }, select: { changesetId: true, path: true, previousPath: true } });
-      for (const op of raw) {
-        if (op.path === path) add(op.changesetId, op.path, "destination");
-        if (op.previousPath === path) add(op.changesetId, op.path, "source");
-      }
-    }
-  }
-  const order = new Map(reachable.map((value, index) => [value, index]));
-  records.sort((a, b) => order.get(a.changesetId)! - order.get(b.changesetId)!);
   const size = limitQuery(max, 1000);
-  return { revision: id, path, records: records.slice(0, size), total: records.length,
-    truncated: records.length > size };
+  // Use authoritative operations for revisions without a completed touch index.
+  // A failed/stale index must never replace those operations. Only a bounded
+  // result page leaves the database even for million-revision histories.
+  const rows = await db.$queryRaw<{
+    changesetId: string; operationPath: string; role: string; total: bigint;
+  }[]>`
+    WITH RECURSIVE reachable(id) AS (
+      SELECT id FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
+      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON p."changesetId" = r.id
+    ), touched AS (
+      SELECT t."changesetId", t."operationPath", t.role
+      FROM reachable r JOIN "SourceQueryIndexJob" job ON job."changesetId" = r.id AND job.state = 'SUCCEEDED'
+      JOIN "SourceQueryPathTouch" t ON t."changesetId" = r.id AND t.path = ${path}
+      UNION ALL
+      SELECT op."changesetId", op.path AS "operationPath",
+        CASE WHEN op.path = ${path} THEN 'destination' ELSE 'source' END AS role
+      FROM reachable r JOIN "SourceFileOperation" op ON op."changesetId" = r.id
+      WHERE (op.path = ${path} OR op."previousPath" = ${path})
+        AND NOT EXISTS (SELECT 1 FROM "SourceQueryIndexJob" job
+          WHERE job."changesetId" = r.id AND job.state = 'SUCCEEDED')
+    ), distinct_touch AS (SELECT DISTINCT "changesetId", "operationPath", role FROM touched)
+    SELECT d."changesetId", d."operationPath", d.role, COUNT(*) OVER () AS total
+    FROM distinct_touch d JOIN "SourceChangeset" c ON c.id = d."changesetId"
+    ORDER BY c."createdAt" DESC, d."changesetId", d.role
+    LIMIT ${size + 1}
+  `;
+  const total = Number(rows[0]?.total ?? 0n);
+  const records = rows.slice(0, size).map(row => ({
+    changesetId: row.changesetId, path, operationPath: row.operationPath, role: row.role,
+  }));
+  return { revision: id, path, records, total, truncated: total > size };
 }
 
 export async function blameQuery(repositoryId: string, revision: string, path: string, maxHistory = 500) {
@@ -327,6 +400,7 @@ export async function rebaseQuery(repositoryId: string, tip: string, onto: strin
   if (bases.length !== 1) throw new SourceControlError(409, "AMBIGUOUS_BASE", "Rebase requires exactly one merge base");
   const chain = await firstParentChain(repositoryId, head);
   const end = chain.findIndex(node => node.id === bases[0]);
+  if (end < 0 && chain.length > 201) throw new SourceControlError(413, "REBASE_LIMIT", "Preview supports at most 200 source changesets");
   if (end < 0) throw new SourceControlError(409, "NONLINEAR_REBASE", "Merge base is not on source first-parent history");
   if (end > 200) throw new SourceControlError(413, "REBASE_LIMIT", "Preview supports at most 200 source changesets");
   const revisionIds = chain.slice(0, end).map(n => n.id).reverse();

@@ -5,9 +5,10 @@ import { PrismaClient } from "@prisma/client";
 import { NextRequest } from "next/server";
 import { db } from "../src/lib/prisma";
 import { tokenHash } from "../src/lib/auth";
-import { createCanonicalChangeset, stageCanonicalBlob, getCanonicalChangeset, getCanonicalSnapshot, listCanonicalEvents } from "../src/source-control/canonical";
+import { createCanonicalChangeset, stageCanonicalBlob, getCanonicalChangeset, getCanonicalSnapshot, getCanonicalSnapshotPage, listCanonicalEvents } from "../src/source-control/canonical";
 import { getObject, createChangeset } from "../src/source-control/service";
 import { SnapshotTree } from "../src/source-control/snapshot-tree";
+import { advanceSnapshotBuild } from "../src/source-control/snapshot-backfill";
 import { runAuthorizedQuery, ancestryQuery, compareQuery, treeQuery, resolvePath, fileHistory, blameQuery, pathImpactQuery } from "../src/source-control/query";
 import { SourceControlError } from "../src/source-control/contracts";
 import { POST as publishApi } from "../src/app/api/v2/repositories/[id]/changesets/route";
@@ -104,6 +105,69 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     }));
   });
 
+  await t.test("300-operation atomic publication and bounded UTF-8 directory pagination", async () => {
+    const ops = Array.from({ length: 300 }, (_, i) => ({
+      kind: "ADD", path: "mass/" + String(i).padStart(5, "0") + ".txt", objectId: alpha,
+    }));
+    const bulk = await make("larger than former 200-operation limit", [root.id], ops);
+    const stored = await getCanonicalChangeset(repo.id, bulk.id, actor);
+    assert.equal(stored.operations.length, 300);
+    const first = await getCanonicalSnapshotPage(repo.id, bulk.id, actor, 53, "", "mass");
+    assert.equal(first.entries.length, 53);
+    assert.ok(first.nextCursor);
+    const second = await getCanonicalSnapshotPage(repo.id, bulk.id, actor, 53, first.nextCursor!, "mass");
+    assert.equal(second.entries.length, 53);
+    assert.ok(first.entries.every(x => !second.entries.some(y => y.path === x.path)));
+    const indexed = await treeQuery(repo.id, bulk.id, "mass", 30);
+    assert.equal(indexed.entries.length, 30);
+    assert.equal(indexed.nextCursor, indexed.entries[29].path);
+    const next = await treeQuery(repo.id, bulk.id, "mass", 30, indexed.nextCursor!);
+    assert.equal(next.entries.length, 30);
+    const index = new SnapshotTree(db);
+    const rootId = (await db.sourceSnapshotRoot.findUniqueOrThrow({
+      where: { changesetId: bulk.id },
+    })).rootId;
+    assert.equal((await index.directory(rootId, "", 10)).entries.find(x => x.path === "mass")?.kind, "directory");
+    assert.equal((await index.page(rootId, 1000)).entries.length, 303);
+    assert.equal((await resolvePath(repo.id, bulk.id, "mass/00299.txt")).objectId, alpha);
+    await assert.rejects(() => index.page(rootId, 0), expects("INVALID_PAGE"));
+  });
+
+  await t.test("resume a deep unrooted v2 lineage from a durable checkpoint", async () => {
+    const lineage: string[] = [];
+    let parent = root.id;
+    for (let i = 0; i < 19; i++) {
+      const next = randomBytes(32).toString("hex");
+      await db.sourceChangeset.create({ data: {
+        id: next, repositoryId: repo.id, treeId: null,
+        authorId: "AGENT:" + agent.id, message: "historical " + i,
+        parents: { create: [{ parentId: parent, position: 0 }] },
+        operations: { create: [{ kind: "PUT", path: "checkpoint.txt", objectId: alpha, position: 0 }] },
+      } });
+      lineage.push(next);
+      parent = next;
+    }
+    await assert.rejects(() => make("blocked until checkpoint", [parent], []),
+      expects("SNAPSHOT_NOT_MATERIALIZED"));
+    let progress = await advanceSnapshotBuild(repo.id, parent, actor, 3, 2);
+    assert.equal(progress.materialized, false);
+    assert.ok(progress.discovered > 0);
+    // Independent callers can resume from persisted steps after an interruption.
+    for (let round = 0; round < 40 && !progress.materialized; round++) {
+      const read = await getCanonicalSnapshotPage(repo.id, root.id, actor, 3);
+      assert.equal(read.entries.length, 3);
+      progress = await advanceSnapshotBuild(repo.id, parent, actor, 3, 2);
+    }
+    assert.equal(progress.materialized, true);
+    assert.equal(progress.pathCount, 4);
+    assert.equal((await db.sourceSnapshotBuild.findUniqueOrThrow({
+      where: { targetId: parent },
+    })).applied, 19);
+    assert.equal((await getCanonicalSnapshotPage(repo.id, lineage[10], actor, 10)).entries.length, 4);
+    assert.equal((await resolvePath(repo.id, parent, "checkpoint.txt")).objectId, alpha);
+    assert.equal((await make("publish after backfill", [parent], [])).created, true);
+  });
+
   const left = await make("left", [root.id], [{ kind: "MODIFY", path: "docs/a.txt", objectId: beta }]);
   const right = await make("right", [root.id], [{ kind: "ADD", path: "links/doc", objectId: symlink, mode: "120000" }]);
   const merge = await make("merge", [left.id, right.id], [
@@ -120,7 +184,7 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     assert.equal((await getCanonicalSnapshot(repo.id, right.id, actor)).entries.find(x => x.path === "links/doc")?.mode, "120000");
     assert.deepEqual((await getCanonicalChangeset(repo.id, merge.id, actor)).parents.map(x => x.parentId), [left.id, right.id]);
     assert.equal(await db.sourceReference.count({ where: { repositoryId: repo.id } }), 0);
-    assert.equal((await listCanonicalEvents(repo.id, 30, actor)).length, 6);
+    assert.equal((await listCanonicalEvents(repo.id, 30, actor)).length, 8);
   });
 
   await t.test("v2 delta changesets are queryable without client checkout", async () => {

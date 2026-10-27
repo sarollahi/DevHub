@@ -9,7 +9,8 @@ type Edge = [string, string, number];
 type Node = { value: SnapshotEntry | null; edges: Edge[]; count: number };
 const hexId = /^[a-f0-9]{64}$/;
 const edgePattern = /^[a-f0-9]+$/;
-const maxEntries = 2_000_000;
+// Counts are exact IEEE-754 integers; no repository-wide file-count ceiling.
+const maxEntries = Number.MAX_SAFE_INTEGER;
 const hash = (bytes: Uint8Array) => createHash("sha256").update("DEVHUB-SNAPSHOT-V1\0").update(bytes).digest("hex");
 const key = (path: string) => Buffer.from(path, "utf8").toString("hex");
 const shared = (a: string, b: string) => {
@@ -67,7 +68,7 @@ export class SnapshotTree {
   private make(value: SnapshotEntry | null, edges: Edge[]): string {
     const sorted = [...edges].sort((a, b) => a[0].localeCompare(b[0], "en"));
     const node = { value, edges: sorted, count: (value ? 1 : 0) + sorted.reduce((n, edge) => n + edge[2], 0) };
-    if (node.count > maxEntries) throw new SourceControlError(413, "TOO_MANY_PATHS", "Snapshot file-count limit exceeded");
+    if (node.count > maxEntries) throw new SourceControlError(413, "TOO_MANY_PATHS", "Snapshot path counter overflowed");
     const bytes = encode(node);
     const id = hash(bytes);
     this.cache.set(id, node);
@@ -216,6 +217,95 @@ export class SnapshotTree {
     return { nodeReadQueries: this.nodeReadQueries, nodeWriteQueries: this.nodeWriteQueries,
       newNodeCount, newNodeBytes };
 
+  }
+
+  /** Lookup is logarithmic in indexed path bytes, independent of file count. */
+  private async firstAtOrAfter(root: string, lowerHex: string) {
+    const visit = async (
+      nodeId: string, prefix: string, expected?: number,
+    ): Promise<{ path: string; entry: SnapshotEntry } | undefined> => {
+      // Prefixes strictly below the lower bound cannot contain an eligible key
+      // unless they are an ancestor of that bound.
+      if (prefix < lowerHex && !lowerHex.startsWith(prefix)) return undefined;
+      const node = await this.read(nodeId, expected);
+      if (node.value && prefix >= lowerHex) {
+        let path: string;
+        try { path = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(prefix, "hex")); }
+        catch { throw invalid(); }
+        if (!validPath(path)) throw invalid();
+        return { path, entry: node.value };
+      }
+      for (const [label, child, count] of node.edges) {
+        const found = await visit(child, prefix + label, count);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    return visit(root, "");
+  }
+
+  // Smallest byte string strictly greater than every key sharing the prefix.
+  // Used to skip complete directory subtrees without walking their file nodes.
+  private static prefixEnd(hex: string): string | null {
+    for (let i = hex.length - 2; i >= 0; i -= 2) {
+      const n = Number.parseInt(hex.slice(i, i + 2), 16);
+      if (n < 255) return hex.slice(0, i) + (n + 1).toString(16).padStart(2, "0");
+    }
+    return null;
+  }
+
+  /** Bounded file page ordered by UTF-8 bytes; no full snapshot allocation. */
+  async page(root: string, size = 200, cursor = "", directory = "") {
+    if (!Number.isSafeInteger(size) || size < 1 || size > 1000 ||
+        (cursor && !validPath(cursor)) || (directory && !validPath(directory))) {
+      throw new SourceControlError(422, "INVALID_PAGE", "Invalid snapshot page or cursor");
+    }
+    const prefix = directory ? key(directory + "/") : "";
+    if (cursor && !key(cursor).startsWith(prefix)) {
+      throw new SourceControlError(422, "INVALID_CURSOR", "Cursor lies outside the requested prefix");
+    }
+    let lower: string | null = cursor ? key(cursor) + "00" : prefix;
+    const entries: Array<{ path: string } & SnapshotEntry> = [];
+    for (let i = 0; i <= size && lower !== null; i++) {
+      const next = await this.firstAtOrAfter(root, lower);
+      if (!next || !key(next.path).startsWith(prefix)) break;
+      entries.push({ path: next.path, ...next.entry });
+      lower = key(next.path) + "00";
+    }
+    return { entries: entries.slice(0, size),
+      nextCursor: entries.length > size ? entries[size - 1].path : null };
+  }
+
+  /** Immediate children only. Skips whole indexed subdirectories in O(depth). */
+  async directory(root: string, directory = "", size = 200, cursor = "") {
+    if (!Number.isSafeInteger(size) || size < 1 || size > 500 ||
+        (directory && !validPath(directory)) || (cursor && !validPath(cursor))) {
+      throw new SourceControlError(422, "INVALID_PAGE", "Invalid directory page or cursor");
+    }
+    const prefix = directory ? directory + "/" : "";
+    if (cursor && (!cursor.startsWith(prefix) || cursor.slice(prefix.length).includes("/"))) {
+      throw new SourceControlError(422, "INVALID_CURSOR", "Cursor is not an immediate child");
+    }
+    let lower: string | null = cursor
+      ? (await this.hasPrefix(root, cursor + "/"))
+        ? SnapshotTree.prefixEnd(key(cursor + "/"))
+        : key(cursor) + "00"
+      : key(prefix);
+    const entries: Array<{ path: string; kind: "file" | "directory"; objectId?: string }> = [];
+    for (let i = 0; i <= size && lower !== null; i++) {
+      const next = await this.firstAtOrAfter(root, lower);
+      if (!next || !next.path.startsWith(prefix)) break;
+      const tail = next.path.slice(prefix.length);
+      const segment = tail.split("/")[0];
+      const path = prefix + segment;
+      const isDirectory = tail.includes("/");
+      entries.push(isDirectory
+        ? { path, kind: "directory" }
+        : { path, kind: "file", objectId: next.entry.objectId });
+      lower = isDirectory ? SnapshotTree.prefixEnd(key(path + "/")) : key(path) + "00";
+    }
+    return { entries: entries.slice(0, size),
+      nextCursor: entries.length > size ? entries[size - 1].path : null };
   }
 
   async entries(root: string): Promise<Array<{ path: string } & SnapshotEntry>> {

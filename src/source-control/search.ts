@@ -1,13 +1,13 @@
 import { db } from "../lib/prisma";
 import { assertRepositoryPermission } from "../lib/authorization";
-import { getCanonicalSnapshot } from "./canonical";
+import { getCanonicalSnapshotPage } from "./canonical";
 import { resolveRevision, runAuthorizedQuery } from "./query";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { enqueueSearchObjects } from "../workers/search-indexer";
 
 export type SearchMode = "path" | "content";
 export type SearchResult = { path: string; objectId: string; mode: string; line?: number; excerpt?: string };
-const limitPaths = 10000;
+const scanBudget = 5_000; // bounded work per HTTP request, never a repository-size ceiling
 
 export async function searchRepository(args: {
   repositoryId: string; actor: SourceActor; revision: string; mode: SearchMode;
@@ -24,51 +24,60 @@ export async function searchRepository(args: {
   await assertRepositoryPermission(actor, repositoryId, "source:read");
   const revision = await runAuthorizedQuery(actor, repositoryId,
     () => resolveRevision(repositoryId, args.revision));
-  const snapshot = await getCanonicalSnapshot(repositoryId, revision, actor);
-  if (snapshot.entries.length > limitPaths)
-    throw new SourceControlError(413, "REPOSITORY_TOO_LARGE", "Search snapshot path limit exceeded");
-
-  const candidates = snapshot.entries.filter(entry => entry.path > (args.cursor || "")).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-  const ids = [...new Set(snapshot.entries.map(entry => entry.objectId))];
+  const records: SearchResult[] = [];
   let stale = false;
   let excluded = false;
-  const hits = new Map<string, string>();
-  if (mode === "content") {
-    await enqueueSearchObjects(ids);
-    for (let offset = 0; offset < ids.length; offset += 400) {
-      const group = ids.slice(offset, offset + 400);
-      const status = await db.sourceSearchDocument.findMany({ where: { objectId: { in: group } },
+  let scanned = 0;
+  let lastScanned = args.cursor || "";
+  let more = true;
+  let stopOnLimit = false;
+  // A single request scans at most 5,000 indexed paths. Rare search terms
+  // continue with nextCursor instead of allocating a million-path manifest.
+  while (more && scanned < scanBudget && !stopOnLimit) {
+    const page = await getCanonicalSnapshotPage(repositoryId, revision, actor,
+      Math.min(500, scanBudget - scanned), lastScanned);
+    more = page.nextCursor !== null;
+    if (!page.entries.length) break;
+    scanned += page.entries.length;
+    const hits = new Map<string, string>();
+    if (mode === "content") {
+      const ids = [...new Set(page.entries.map(entry => entry.objectId))];
+      await enqueueSearchObjects(ids);
+      const status = await db.sourceSearchDocument.findMany({ where: { objectId: { in: ids } },
         select: { objectId: true, state: true, excludedReason: true } });
-      if (status.length < group.length || status.some(record => record.state !== "SUCCEEDED")) stale = true;
+      if (status.length < ids.length || status.some(record => record.state !== "SUCCEEDED")) stale = true;
       if (status.some(record => !!record.excludedReason)) excluded = true;
       const matches = await db.sourceSearchDocument.findMany({ where: {
-        objectId: { in: group }, state: "SUCCEEDED", textBody: { contains: query, mode: "insensitive" },
+        objectId: { in: ids }, state: "SUCCEEDED", textBody: { contains: query, mode: "insensitive" },
       }, select: { objectId: true, textBody: true } });
       for (const match of matches) if (match.textBody !== null) hits.set(match.objectId, match.textBody);
     }
-  }
-  const records: SearchResult[] = [];
-  // Recheck path policies on every hit. Never return a total that includes denied paths.
-  for (const entry of candidates) {
-    const text = mode === "content" ? hits.get(entry.objectId) : undefined;
-    if (mode === "path" && !entry.path.toLowerCase().includes(query.toLowerCase())) continue;
-    if (mode === "content" && text === undefined) continue;
-    try { await assertRepositoryPermission(actor, repositoryId, "source:read", { paths: [entry.path] }); }
-    catch { continue; }
-    let line: number | undefined;
-    let excerpt: string | undefined;
-    if (text !== undefined) {
-      const match = text.toLowerCase().indexOf(query.toLowerCase());
-      const before = text.slice(0, match);
-      line = before.split("\n").length;
-      const row = text.split("\n")[line - 1] ?? "";
-      excerpt = row.length > 260 ? row.slice(Math.max(0, match - before.lastIndexOf("\n") - 90), 260) : row;
+    for (const entry of page.entries) {
+      lastScanned = entry.path;
+      const content = mode === "content" ? hits.get(entry.objectId) : undefined;
+      if (mode === "path" && !entry.path.toLowerCase().includes(query.toLowerCase())) continue;
+      if (mode === "content" && content === undefined) continue;
+      try { await assertRepositoryPermission(actor, repositoryId, "source:read", { paths: [entry.path] }); }
+      catch { continue; }
+      let line: number | undefined;
+      let excerpt: string | undefined;
+      if (content !== undefined) {
+        const match = content.toLowerCase().indexOf(query.toLowerCase());
+        const before = content.slice(0, match);
+        line = before.split("\n").length;
+        const row = content.split("\n")[line - 1] ?? "";
+        excerpt = row.length > 260 ? row.slice(Math.max(0, match - before.lastIndexOf("\n") - 90), 260) : row;
+      }
+      records.push({ path: entry.path, objectId: entry.objectId, mode: entry.mode, line, excerpt });
+      if (records.length > limit) { stopOnLimit = true; break; }
     }
-    records.push({ path: entry.path, objectId: entry.objectId, mode: entry.mode, line, excerpt });
-    if (records.length > limit) break;
   }
-  const nextCursor = records.length > limit ? records[limit - 1].path : null;
+  const nextCursor = records.length > limit ? records[limit - 1].path :
+    more ? lastScanned : null;
   return { revision, mode, query, records: records.slice(0, limit), nextCursor,
-    index: { state: mode === "path" ? "NOT_REQUIRED" : stale ? "INDEXING" : "READY",
-      largeOrBinaryFilesExcluded: excluded, maxIndexedBytes: 256 * 1024 } };
+    index: { state: mode === "path" ? "NOT_REQUIRED" :
+      stale || more ? "INDEXING" : "READY",
+      largeOrBinaryFilesExcluded: excluded, maxIndexedBytes: 256 * 1024,
+      scannedPaths: scanned, partial: more } };
+
 }
