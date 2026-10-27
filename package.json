@@ -41,7 +41,9 @@
     "ops:reconcile": "tsx scripts/reconcile.ts",
     "ops:usage": "tsx scripts/tenant-usage.ts",
     "ops:cache-exporter": "node scripts/cache-exporter.mjs",
-    "ops:fault-drill": "node scripts/fault-drill.mjs"
+    "ops:fault-drill": "node scripts/fault-drill.mjs",
+    "bench:snapshot-scale": "tsx scripts/bench-snapshot-scale.ts",
+    "snapshot:backfill": "tsx scripts/backfill-snapshots.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",
