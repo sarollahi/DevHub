@@ -26,7 +26,9 @@
     "worker:source-index": "tsx src/workers/query-indexer.ts",
     "bench:source-query": "tsx scripts/bench-source-query.ts",
     "cache:serve": "node src/cache/daemon.mjs",
-    "cache:benchmark": "node scripts/benchmark-cache.mjs"
+    "cache:benchmark": "node scripts/benchmark-cache.mjs",
+    "import:git": "tsx scripts/git-import.ts",
+    "import:worker": "tsx scripts/git-import-worker.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",

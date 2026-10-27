@@ -22,6 +22,7 @@ export default async function SourcePage({ params }: { params: Promise<{ id: str
   return <WorkspaceShell active="/repositories" title="Source control" description={`${repo.owner.handle}/${repo.slug} · Immutable, server-authoritative changesets`}>
     <Link href={`/repositories/${id}/validations`} className="text-link">Execution validation, logs and artifacts</Link>
     <Link href="/repositories" className="detail-back">Back to repositories</Link>
+    <Link href={`/repositories/${id}/source/import`} className="source-action secondary">Import Git repository</Link>
     <div className="source-grid">
       <section className="surface-card source-panel">
         <div className="source-panel-heading"><div><h2>References</h2><p>References are lightweight pointers. Every move is version-checked and recorded.</p></div><span className="source-count">{refs.filter(ref => !ref.deletedAt).length} active</span></div>

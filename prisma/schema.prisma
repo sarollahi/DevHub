@@ -103,6 +103,9 @@ model Repository {
   sourceEvents          SourceChangesetEvent[]
   sourcePublicationKeys SourcePublicationKey[]
   validationPipelines ValidationPipeline[]
+  gitImportJobs GitImportJob[]
+  gitImportCommits GitImportCommit[]
+  gitImportBlobs GitImportBlob[]
   @@unique([ownerId, slug])
   @@index([slug])
 }
@@ -337,6 +340,7 @@ model SourceObject {
   trees       SourceChangeset[]     @relation("ChangesetTree")
   operations  SourceFileOperation[] @relation("FileObject")
   grants      SourceObjectGrant[]
+  importedBlobs GitImportBlob[]
 }
 
 // Content-addressed changesets are never modified when references advance.
@@ -361,6 +365,7 @@ model SourceChangeset {
   validationTargets ValidationPipeline[] @relation("ValidationTarget")
   queryIndexJob SourceQueryIndexJob?
   queryPathTouches SourceQueryPathTouch[]
+  importedGitCommits GitImportCommit[]
   @@index([repositoryId, createdAt(sort: Desc)])
 }
 
@@ -674,3 +679,62 @@ model ValidationArtifact {
   task       ValidationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
   @@unique([taskId, attempt, name])
 }
+
+enum GitImportStatus {
+  QUEUED
+  RUNNING
+  VERIFY_QUEUED
+  VERIFYING
+  FAILED
+  COMPLETED
+}
+
+model GitImportJob {
+  id           String          @id @default(uuid()) @db.Uuid
+  repositoryId String          @db.Uuid
+  sourcePath   String
+  status       GitImportStatus @default(QUEUED)
+  workerId     String?         @db.Uuid
+  leaseUntil   DateTime?
+  imported     Int             @default(0)
+  lastGitSha   String?         @db.VarChar(64)
+  lastError    String?         @db.Text
+  verifiedAt   DateTime?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  repository   Repository      @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  @@unique([repositoryId, sourcePath])
+  @@index([status, leaseUntil])
+}
+
+model GitImportCommit {
+  repositoryId    String          @db.Uuid
+  gitSha          String          @db.VarChar(64)
+  changesetId     String          @db.Char(64)
+  gitTreeSha      String          @db.VarChar(64)
+  authorName      String
+  authorEmail     String
+  authorDate      DateTime
+  authorTimezone  String          @db.VarChar(5)
+  committerName   String
+  committerEmail  String
+  committerDate   DateTime
+  committerTimezone String        @db.VarChar(5)
+  createdAt       DateTime        @default(now())
+  repository      Repository      @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  changeset       SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Restrict)
+  @@id([repositoryId, gitSha])
+  @@unique([repositoryId, changesetId])
+}
+
+model GitImportBlob {
+  repositoryId String       @db.Uuid
+  gitSha       String       @db.VarChar(64)
+  objectId     String       @db.Char(64)
+  repository   Repository   @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
+  object       SourceObject @relation(fields: [objectId], references: [id], onDelete: Restrict)
+  @@id([repositoryId, gitSha])
+}
+
