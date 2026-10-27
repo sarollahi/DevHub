@@ -44,10 +44,7 @@ lifting, O(log depth), rather than re-running a recursive SQL walk. File history
 uses an indexed path-posting lookup, tests exact first-parent membership and
 follows rename edges. A bounded scan cap falls back to the canonical SQL
 reference query instead of publishing truncated or unsound results.
-`blameQuery` uses the faster file-history lookup when ready; its existing
-bounded line matcher is still the correctness implementation and may return
-a truncated result on very large histories. **Persistent per-line origin
-snapshots are not implemented by this framework yet.**
+`blameQuery` preferentially reads immutable, sparse per-file origin runs computed from indexed parent provenance and exact line matching. Binary, oversized, unavailable, and high-cost files use the existing bounded reference matcher as a correctness fallback. Per-file state is capped at 1 MiB and 10,000 lines; each changeset is capped at 128 indexed files and 50,000 indexed output lines. No complete repository blame snapshot is materialized.
 
 Merge-heavy graph reachability, criss-cross merge bases and path impact continue
 to use the exact recursive reference implementation. The ancestry accelerator is
