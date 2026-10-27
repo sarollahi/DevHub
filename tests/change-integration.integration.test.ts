@@ -58,3 +58,104 @@ test("native integration persists conflicts, rejects key reuse and preserves tar
     orderBy:{occurredAt:"asc"}});
   assert.deepEqual(events.map(x=>x.action),["integration.queued","integration.conflicted"]);
 });
+
+
+test("two independent integrations serialize final CAS, recompute after a ref race and safely revert", 
+ {timeout:120000}, async () => {
+  const suffix=randomBytes(6).toString("hex");
+  const owner=await db.user.create({data:{
+    handle:"raceintegration-"+suffix,email:"raceintegration-"+suffix+"@example.invalid",
+  }});
+  const repository=await db.repository.create({data:{
+    ownerId:owner.id,slug:"raceintegration-"+suffix,name:"Integration CAS",requireHumanApproval:false,
+  }});
+  const {actor}=await testSession(owner.id);
+  const id=repository.id, refName="branches/fast";
+  const blob=async(text:string)=>(await stageCanonicalBlob(id,actor,Buffer.from(text).toString("base64"))).id;
+  const rootId=(await blob("initial"));
+  const a=await blob("first"); const b=await blob("second");
+  const root=await createCanonicalChangeset(id,actor,{apiVersion:2,description:"start",parents:[],
+    operations:[{kind:"ADD",path:"root.txt",objectId:rootId}]});
+  const left=await createCanonicalChangeset(id,actor,{apiVersion:2,description:"A",parents:[root.id],
+    operations:[{kind:"ADD",path:"left.txt",objectId:a}]});
+  const right=await createCanonicalChangeset(id,actor,{apiVersion:2,description:"B",parents:[root.id],
+    operations:[{kind:"ADD",path:"right.txt",objectId:b}]});
+  await mutateReference(id,actor,{name:refName,operation:"CREATE",expectedGeneration:null,
+    changesetId:root.id,mutationId:"init-"+suffix});
+  // Only explicitly unprotected staging branches may opt out of execution checks.
+  const {updateIntegrationPolicy}=await import("../src/integration/service");
+  await updateIntegrationPolicy(id,refName,actor,{
+    preChecks:false,targetChecks:false,postChecks:false,deploymentChecks:false,maxRetries:8,
+  });
+  const ja=await enqueueIntegration(id,actor,{sourceChangesetId:left.id,targetRef:refName,requestKey:"a-"+suffix+"-key"});
+  const jb=await enqueueIntegration(id,actor,{sourceChangesetId:right.id,targetRef:refName,requestKey:"b-"+suffix+"-key"});
+  const claim=async(jobId:string)=>{
+    const token=randomUUID();
+    await db.changeIntegration.update({where:{id:jobId},data:{
+      state:"PREPARING",leaseToken:token,leaseUntil:new Date(Date.now()+180000),
+    }});
+    return token;
+  };
+  const approve=async(...ids:string[])=>{
+    await db.sourceChangeApproval.createMany({data:ids.map(changesetId=>({
+      changesetId,userId:owner.id,decision:"APPROVED" as const,
+    })),skipDuplicates:true});
+  };
+  const [tokenA,tokenB]=await Promise.all([claim(ja.id),claim(jb.id)]);
+  await Promise.all([executeIntegration(ja.id,tokenA),executeIntegration(jb.id,tokenB)]);
+  const pA=await db.changeIntegration.findUniqueOrThrow({where:{id:ja.id}});
+  const pB=await db.changeIntegration.findUniqueOrThrow({where:{id:jb.id}});
+  assert.equal(pA.state,"WAITING_APPROVAL");
+  assert.equal(pB.state,"WAITING_APPROVAL");
+  assert.ok(pA.resultChangesetId&&pB.resultChangesetId);
+  await approve(left.id,right.id,pA.resultChangesetId!,pB.resultChangesetId!);
+  const [resultA,resultB]=await Promise.allSettled([
+    executeIntegration(ja.id,await claim(ja.id)),
+    executeIntegration(jb.id,await claim(jb.id)),
+  ]);
+  assert.equal([resultA,resultB].filter(x=>x.status==="fulfilled").length,1);
+  assert.equal([resultA,resultB].filter(x=>x.status==="rejected").length,1);
+  const first=await db.sourceReference.findUniqueOrThrow({where:{
+    repositoryId_name:{repositoryId:id,name:refName},
+  }});
+  assert.equal(first.generation,2);
+  const loserId=resultA.status==="rejected"?ja.id:jb.id;
+  const winnerId=resultA.status==="fulfilled"?ja.id:jb.id;
+  // Simulate worker lease expiry and restart: no old validation/approval is reused on the next head.
+  await db.changeIntegration.update({where:{id:loserId},data:{
+    state:"RETRY",leaseToken:null,leaseUntil:null,attempts:1,
+  }});
+  await executeIntegration(loserId,await claim(loserId));
+  const rebased=await db.changeIntegration.findUniqueOrThrow({where:{id:loserId}});
+  assert.equal(rebased.state,"WAITING_APPROVAL");
+  assert.notEqual(rebased.resultChangesetId, (loserId===ja.id?pA:pB).resultChangesetId);
+  await approve(rebased.resultChangesetId!);
+  await executeIntegration(loserId,await claim(loserId));
+  const advanced=await db.sourceReference.findUniqueOrThrow({where:{
+    repositoryId_name:{repositoryId:id,name:refName},
+  }});
+  assert.equal(advanced.generation,3);
+  const {readCanonicalSnapshotForValidation}=await import("../src/source-control/canonical");
+  const merged=await readCanonicalSnapshotForValidation(id,advanced.changesetId);
+  assert.deepEqual(merged.entries.map(e=>e.path).sort(),["left.txt","right.txt","root.txt"]);
+  const completed=await db.changeIntegration.findUniqueOrThrow({where:{id:loserId}});
+  assert.equal(completed.state,"INTEGRATED");
+  // Revert the second integration by applying its inverse as another audited changeset.
+  const revert=await enqueueIntegration(id,actor,{sourceChangesetId:completed.resultChangesetId!,
+    targetRef:refName,requestKey:"revert-"+suffix+"-key",mode:"REVERT",revertIntegrationId:loserId});
+  await executeIntegration(revert.id,await claim(revert.id));
+  const revertDraft=await db.changeIntegration.findUniqueOrThrow({where:{id:revert.id}});
+  assert.equal(revertDraft.state,"WAITING_APPROVAL");
+  await approve(revertDraft.resultChangesetId!);
+  await executeIntegration(revert.id,await claim(revert.id));
+  const afterRevert=await db.sourceReference.findUniqueOrThrow({where:{
+    repositoryId_name:{repositoryId:id,name:refName},
+  }});
+  assert.equal(afterRevert.generation,4);
+  const snap=await readCanonicalSnapshotForValidation(id,afterRevert.changesetId);
+  assert.equal(snap.entries.length,2);
+  const winner=await db.changeIntegration.findUniqueOrThrow({where:{id:winnerId}});
+  assert.ok(snap.entries.some(e=>e.path==="root.txt"));
+  assert.ok(snap.entries.some(e=>e.path===(winner.sourceChangesetId===left.id?"left.txt":"right.txt")));
+  assert.equal(await db.sourceRefMutation.count({where:{repositoryId:id,name:refName}}),4);
+});
