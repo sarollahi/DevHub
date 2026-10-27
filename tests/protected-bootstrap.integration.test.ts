@@ -24,7 +24,7 @@ test("protected bootstrap is fail-closed for direct creation, missing checks, in
  const fail=(code:string)=>(e:unknown)=>e instanceof SourceControlError&&e.code===code;
  await assert.rejects(()=>mutateReference(repo.id,actor,{name:"main",operation:"CREATE",
    changesetId:root.id,expectedGeneration:null,mutationId:"legacy-"+suffix}),fail("INTEGRATION_REQUIRED"));
- await assert.rejects(()=>bootstrapProtectedBranch(repo.id,actor,request),fail("REVIEW_REQUIRED"));
+ await assert.rejects(()=>bootstrapProtectedBranch(repo.id,actor,request),fail("CHECKS_NOT_READY"));
  await db.sourceReview.update({where:{changesetId:root.id},data:{state:"COMPLETED",riskTier:"LOW"}});
  await db.sourceChangeApproval.create({data:{changesetId:root.id,userId:user.id,decision:"APPROVED"}});
  const originals:Record<string,string|undefined>={};
