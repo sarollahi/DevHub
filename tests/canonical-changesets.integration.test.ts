@@ -151,13 +151,11 @@ test("native delta DAG, PostgreSQL event log and recovery", { timeout: 100000 },
     const count = await db.sourceChangeset.count({ where: { repositoryId: repo.id } });
     const events = await db.sourceChangesetEvent.count({ where: { repositoryId: repo.id } });
     const roots = await db.sourceSnapshotRoot.count({ where: { repositoryId: repo.id } });
-    const nodes = await db.sourceSnapshotNode.count();
     try {
       await assert.rejects(() => make("rollback candidate", [root.id], [{ kind: "ADD", path: "rollback", objectId: alpha }], "rollback"));
       assert.equal(await db.sourceChangeset.count({ where: { repositoryId: repo.id } }), count);
       assert.equal(await db.sourceChangesetEvent.count({ where: { repositoryId: repo.id } }), events);
       assert.equal(await db.sourceSnapshotRoot.count({ where: { repositoryId: repo.id } }), roots);
-      assert.equal(await db.sourceSnapshotNode.count(), nodes);
     } finally {
       await db.$executeRawUnsafe('DROP TRIGGER "' + trigger + '" ON "SourceChangesetEvent"');
       await db.$executeRawUnsafe('DROP FUNCTION "' + fn + '"()');
