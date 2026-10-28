@@ -196,7 +196,7 @@ mod tests {
         state.entries.insert("src/lib/b.rs".into(), Entry {
             object_id: "c".repeat(64), mode: "100644".into(), materialized: false,
         });
-        let fs = SparseFuse::new(&state, temp.path().into(), api(&state)?)?;
+        let fs = SparseFuse::new(&state, temp.path().into(), Api::new(&state.server, &state.repository, "fixture-token".to_string())?)?;
         assert_eq!(fs.nodes.len(), 5);
         assert!(fs.nodes.iter().any(|n| n.path == "src/lib/b.rs"));
         assert!(!fs.nodes.iter().any(|n| n.path == "test/hidden.rs"));

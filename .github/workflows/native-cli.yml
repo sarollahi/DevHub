@@ -33,8 +33,8 @@ jobs:
       - name: Verify native shared cache transport on all platforms
         shell: bash
         run: |
-          binary="$GITHUB_WORKSPACE/client/devhub-cli/target/debug/devhub"
-          if [ "$RUNNER_OS" = "Windows" ]; then binary="$GITHUB_WORKSPACE/client/devhub-cli/target/debug/devhub.exe"; fi
+          binary="$GITHUB_WORKSPACE/client/devhub-cli/target/release/devhub"
+          if [ "$RUNNER_OS" = "Windows" ]; then binary="$GITHUB_WORKSPACE/client/devhub-cli/target/release/devhub.exe"; fi
           DEVHUB_CLI="$binary" node scripts/native-cache-smoke.mjs
 
       - uses: actions/upload-artifact@v4
@@ -92,7 +92,7 @@ jobs:
           trap 'kill "$pid" 2>/dev/null || true' EXIT
           for i in $(seq 1 50); do
             if curl --fail --silent http://127.0.0.1:3000/api/health >/dev/null; then
-              DEVHUB_CLI="$GITHUB_WORKSPACE/client/devhub-cli/target/debug/devhub" \
+              DEVHUB_CLI="$GITHUB_WORKSPACE/client/devhub-cli/target/release/devhub" \
                 npx tsx tests/native-client.e2e.ts
               exit $?
             fi
