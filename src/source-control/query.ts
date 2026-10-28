@@ -3,7 +3,7 @@ import { ensureIndexJob } from "../workers/query-indexer";
 import { enqueueDerived, readDerived } from "./derived-index";
 import { indexedFileHistory, indexedLinearAncestry, indexedDagMergeBases, indexedDagIsAncestor } from "./derived-queries";
 import { exactDagReachability, exactDagAncestors, exactDagMergeBases, exactDagPathImpact, exactDagContributions } from "./dag-queries";
-import { indexedBlamePage, MAX_TEXT_BYTES, latestBlameFile } from "./indexed-blame";
+import { indexedBlamePage, MAX_TEXT_BYTES } from "./indexed-blame";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
@@ -338,7 +338,6 @@ export async function blameQuery(repositoryId: string, revision: string, path: s
   }
   if (object.byteSize > 1024n * 1024n) {
     const completed = await readDerived(repositoryId, resolved, "blame");
-    const provenance = completed ? await latestBlameFile(repositoryId, resolved, path) : null;
     if (completed) throw new SourceControlError(422, "BLAME_INDEX_UNAVAILABLE",
       "Blame provenance cannot be computed under the configured resource limits");
     throw new SourceControlError(503, "BLAME_INDEX_PENDING",
