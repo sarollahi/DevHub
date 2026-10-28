@@ -188,6 +188,19 @@ impl Api {
             return Ok(bytes);
         }
         let partial = directory.join(format!("{object_id}.part"));
+        // A previous process may have finished receiving the object but died
+        // before publishing it. Verify and reuse it without another download.
+        if partial.is_file() {
+            let metadata = fs::metadata(&partial)?;
+            if metadata.len() <= MAX_OBJECT as u64 {
+                let completed = fs::read(&partial)?;
+                if object_hash(&completed) == object_id {
+                    fs::rename(&partial, &cache)?;
+                    shared_cache::memory_put(&self.repository, object_id, &completed);
+                    return Ok(completed);
+                }
+            }
+        }
         let mut offset = if partial.exists() { fs::metadata(&partial)?.len() as usize } else { 0 };
         if offset > MAX_OBJECT { fs::remove_file(&partial)?; offset = 0; }
         let mut request = self.http.get(self.path(2, &format!("/objects/{object_id}/raw")));
@@ -219,7 +232,11 @@ impl Api {
         }
         stream.sync_all()?;
         let bytes = fs::read(&partial)?;
-        if object_hash(&bytes) != object_id { bail!("Object digest mismatch; partial transfer retained for diagnosis"); }
+        if object_hash(&bytes) != object_id {
+            // Retaining a corrupt prefix would make every future resume fail.
+            fs::remove_file(&partial)?;
+            bail!("Object digest mismatch; corrupt partial transfer discarded");
+        }
         fs::rename(&partial, &cache)?;
         shared_cache::memory_put(&self.repository, object_id, &bytes);
         Ok(bytes)
