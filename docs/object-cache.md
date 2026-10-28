@@ -51,3 +51,37 @@ node scripts/benchmark-cache.mjs
 ```
 
 The benchmark uses a controlled local HTTP origin with 12 ms simulated latency. It reports elapsed time and upstream call counts for cold startup, eight concurrent CI jobs, repeated warm checkouts, explicit misses and a sparse (10% file-selection) workspace. It is a repeatable **synthetic** baseline, not production throughput or a multi-gigabyte object benchmark. The authoritative object API supports PostgreSQL-backed manifests and S3-backed streaming blobs. The daemon first tries the v2 raw-object response, and on an explicit 413 STREAM_REQUIRED response uses the authenticated v1 streaming endpoint. It re-verifies the same immutable digest before publication. A streamed object larger than the daemon's configured maxObjectBytes fails closed; clients may use the authenticated authoritative streaming endpoint directly.
+
+
+## Native Rust workspace integration
+
+The Rust client automatically tries the node-local daemon when DEVHUB_CACHE_SOCKET is set on Linux or macOS. It sends the caller's DevHub bearer credential over the protected Unix socket, verifies the returned BLOB digest, size, kind and identity, and copies only explicitly selected objects into its bounded workspace cache. If the daemon is absent or unavailable, it uses its existing authorized HTTP download with byte-range resume and final digest checking. A 401/403 access denial from the daemon is treated as an error, not a cache miss. Windows uses the same authenticated node cache protocol over a local named pipe; portable authenticated explicit hydration remains the fallback.
+
+Use the following environment when configuring a shared cache for developer or CI clients:
+
+    DEVHUB_CACHE_SOCKET="$HOME/.cache/devhub/cache.sock"
+    DEVHUB_CACHE_DIR="$HOME/.cache/devhub/objects"
+    DEVHUB_ORIGIN_URL="https://devhub.example"
+    DEVHUB_ORIGIN_TOKEN="<repository-scoped-cache-service-token>"
+    DEVHUB_CACHE_REPOSITORIES="<repository-uuid>"
+    DEVHUB_CACHE_REQUIRE_AUTHORIZATION=true
+
+Each caller must have its own DEVHUB_TOKEN or configured credential. A cache daemon with an origin service credential performs a fresh authenticated HEAD request to /api/v2/repositories/:repositoryId/objects/:objectId/authorize for **every** requested object, even on warm hits. That route checks repository and object ownership as well as file-path permissions before the daemon uses the higher-privilege cache service credential. HEAD never transfers object bytes. In the absence of a token, an unauthorized response, or an unavailable authorization authority, strict cache mode fails closed. Do not configure a node daemon with a regional service access token: only the regional TCP service should accept service-to-service identities.
+
+The unrestricted no-token cache mode exists for isolated loopback development/tests only. It is not a tenant-safe deployment. Disabling strict authorization while providing an origin service credential would break the authorization boundary; do not do so.
+
+The native e2e suite exercises independent developer/CI workspaces warming the same daemon, per-request reauthorization, and the direct-fetch fallback after daemon shutdown. Persistent caches are disposable; they are not sources of authority. Kernel-visible read-only sparse mounts are available with the optional Linux FUSE feature, and Windows named-pipe caching is enabled. A 256 KiB crash-resumable BLOB journal retains checksummed completed blocks and validates the complete object before publishing cached bytes. Windows ProjFS and native macOS File Provider integration remain unsupported. Native HTTP range resume remains available for explicit hydration. No production-scale native-versus-Git benchmark results are claimed.
+
+## Measured synthetic hierarchy benchmark
+
+Run `node scripts/benchmark-cache-hierarchy.mjs` to emit reproducible JSON for 1%, 10%, and 50% sparse selections across four concurrent client requests and cold/warm cache passes. Each row includes transferred origin and client bytes, upstream calls, hit rate, p50/p95/p99 per-object latency, CPU time, peak resident memory, and bounded disk consumption. CI saves the JSON as `cache-hierarchy-benchmark`. Origin is localhost with simulated 12 ms delay, objects are 2 KiB, and all clients share one daemon; results must not be presented as production numbers or as native/Git checkout parity. Git checkout costs and OS-transparent workspaces require separate real deployment measurement.
+
+## Windows pipe transport
+
+The Rust native client connects to local named pipes that start with `\\\\.\\pipe\\devhub-` (for example `\\\\.\\pipe\\devhub-cache`) when `DEVHUB_CACHE_SOCKET` is configured. It requests `SECURITY_IDENTIFICATION` on the Windows pipe handle to restrict server impersonation. Both native Unix socket and Windows pipe transports send the caller's token for server-side authorization and cryptographically verify returned objects. If the pipe is unavailable, the client uses explicit authenticated HTTP hydration. Node does not apply Unix chmod to Windows pipes; the daemon must run under a protected user/service account and use a trusted local pipe name. `scripts/native-cache-smoke.mjs` exercises two native subprocesses against one daemon per OS.
+
+## Durable shared-cache transfer journal
+
+Cache misses write to `*.bin.resume`, and an adjacent `*.json.resume` journal persists complete 256 KiB chunk SHA-256 digests after data `fsync`. Restart validates the recorded chunk bytes, discards uncommitted tails, and resumes BLOB downloads through the authoritative v2 ranged endpoint using `If-Range` and a strong object ID ETag. If range support is absent, the daemon discards staged data and downloads the full object. An object is never served until the full `SHA256(BLOB\\0 || bytes)` matches its immutable identity. Tampered journals are discarded. Unfinished journals have a bounded disk budget and cannot be pruned while in flight. Trees are verified and published atomically without chunk resume.
+
+For real native-versus-Git workspace measurements, see [benchmark guide](bench-native-vs-git.md).

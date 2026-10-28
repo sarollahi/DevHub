@@ -12,6 +12,9 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use walkdir::WalkDir;
+mod shared_cache;
+#[cfg(all(unix, feature = "fuse"))]
+mod fuse_workspace;
 
 const MAX_OBJECT: usize = 4 * 1024 * 1024;
 const CHUNK: usize = 256 * 1024;
@@ -32,6 +35,8 @@ enum Command {
         #[arg(long)] clear: bool },
     Sync { #[arg(long)] materialize: bool },
     Hydrate { paths: Vec<String> },
+    #[cfg(all(unix, feature = "fuse"))]
+    Mount { #[arg(long)] at: PathBuf },
     Status { #[arg(long)] json: bool },
     History { #[arg(long)] revision: Option<String>, #[arg(long)] path: Option<String>,
         #[arg(long, default_value_t=30)] limit: usize },
@@ -156,16 +161,50 @@ impl Api {
     fn download_object(&self, object_id: &str, directory: &Path) -> Result<Vec<u8>> {
         check_object_id(object_id)?;
         fs::create_dir_all(directory)?;
+        if let Some(bytes) = shared_cache::memory_get(&self.repository, object_id) {
+            return Ok(bytes);
+        }
         let cache = directory.join(object_id);
         if cache.is_file() {
             let bytes = fs::read(&cache)?;
             if bytes.len() <= MAX_OBJECT && object_hash(&bytes) == object_id {
                 touch(&cache)?;
+                shared_cache::memory_put(&self.repository, object_id, &bytes);
                 return Ok(bytes);
             }
             fs::remove_file(&cache)?;
         }
+        // Every local daemon response is verified independently before publication.
+        // An unavailable daemon never prevents portable, authenticated hydration.
+        if let Some(bytes) = shared_cache::fetch(&self.repository, object_id, &self.token)? {
+            let temp = directory.join(format!("{object_id}.cache-{}", std::process::id()));
+            {
+                let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+            if let Err(error) = fs::rename(&temp, &cache) {
+                let _ = fs::remove_file(&temp);
+                return Err(error.into());
+            }
+            prune_cache(directory, DEFAULT_CACHE)?;
+            shared_cache::memory_put(&self.repository, object_id, &bytes);
+            return Ok(bytes);
+        }
         let partial = directory.join(format!("{object_id}.part"));
+        // A previous process may have finished receiving the object but died
+        // before publishing it. Verify and reuse it without another download.
+        if partial.is_file() {
+            let metadata = fs::metadata(&partial)?;
+            if metadata.len() <= MAX_OBJECT as u64 {
+                let completed = fs::read(&partial)?;
+                if object_hash(&completed) == object_id {
+                    fs::rename(&partial, &cache)?;
+                    shared_cache::memory_put(&self.repository, object_id, &completed);
+                    return Ok(completed);
+                }
+            }
+        }
         let mut offset = if partial.exists() { fs::metadata(&partial)?.len() as usize } else { 0 };
         if offset > MAX_OBJECT { fs::remove_file(&partial)?; offset = 0; }
         let mut request = self.http.get(self.path(2, &format!("/objects/{object_id}/raw")));
@@ -197,8 +236,13 @@ impl Api {
         }
         stream.sync_all()?;
         let bytes = fs::read(&partial)?;
-        if object_hash(&bytes) != object_id { bail!("Object digest mismatch; partial transfer retained for diagnosis"); }
+        if object_hash(&bytes) != object_id {
+            // Retaining a corrupt prefix would make every future resume fail.
+            fs::remove_file(&partial)?;
+            bail!("Object digest mismatch; corrupt partial transfer discarded");
+        }
         fs::rename(&partial, &cache)?;
+        shared_cache::memory_put(&self.repository, object_id, &bytes);
         Ok(bytes)
     }
     fn upload_object(&self, bytes: &[u8]) -> Result<String> {
@@ -681,6 +725,12 @@ fn run(cli: Cli) -> Result<()> {
             let root = workspace_root()?; let mut state = load_state(&root)?;
             hydrate(&root, &mut state, &paths)
         },
+        #[cfg(all(unix, feature = "fuse"))]
+        Command::Mount { at } => {
+            let root = workspace_root()?;
+            let state = load_state(&root)?;
+            fuse_workspace::mount(&root, &at, &state)
+        },
         Command::Status { json } => {
             let root = workspace_root()?; let state = load_state(&root)?;
             let changes = status_items(&root, &state)?;
@@ -783,6 +833,45 @@ mod tests {
         assert!(!dirty(temp.path(), "main.rs", &entry)?);
         fs::write(temp.path().join("main.rs"), b"changed")?;
         assert!(dirty(temp.path(), "main.rs", &entry)?);
+        Ok(())
+    }
+    #[test]
+    fn completed_partial_is_verified_and_promoted_offline() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let bytes = b"finished but not published";
+        let id = object_hash(bytes);
+        fs::write(temp.path().join(format!("{id}.part")), bytes)?;
+        let api = Api::new("http://127.0.0.1:1", "00000000-0000-0000-0000-000000000000", "test-token".into())?;
+        assert_eq!(api.download_object(&id, temp.path())?, bytes.to_vec());
+        assert!(!temp.path().join(format!("{id}.part")).exists());
+        assert_eq!(fs::read(temp.path().join(id))?, bytes.to_vec());
+        Ok(())
+    }
+    #[test]
+    fn corrupt_partial_is_repaired_by_full_verified_response() -> Result<()> {
+        use std::net::TcpListener;
+        let temp = tempfile::tempdir()?;
+        let bytes = b"clean authoritative blob";
+        let id = object_hash(bytes);
+        let partial = temp.path().join(format!("{id}.part"));
+        fs::write(&partial, b"invalid-prefix")?;
+        let server = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", server.local_addr()?);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"{}\"\r\nConnection: close\r\n\r\n{}",
+            bytes.len(), id, std::str::from_utf8(bytes)?
+        );
+        let worker = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut conn, _) = server.accept()?;
+            let mut request = [0u8; 2048];
+            let _ = conn.read(&mut request)?;
+            conn.write_all(response.as_bytes())?;
+            Ok(())
+        });
+        let api = Api::new(&url, "00000000-0000-0000-0000-000000000000", "test-token".into())?;
+        assert_eq!(api.download_object(&id, temp.path())?, bytes.to_vec());
+        worker.join().map_err(|_| anyhow!("mock server thread failed"))??;
+        assert!(!partial.exists());
         Ok(())
     }
     #[test]

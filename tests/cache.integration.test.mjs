@@ -157,3 +157,145 @@ test('authoritative S3 streaming fallback preserves immutable object verificatio
   assert.deepEqual((await getCachedObject({ socketPath: socket, repositoryId: repo, id: selected.id })).data, selected.data);
   assert.equal(streamingReads, 1, 'verified streaming bytes are shared without another request');
 });
+
+
+test('node cache reauthorizes every warm hit and rejects cross-tenant credentials', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'devhub-auth-cache-'));
+  const repositoryId = randomUUID();
+  const selected = blob('private authorized content');
+  let originReads = 0, authChecks = 0;
+  const origin = http.createServer((req, res) => {
+    if (req.method === 'HEAD' && req.url.endsWith('/authorize')) {
+      authChecks++;
+      res.writeHead(req.headers.authorization === 'Bearer authorized-credential-000000000000' ? 204 : 403);
+      res.end();
+      return;
+    }
+    originReads++;
+    res.writeHead(200, { 'x-devhub-object-kind': 'BLOB', 'content-length': selected.data.length });
+    res.end(selected.data);
+  });
+  const url = await listen(origin);
+  const socketPath = join(directory, 'cache.sock');
+  const cache = new ObjectCache({
+    root: join(directory, 'objects'), socketPath, originUrl: url,
+    originToken: 'internal-origin-service-credential', requireClientAuthorization: true,
+    allowedRepositories: [repositoryId],
+  });
+  t.after(async () => {
+    await cache.close();
+    await new Promise(resolve => origin.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  await cache.start();
+  const allowed = { socketPath, repositoryId, id: selected.id, token: 'authorized-credential-000000000000' };
+  const denied = { ...allowed, token: 'unauthorized-credential-0000000000' };
+  await assert.rejects(() => getCachedObject(denied), CacheUnavailable);
+  assert.equal(originReads, 0, 'denial must occur before filling a cache miss');
+  assert.deepEqual((await getCachedObject(allowed)).data, selected.data);
+  assert.deepEqual((await getCachedObject(allowed)).data, selected.data);
+  assert.equal(originReads, 1);
+  await assert.rejects(() => getCachedObject(denied), CacheUnavailable);
+  assert.equal(originReads, 1, 'denied caller must never receive existing warm bytes');
+  assert.equal(authChecks, 4, 'authorization must never be cached');
+  assert.equal(cache.stats.authorizationDenials, 2);
+  await assert.rejects(() => getCachedObject({ ...allowed, repositoryId: randomUUID() }), CacheUnavailable);
+});
+
+
+test('bounded retry recovers transient origin failure and rejects unsafe configuration', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'devhub-retry-cache-'));
+  const r = randomUUID(), x = blob('retryable');
+  let hits = 0;
+  const origin = http.createServer((_req, res) => {
+    hits++;
+    if (hits === 1) { res.writeHead(503); res.end(); return; }
+    res.writeHead(200, { 'x-devhub-object-kind': 'BLOB' }); res.end(x.data);
+  });
+  const url = await listen(origin);
+  const cache = new ObjectCache({ root: join(dir, 'data'), socketPath: join(dir, 'cache.sock'), originUrl: url });
+  t.after(async () => { await cache.close(); await new Promise(resolve => origin.close(resolve)); await rm(dir, { recursive: true, force: true }); });
+  await cache.start();
+  assert.deepEqual((await getCachedObject({ socketPath: join(dir, 'cache.sock'), repositoryId: r, id: x.id })).data, x.data);
+  assert.equal(hits, 2);
+  assert.throws(() => new ObjectCache({ root: join(dir, 'invalid'), socketPath: join(dir, 'other.sock'),
+    originUrl: url, originToken: 'privileged-token', requireClientAuthorization: false }), /requires per-caller authorization/);
+});
+
+
+test('durable journal resumes verified chunks after daemon restart and detects tampering', { timeout: 45000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'devhub-resume-'));
+  const socket = join(dir, 'node.sock'), root = join(dir, 'objects');
+  const big = Buffer.alloc(768 * 1024 + 11, 0x61);
+  const second = Buffer.alloc(768 * 1024 + 11, 0x62);
+  const objects = [big, second].map(data => ({
+    data, kind: 'BLOB', id: kindHash('BLOB', data),
+  }));
+  const partialFailure = new Set(objects.map(item => item.id));
+  const rangeRequests = [];
+  let fullRequests = 0;
+  const origin = http.createServer((req, res) => {
+    const item = objects.find(x => req.url.includes(x.id));
+    if (!item) { res.writeHead(404); res.end(); return; }
+    const rawRange = req.headers.range;
+    if (rawRange) {
+      const offset = Number(/^bytes=(\d+)-$/.exec(rawRange)?.[1]);
+      rangeRequests.push(offset);
+      res.writeHead(206, {
+        'x-devhub-object-kind': 'BLOB', etag: '"' + item.id + '"',
+        'content-range': 'bytes ' + offset + '-' + (item.data.length - 1) + '/' + item.data.length,
+        'content-length': item.data.length - offset,
+      });
+      res.end(item.data.subarray(offset));
+      return;
+    }
+    fullRequests++;
+    res.writeHead(200, { 'x-devhub-object-kind': 'BLOB', 'content-length': item.data.length });
+    if (partialFailure.delete(item.id)) {
+      res.write(item.data.subarray(0, 512 * 1024));
+      setTimeout(() => res.destroy(), 75);
+      return;
+    }
+    res.end(item.data);
+  });
+  const url = await listen(origin);
+  let daemon;
+  const startCache = async () => {
+    daemon = new ObjectCache({
+      root, socketPath: socket, originUrl: url,
+      maxDiskBytes: 4 * 1024 * 1024, maxObjectBytes: 1024 * 1024,
+      maxOriginRetries: 0,
+    });
+    await daemon.start();
+  };
+  t.after(async () => {
+    if (daemon) await daemon.close();
+    await new Promise(resolve => origin.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  });
+  const opts = id => ({ socketPath: socket, repositoryId: repo, id });
+  await startCache();
+  await assert.rejects(() => getCachedObject(opts(objects[0].id)));
+  const shards = await readdir(join(root, 'objects'), { withFileTypes: true });
+  const folders = shards.filter(s => s.isDirectory()).map(s => join(root, 'objects', s.name));
+  const journals = (await Promise.all(folders.map(p => readdir(p)))).flat().filter(x => x.endsWith('.json.resume'));
+  assert.equal(journals.length, 1, 'interrupted transfer must leave a persisted journal');
+  await daemon.close(); daemon = null;
+  await startCache();
+  assert.deepEqual((await getCachedObject(opts(objects[0].id))).data, big);
+  assert.deepEqual(rangeRequests, [512 * 1024], 'only unfinished bytes should transfer after restart');
+  assert.equal(fullRequests, 1, 'no redundant full download');
+  await assert.rejects(() => getCachedObject(opts(objects[1].id)));
+  const shardName = await readdir(join(root, 'objects'));
+  const staged = [];
+  for (const folder of shardName) {
+    for (const name of await readdir(join(root, 'objects', folder))) {
+      if (name.endsWith('.bin.resume')) staged.push(join(root, 'objects', folder, name));
+    }
+  }
+  assert.equal(staged.length, 1);
+  await writeFile(staged[0], Buffer.alloc(512 * 1024, 0x7f));
+  assert.deepEqual((await getCachedObject(opts(objects[1].id))).data, second,
+    'corrupt journal is discarded and safe full transfer succeeds');
+  assert.equal(fullRequests, 3, 'tampered staged data must not be reused');
+});
