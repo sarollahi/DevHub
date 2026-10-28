@@ -5,6 +5,7 @@ import { mkdir, readdir, readFile, rename, rm, stat, chmod, open, utimes, writeF
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Transform, Readable } from 'node:stream';
+import { readJournal, receiveToJournal, removeJournal, publishVerified, pruneJournals, journalPaths } from './resumable.mjs';
 
 const ID = /^[a-f0-9]{64}$/;
 const REPOSITORY = /^[a-f0-9-]{36}$/i;
@@ -57,6 +58,7 @@ export class ObjectCache {
     this.requireClientAuthorization = o.requireClientAuthorization ??
       (!o.accessToken && (Boolean(o.originToken) || o.originUrl.startsWith('https://')));
     if (this.requireClientAuthorization && !o.originUrl) throw new Error('Authorization origin required');
+    this.resumeBudgetBytes = Math.min(o.maxObjectBytes * 4, Math.floor(o.maxDiskBytes / 4), Math.max(0, o.maxDiskBytes - o.maxObjectBytes));
     this.entries = new Map(); this.flights = new Map(); this.activeReaders = new Map();
     this.capacity = new Capacity(o.maxInflight, o.maxQueued);
     this.readCapacity = new Capacity(o.maxReaders, o.maxReaderQueue);
@@ -102,6 +104,7 @@ export class ObjectCache {
       }
       for (const file of files) if (file.isFile() && /^[a-f0-9]{64}\.bin$/.test(file.name) && !this.entries.has(file.name.slice(0, 64))) await rm(join(folder, file.name), { force: true });
     }
+    await pruneJournals(this.options.root, this.resumeBudgetBytes);
     await this.evictTo(0, 0);
   }
   async close() {
@@ -210,7 +213,7 @@ export class ObjectCache {
     await Promise.all([rm(p.meta, { force: true }), rm(p.bin, { force: true })]);
   }
   async evictTo(additionalBytes, additionalEntries) {
-    while (this.bytes + this.reserved + additionalBytes > this.options.maxDiskBytes || this.entries.size + additionalEntries > this.options.maxEntries) {
+    while (this.bytes + this.reserved + additionalBytes > this.options.maxDiskBytes - this.resumeBudgetBytes || this.entries.size + additionalEntries > this.options.maxEntries) {
       const victim = [...this.entries].filter(([k]) => !this.activeReaders.has(k) && !this.flights.has(k)).sort((a, b) => a[1].time - b[1].time)[0];
       if (!victim) throw Object.assign(new Error('Cache is full'), { status: 503 });
       await this.remove(victim[0]); this.stats.evictions++;
@@ -257,7 +260,7 @@ export class ObjectCache {
     }
     throw Object.assign(new Error('Upstream retry budget exhausted'), { status: 503 });
   }
-    async fill(key, repositoryId, id) {
+  async fill(key, repositoryId, id) {
     const release = await this.capacity.acquire().catch(error => { this.stats.rejected++; throw error; });
     let reserved = false;
     try {
@@ -265,43 +268,111 @@ export class ObjectCache {
       if (existing && await this.verified(key, existing)) return existing;
       this.reserved += this.options.maxObjectBytes; reserved = true;
       await this.evictTo(0, 1);
-      let upstream;
-      const objectPath = `/v1/objects/${repositoryId}/${id}`;
-      if (this.options.regionalUrl && this.regionCircuit.ready()) {
-        try { upstream = await this.upstream(`${this.options.regionalUrl.replace(/\/$/, '')}${objectPath}`, this.options.regionalToken, this.regionCircuit, 'regionalRequests'); upstream.fromRegion = true; }
-        catch (error) { if (error.terminal) throw error; }
+      const p = this.paths(key);
+      await mkdir(p.dir, { recursive: true, mode: 0o700 });
+      let journal = await readJournal(p, repositoryId, id, this.options.maxObjectBytes);
+      if (journal.offset && await this.verifiedStaged(p, id)) {
+        const ready = await publishVerified(p, { repositoryId, id, kind: 'BLOB', bytes: journal.offset });
+        this.entries.set(key, ready); this.bytes += ready.size;
+        return ready;
       }
-      if (!upstream) {
-        const base = this.options.originUrl.replace(/\/$/, '');
+      let upstream;
+      const base = this.options.originUrl.replace(/\/$/, '');
+      const objectPath = `/v1/objects/${repositoryId}/${id}`;
+      // A resumable BLOB read must use an authenticated, strong-ETag range
+      // endpoint. Regional caches are not assumed to support ranges.
+      if (journal.offset) {
+        if (!this.originCircuit.ready()) throw Object.assign(new Error('Origin circuit open'), { status: 503 });
+        this.stats.upstreamRequests++;
         try {
-          upstream = await this.upstream(`${base}/api/v2/repositories/${repositoryId}/objects/${id}?format=raw`, this.options.originToken, this.originCircuit, 'upstreamRequests');
+          const response = await fetch(`${base}/api/v2/repositories/${repositoryId}/objects/${id}/raw`, {
+            headers: { authorization: `Bearer ${this.options.originToken || ''}`,
+              range: `bytes=${journal.offset}-`, 'if-range': `"${id}"` },
+            redirect: 'error', signal: AbortSignal.timeout(this.options.timeoutMs),
+          });
+          const contentRange = response.headers.get('content-range') || '';
+          const etag = response.headers.get('etag') || '';
+          if (response.status === 206 && response.body &&
+              etag === `"${id}"` && contentRange.startsWith(`bytes ${journal.offset}-`)) {
+            upstream = { response, kind: 'BLOB' };
+          } else {
+            await response.body?.cancel();
+            if ([401, 403, 404].includes(response.status))
+              throw Object.assign(new Error('Origin denied resumed object'), { status: response.status, terminal: true });
+            await removeJournal(p);
+            journal = { offset: 0, chunks: [] };
+          }
         } catch (error) {
-          if (!error.streamingRequired) throw error;
-          // S3-backed immutable blobs use the authoritative streaming endpoint.
-          upstream = await this.upstream(`${base}/api/v1/repositories/${repositoryId}/objects/${id}/content`, this.options.originToken, this.originCircuit, 'upstreamRequests', 'BLOB');
+          if (error.terminal) throw error;
+          // Leave the previously hashed chunks intact on a network failure.
+          throw Object.assign(new Error('Resumable origin unavailable'), { status: 503, cause: error });
         }
       }
-      const p = this.paths(key); await mkdir(p.dir, { recursive: true, mode: 0o700 });
-      const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      const tempBin = `${p.bin}.part-${nonce}`, tempMeta = `${p.meta}.part-${nonce}`;
-      try {
+      if (!upstream && this.options.regionalUrl && this.regionCircuit.ready()) {
+        try {
+          upstream = await this.upstream(`${this.options.regionalUrl.replace(/\/$/, '')}${objectPath}`,
+            this.options.regionalToken, this.regionCircuit, 'regionalRequests');
+          upstream.fromRegion = true;
+        } catch (error) { if (error.terminal) throw error; }
+      }
+      if (!upstream) {
+        try {
+          upstream = await this.upstream(`${base}/api/v2/repositories/${repositoryId}/objects/${id}?format=raw`,
+            this.options.originToken, this.originCircuit, 'upstreamRequests');
+        } catch (error) {
+          if (!error.streamingRequired) throw error;
+          upstream = await this.upstream(`${base}/api/v1/repositories/${repositoryId}/objects/${id}/content`,
+            this.options.originToken, this.originCircuit, 'upstreamRequests', 'BLOB');
+        }
+      }
+      // Tree objects retain the original streaming path. A partial journal is
+      // only valid for BLOBs; tree manifests cannot be ranged in the v2 API.
+      if (upstream.kind === 'TREE') {
         let size = 0;
-        const hash = createHash('sha256').update(upstream.kind).update('\0');
-        const check = new Transform({ transform: (chunk, _, callback) => {
-          size += chunk.length;
-          if (size > this.options.maxObjectBytes) return callback(new Error('Object exceeds cache size limit'));
-          hash.update(chunk); callback(null, chunk);
-        } });
-        await pipeline(Readable.fromWeb(upstream.response.body), check, createWriteStream(tempBin, { flags: 'wx', mode: 0o600 }));
-        if (hash.digest('hex') !== id) { this.stats.integrityFailures++; (upstream.fromRegion ? this.regionCircuit : this.originCircuit).failure(); throw new Error('Upstream content digest mismatch'); }
-        const meta = { id, repositoryId, kind: upstream.kind, size };
-        await writeFile(tempMeta, JSON.stringify(meta), { flag: 'wx', mode: 0o600 });
-        await rename(tempBin, p.bin); await rename(tempMeta, p.meta);
-        const entry = { ...meta, time: Date.now() };
-        this.entries.set(key, entry); this.bytes += size;
-        return entry;
-      } finally { await Promise.all([rm(tempBin, { force: true }), rm(tempMeta, { force: true })]); }
-    } finally { if (reserved) this.reserved -= this.options.maxObjectBytes; release(); }
+        const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const tempBin = `${p.bin}.part-${nonce}`;
+        try {
+          const hash = createHash('sha256').update('TREE').update('\0');
+          const check = new Transform({ transform: (chunk, _, cb) => {
+            size += chunk.length;
+            if (size > this.options.maxObjectBytes) return cb(new Error('Tree exceeds size limit'));
+            hash.update(chunk); cb(null, chunk);
+          } });
+          await pipeline(Readable.fromWeb(upstream.response.body), check, createWriteStream(tempBin, { flags: 'wx', mode: 0o600 }));
+          if (hash.digest('hex') !== id) { this.stats.integrityFailures++; throw new Error('Tree digest mismatch'); }
+          const meta = { id, repositoryId, kind: 'TREE', size };
+          await writeFile(p.meta, JSON.stringify(meta), { mode: 0o600 });
+          await rename(tempBin, p.bin);
+          const entry = { ...meta, time: Date.now() };
+          this.entries.set(key, entry); this.bytes += size;
+          return entry;
+        } finally { await rm(tempBin, { force: true }); }
+      }
+      let entry;
+      try {
+        entry = await receiveToJournal(upstream.response, p, { repositoryId, id, kind: 'BLOB',
+          maxBytes: this.options.maxObjectBytes, offset: journal.offset, chunks: journal.chunks });
+      } catch (error) {
+        if (String(error.message).includes('digest mismatch')) {
+          this.stats.integrityFailures++;
+          (upstream.fromRegion ? this.regionCircuit : this.originCircuit).failure();
+        }
+        throw error;
+      }
+      this.entries.set(key, entry); this.bytes += entry.size;
+      return entry;
+    } finally {
+      if (reserved) this.reserved -= this.options.maxObjectBytes;
+      release();
+      await pruneJournals(this.options.root, this.resumeBudgetBytes).catch(() => {});
+    }
+  }
+  async verifiedStaged(p, id) {
+    try {
+      const hash = createHash('sha256').update('BLOB').update('\0');
+      for await (const chunk of createReadStream(journalPaths(p).part)) hash.update(chunk);
+      return hash.digest('hex') === id;
+    } catch { return false; }
   }
 }
 
