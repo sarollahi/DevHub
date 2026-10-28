@@ -47,7 +47,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         result = await contributionImpactQuery(id, necessary(revision, "revision"), max, q.get("cursor") || ""); break;
       case "blame":
         if (!path) throw new SourceControlError(422, "INVALID_PATH", "Path required");
-        result = await blameQuery(id, necessary(revision, "revision"), path); break;
+        result = await blameQuery(id, necessary(revision, "revision"), path, 500,
+          Math.max(0, Number(q.get("offset") || 0)), max); break;
       case "merge": result = await mergeQuery(id, necessary(q.get("ours"), "ours"),
         necessary(q.get("theirs"), "theirs")); break;
       default: throw new SourceControlError(404, "NOT_FOUND", "Unknown query");
