@@ -826,6 +826,45 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn completed_partial_is_verified_and_promoted_offline() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let bytes = b"finished but not published";
+        let id = object_hash(bytes);
+        fs::write(temp.path().join(format!("{id}.part")), bytes)?;
+        let api = Api::new("http://127.0.0.1:1", "00000000-0000-0000-0000-000000000000", "test-token".into())?;
+        assert_eq!(api.download_object(&id, temp.path())?, bytes);
+        assert!(!temp.path().join(format!("{id}.part")).exists());
+        assert_eq!(fs::read(temp.path().join(id))?, bytes);
+        Ok(())
+    }
+    #[test]
+    fn corrupt_partial_is_repaired_by_full_verified_response() -> Result<()> {
+        use std::net::TcpListener;
+        let temp = tempfile::tempdir()?;
+        let bytes = b"clean authoritative blob";
+        let id = object_hash(bytes);
+        let partial = temp.path().join(format!("{id}.part"));
+        fs::write(&partial, b"invalid-prefix")?;
+        let server = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", server.local_addr()?);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"{}\"\r\nConnection: close\r\n\r\n{}",
+            bytes.len(), id, std::str::from_utf8(bytes)?
+        );
+        let worker = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut conn, _) = server.accept()?;
+            let mut request = [0u8; 2048];
+            let _ = conn.read(&mut request)?;
+            conn.write_all(response.as_bytes())?;
+            Ok(())
+        });
+        let api = Api::new(&url, "00000000-0000-0000-0000-000000000000", "test-token".into())?;
+        assert_eq!(api.download_object(&id, temp.path())?, bytes);
+        worker.join().map_err(|_| anyhow!("mock server thread failed"))??;
+        assert!(!partial.exists());
+        Ok(())
+    }
+    #[test]
     fn pending_request_is_stable() -> Result<()> {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("main.rs"), b"new")?;
