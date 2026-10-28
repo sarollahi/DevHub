@@ -4,11 +4,13 @@ import { randomBytes } from "node:crypto";
 import { db } from "../src/lib/prisma";
 import { objectId } from "../src/source-control/storage";
 import { createChangeset } from "../src/source-control/service";
-import { runAuthorizedQuery, fileHistory, ancestryQuery, mergeBases, blameQuery } from "../src/source-control/query";
+import { runAuthorizedQuery, fileHistory, ancestryQuery, mergeBases, blameQuery, isAncestor, pathImpactQuery, contributionImpactQuery } from "../src/source-control/query";
 import { DERIVED_VERSION, enqueueDerived, processDerivedBatch, processDerivedIndex,
   readDerived, checksum, stableJson } from "../src/source-control/derived-index";
-import { indexedFileHistory, indexedLinearMergeBases, IndexedWalk } from "../src/source-control/derived-queries";
+import { indexedFileHistory, indexedLinearMergeBases, indexedDagMergeBases, indexedDagIsAncestor, IndexedWalk } from "../src/source-control/derived-queries";
 import { testSession } from "./support/identities";
+import { exactDagAncestors, exactDagMergeBases } from "../src/source-control/dag-queries";
+import { matchingLines, matchingLinesLarge } from "../src/source-control/query-algorithms";
 
 const put = (path: string, content: string) => ({
   kind: "PUT" as const, path, dataBase64: Buffer.from(content).toString("base64"),
@@ -58,6 +60,12 @@ test("versioned recursive indexes agree with canonical history and survive lost 
   const edit = await add([moved], "edit", [put("docs/new.txt", "a\nc\n")]);
   const sibling = await add([moved], "independent", [put("unrelated.txt", "unrelated\n")]);
   const merge = await add([edit, sibling], "merge", [put("unrelated.txt", "unrelated\n")]);
+  const crossA = await add([edit, sibling], "criss-cross A", [put("cross/a.txt", "A\n")]);
+  const crossB = await add([sibling, edit], "criss-cross B", [put("cross/b.txt", "B\n")]);
+  const largeText = Array.from({ length: 12_000 }, (_, i) => "line-" + i + "\n").join("");
+  const largeRoot = await add([root], "large root", [put("large.txt", largeText)]);
+  const largeEdit = await add([largeRoot], "large edit", [put("large.txt",
+    largeText.replace("line-6000\n", "NEW-6000\n"))]);
   const baseline = await runAuthorizedQuery(actor, repository.id,
     () => fileHistory(repository.id, edit, "docs/new.txt"));
   assert.deepEqual(baseline.records.map(x => x.changesetId), [edit, moved, root]);
@@ -70,14 +78,15 @@ test("versioned recursive indexes agree with canonical history and survive lost 
     leaseUntil: new Date(Date.now() - 1000) } });
   assert.equal(await processDerivedIndex(root, "ancestry"), true);
 
-  for (const id of [root, moved, edit, sibling, merge]) await enqueueDerived(repository.id, id);
+  const revisions = [root, moved, edit, sibling, merge, crossA, crossB, largeRoot, largeEdit];
+  for (const id of revisions) await enqueueDerived(repository.id, id);
   let done = false;
-  for (let batch = 0; batch < 80; batch++) {
+  for (let batch = 0; batch < 200; batch++) {
     await processDerivedBatch(64);
     const complete = await db.sourceDerivedIndex.count({ where: {
       repositoryId: repository.id, state: "SUCCEEDED",
     } });
-    if (complete === 30) { done = true; break; }
+    if (complete === revisions.length * 6) { done = true; break; }
   }
   assert.equal(done, true, "all six kinds per revision should finish in DAG order");
   const walk = new IndexedWalk(repository.id);
@@ -85,6 +94,17 @@ test("versioned recursive indexes agree with canonical history and survive lost 
   assert.equal(await walk.onFirstParentChain(edit, sibling), false);
   assert.deepEqual(await indexedLinearMergeBases(repository.id, edit, sibling), [moved]);
   assert.equal(await indexedLinearMergeBases(repository.id, merge, edit), null);
+  assert.deepEqual(await indexedDagMergeBases(repository.id, crossA, crossB),
+    [edit, sibling].sort());
+  assert.deepEqual(await exactDagMergeBases(repository.id, crossA, crossB),
+    [edit, sibling].sort());
+  assert.equal(await indexedDagIsAncestor(repository.id, edit, crossB), true);
+  assert.equal(await indexedDagIsAncestor(repository.id, root, crossA), true);
+  assert.equal(await indexedDagIsAncestor(repository.id, crossA, crossB), false);
+  assert.equal(await runAuthorizedQuery(actor, repository.id,
+    () => isAncestor(repository.id, sibling, crossA)), true);
+  assert.deepEqual(new Set((await exactDagAncestors(repository.id, crossA, 100)).ancestors),
+    new Set([crossA, edit, sibling, moved, root]));
 
   const history = await indexedFileHistory(repository.id, edit, "docs/new.txt", true, 100);
   assert.ok(history);
@@ -98,6 +118,15 @@ test("versioned recursive indexes agree with canonical history and survive lost 
   assert.deepEqual(linear.ancestors, [edit, moved, root]);
   const merged = await runAuthorizedQuery(actor, repository.id, () => ancestryQuery(repository.id, merge, sibling, 10));
   assert.equal(merged.ancestorCount, 4);
+  const impact = await runAuthorizedQuery(actor, repository.id,
+    () => pathImpactQuery(repository.id, crossA, "docs/old.txt"));
+  assert.deepEqual(new Set(impact.records.map(r => r.changesetId)), new Set([root, moved]));
+  const contributors = await runAuthorizedQuery(actor, repository.id,
+    () => contributionImpactQuery(repository.id, crossA));
+  assert.equal(contributors.records.length, 1);
+  assert.equal(contributors.records[0].revisions, 5);
+  assert.equal(contributors.records[0].operations, 5);
+  assert.equal(contributors.records[0].distinctPaths, 4);
   const blame = await runAuthorizedQuery(actor, repository.id, () => blameQuery(repository.id, edit, "docs/new.txt"));
   assert.deepEqual(blame.lines.map(x => x.changesetId), [root, edit]);
   const provenance = await db.sourceDerivedBlameFile.findFirstOrThrow({ where: {
@@ -105,6 +134,12 @@ test("versioned recursive indexes agree with canonical history and survive lost 
   } });
   assert.equal(provenance.state, "READY");
   assert.equal(provenance.lineCount, 2);
+  const large = await runAuthorizedQuery(actor, repository.id,
+    () => blameQuery(repository.id, largeEdit, "large.txt", 500, 5999, 3));
+  assert.deepEqual(large.lines.map(line => line.changesetId),
+    [largeRoot, largeEdit, largeRoot]);
+  assert.equal(large.totalLines, 12000);
+  assert.equal(large.nextOffset, 6002);
 
   const published = await readDerived(repository.id, edit, "ancestry");
   assert.equal(published?.firstParentDepth, 2);
@@ -113,6 +148,21 @@ test("versioned recursive indexes agree with canonical history and survive lost 
     changesetId: edit, kind: "ancestry", version: DERIVED_VERSION,
   } }, data: { checksum: "0".repeat(64) } }));
   assert.deepEqual(await readDerived(repository.id, edit, "ancestry"), published);
+});
+
+test("linear-space provenance matching agrees with independent exact LCS lengths", () => {
+  for (let seed = 0; seed < 100; seed++) {
+    const oldLines = Array.from({ length: 8 }, (_, i) => "line-" + ((i * 13 + seed) % 5) + "\n");
+    const newLines = Array.from({ length: 10 }, (_, i) => "line-" + ((i * 7 + seed) % 5) + "\n");
+    const baseline = matchingLines(oldLines, newLines)!;
+    const large = matchingLinesLarge(oldLines, newLines);
+    assert.equal(large.length, baseline.length);
+    for (let i = 0; i < large.length; i++) {
+      const [a, b] = large[i];
+      assert.equal(oldLines[a], newLines[b]);
+      if (i) { assert.ok(a > large[i - 1][0]); assert.ok(b > large[i - 1][1]); }
+    }
+  }
 });
 
 test("canonical checksums are object-order independent but content-sensitive", () => {
