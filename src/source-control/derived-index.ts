@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { SnapshotTree } from "./snapshot-tree";
 
-export const DERIVED_VERSION = 1;
+export const DERIVED_VERSION = 2;
 export const DERIVED_KINDS = ["ancestry", "changed-paths", "directory", "history", "impact", "blame"] as const;
 export type DerivedKind = typeof DERIVED_KINDS[number];
 type Payload = Record<string, unknown>;
@@ -72,6 +72,10 @@ const definitions: Record<DerivedKind, Definition> = {
     const generation = Math.max(-1, ...prior.map(p => integer(p.generation))) + 1;
     const depth = change.parents.length ? integer(prior[0].firstParentDepth) + 1 : 0;
     const linear = change.parents.length === 0 || (change.parents.length === 1 && prior[0].linear === true);
+    // A nearest-merge pointer compresses arbitrarily long linear stretches in a
+    // merge DAG. Each query examines merge vertices, not every intervening commit.
+    const nearestMerge = change.parents.length > 1 ? change.id :
+      change.parents.length ? (prior[0].nearestMerge ?? null) : null;
     const jumps: NonNullable<Computation["jumps"]> = [];
     if (change.parents.length) {
       let ancestorId = change.parents[0].parentId;
@@ -85,7 +89,7 @@ const definitions: Record<DerivedKind, Definition> = {
         ancestorId = next?.ancestorId ?? "";
       }
     }
-    return { payload: { generation, firstParentDepth: depth, linear, parentCount: change.parents.length }, jumps };
+    return { payload: { generation, firstParentDepth: depth, nearestMerge, linear, parentCount: change.parents.length }, jumps };
   } },
   "changed-paths": { parentDependency: false, prerequisites: [], async compute({ change }) {
     const paths = new Set<string>();
