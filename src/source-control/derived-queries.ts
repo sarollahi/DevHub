@@ -143,7 +143,7 @@ export async function indexedDagMergeBases(repositoryId: string, left: string, r
     indexedDagSpines(walk, repositoryId, left, 256),
     indexedDagSpines(walk, repositoryId, right, 256),
   ]);
-  if (!a || !b || a.length * b.length > 65536) return null;
+  if (!a || !b || a.length * b.length > 1024) return null;
   const candidates = new Set<string>();
   for (const lhs of a) for (const rhs of b) {
     const shared = await indexedFirstParentLca(walk, lhs.tip, rhs.tip);
