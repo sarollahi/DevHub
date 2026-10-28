@@ -1,7 +1,8 @@
 import { performance } from "node:perf_hooks";
 import { db } from "../src/lib/prisma";
 import { enqueueDerived, processDerivedBatch, readDerived } from "../src/source-control/derived-index";
-import { indexedFileHistory, indexedLinearAncestry, indexedLinearMergeBases } from "../src/source-control/derived-queries";
+import { indexedFileHistory, indexedLinearAncestry, indexedDagMergeBases, indexedDagIsAncestor } from "../src/source-control/derived-queries";
+import { exactDagContributions, exactDagPathImpact } from "../src/source-control/dag-queries";
 
 // Only real persisted changesets/revisions are measured. The fixture population
 // is delegated to bench:snapshot-scale. Missing telemetry is reported as null.
@@ -10,6 +11,7 @@ const arg = (name: string, fallback?: string) =>
 const repositoryId = arg("repository", process.env.BENCH_REPOSITORY_ID);
 const revision = arg("revision", process.env.BENCH_REVISION);
 const path = arg("path", process.env.BENCH_PATH || "README.md")!;
+const other = arg("other", process.env.BENCH_OTHER_REVISION) || revision;
 const limit = Math.max(1, Math.min(200, Number(arg("limit", "50"))));
 const samples = Math.max(1, Math.min(5000, Number(arg("samples", "100"))));
 const passes = Math.max(1, Math.min(100000, Number(arg("passes", "1000"))));
@@ -51,7 +53,13 @@ async function main() {
   const warm = !!(await readDerived(repositoryId, revision, "history"));
   const ancestry = warm ? await measure(() => indexedLinearAncestry(repositoryId, revision, limit), samples) : null;
   const history = warm ? await measure(() => indexedFileHistory(repositoryId, revision, path, true, limit), samples) : null;
-  const bases = warm ? await measure(() => indexedLinearMergeBases(repositoryId, revision, revision), samples) : null;
+  const bases = warm && other ? await measure(() => indexedDagMergeBases(repositoryId, revision, other), samples) : null;
+  const reachability = warm && other ? await measure(() => indexedDagIsAncestor(repositoryId, other, revision),
+    samples) : null;
+  // Exact complete-DAG impact must not silently omit expensive branches.
+  // Measure it sparingly to avoid multiplying cold staging work by 100 samples.
+  const contribution = await measure(() => exactDagContributions(repositoryId, revision, limit), 1);
+  const pathImpact = await measure(() => exactDagPathImpact(repositoryId, revision, path, limit), 1);
   const tables = ["SourceDerivedIndex", "SourceDerivedJump", "SourceDerivedPathEvent", "SourceDerivedBlameFile"];
   const storage: Record<string, { tableBytes: number; indexBytes: number; rows: number }> = {};
   for (const name of tables) {
@@ -62,14 +70,15 @@ async function main() {
       rows: Number(stats[0].rows) };
   }
   const report = {
-    repositoryId, revision, revisionCount, sampleCount: samples, queryLimit: limit,
+    repositoryId, revision, otherRevision: other, revisionCount, sampleCount: samples, queryLimit: limit,
     coldAlreadyIndexed: before.map((value, i) => ({ kind: indexKinds[i], present: value !== null })),
     completed: warm, backfill: { measuredWallMs: coldMs, passes: elapsedPasses + 1, inspected, completedJobs: completed,
       jobsPerSecond: coldMs > 0 ? completed / (coldMs / 1000) : null },
     warmQueryLatencyMs: { ancestry: ancestry?.ms ?? null, history: history?.ms ?? null,
-      mergeBase: bases?.ms ?? null },
+      mergeBase: bases?.ms ?? null, reachability: reachability?.ms ?? null,
+      fullContributionImpact: contribution.ms, changedPathImpact: pathImpact.ms },
     querySupported: { ancestry: !!ancestry?.last, history: !!history?.last,
-      mergeBase: !!bases?.last },
+      mergeBase: bases?.last !== null && bases?.last !== undefined },
     storage, storageOverheadBytes: Object.values(storage).reduce((sum, v) => sum + v.tableBytes + v.indexBytes, 0),
     cacheHitRatio: null, recoveryDurationMs: null,
     notes: "Actual PostgreSQL fixture. Production network/storage/runner topology and crash timing are not inferred.",
