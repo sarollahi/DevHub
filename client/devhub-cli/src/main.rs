@@ -12,6 +12,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use walkdir::WalkDir;
+mod shared_cache;
 
 const MAX_OBJECT: usize = 4 * 1024 * 1024;
 const CHUNK: usize = 256 * 1024;
@@ -164,6 +165,22 @@ impl Api {
                 return Ok(bytes);
             }
             fs::remove_file(&cache)?;
+        }
+        // Every local daemon response is verified independently before publication.
+        // An unavailable daemon never prevents portable, authenticated hydration.
+        if let Some(bytes) = shared_cache::fetch(&self.repository, object_id, &self.token)? {
+            let temp = directory.join(format!("{object_id}.cache-{}", std::process::id()));
+            {
+                let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+            if let Err(error) = fs::rename(&temp, &cache) {
+                let _ = fs::remove_file(&temp);
+                return Err(error.into());
+            }
+            prune_cache(directory, DEFAULT_CACHE)?;
+            return Ok(bytes);
         }
         let partial = directory.join(format!("{object_id}.part"));
         let mut offset = if partial.exists() { fs::metadata(&partial)?.len() as usize } else { 0 };
