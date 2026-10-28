@@ -63,6 +63,7 @@ test("versioned recursive indexes agree with canonical history and survive lost 
   const crossA = await add([edit, sibling], "criss-cross A", [put("cross/a.txt", "A\n")]);
   const crossB = await add([sibling, edit], "criss-cross B", [put("cross/b.txt", "B\n")]);
   const largeText = Array.from({ length: 12_000 }, (_, i) => "line-" + i + "\n").join("");
+  const multi = await add([root], "two legacy operations", [put("multi/a.txt", "A\n"), put("multi/b.txt", "B\n")]);
   const largeRoot = await add([root], "large root", [put("large.txt", largeText)]);
   const largeEdit = await add([largeRoot], "large edit", [put("large.txt",
     largeText.replace("line-6000\n", "NEW-6000\n"))]);
@@ -78,7 +79,7 @@ test("versioned recursive indexes agree with canonical history and survive lost 
     leaseUntil: new Date(Date.now() - 1000) } });
   assert.equal(await processDerivedIndex(root, "ancestry"), true);
 
-  const revisions = [root, moved, edit, sibling, merge, crossA, crossB, largeRoot, largeEdit];
+  const revisions = [root, moved, edit, sibling, merge, crossA, crossB, multi, largeRoot, largeEdit];
   for (const id of revisions) await enqueueDerived(repository.id, id);
   let done = false;
   for (let batch = 0; batch < 200; batch++) {
@@ -134,6 +135,12 @@ test("versioned recursive indexes agree with canonical history and survive lost 
   } });
   assert.equal(provenance.state, "READY");
   assert.equal(provenance.lineCount, 2);
+  assert.equal(await db.sourceDerivedPathEvent.count({ where: {
+    changesetId: multi, version: DERIVED_VERSION, role: "destination",
+  } }), 2);
+  assert.equal(await db.sourceDerivedBlameFile.count({ where: {
+    changesetId: multi, version: DERIVED_VERSION,
+  } }), 2);
   const large = await runAuthorizedQuery(actor, repository.id,
     () => blameQuery(repository.id, largeEdit, "large.txt", 500, 5999, 3));
   assert.deepEqual(large.lines.map(line => line.changesetId),
