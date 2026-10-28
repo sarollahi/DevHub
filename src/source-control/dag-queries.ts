@@ -111,14 +111,23 @@ export async function exactDagContributions(repositoryId: string, revision: stri
     }[]>`
       WITH impact AS (
         SELECT c."authorId", COUNT(DISTINCT c.id) AS revisions,
-          COUNT(op."changesetId") AS operations,
-          COUNT(DISTINCT op.path) AS "distinctPaths"
+          COUNT(op."changesetId") AS operations
         FROM "devhub_walk_a" reachable
         JOIN "SourceChangeset" c ON c.id = reachable.id AND c."repositoryId" = ${repositoryId}::uuid
         LEFT JOIN "SourceFileOperation" op ON op."changesetId" = c.id
         GROUP BY c."authorId"
+      ), changed_paths AS (
+        SELECT c."authorId", COUNT(DISTINCT touched.path) AS "distinctPaths"
+        FROM "devhub_walk_a" reachable
+        JOIN "SourceChangeset" c ON c.id = reachable.id AND c."repositoryId" = ${repositoryId}::uuid
+        JOIN "SourceFileOperation" op ON op."changesetId" = c.id
+        CROSS JOIN LATERAL (VALUES (op.path), (op."previousPath")) touched(path)
+        WHERE touched.path IS NOT NULL
+        GROUP BY c."authorId"
       )
-      SELECT *, COUNT(*) OVER () AS "totalAuthors" FROM impact
+      SELECT i.*, COALESCE(p."distinctPaths", 0) AS "distinctPaths",
+        COUNT(*) OVER () AS "totalAuthors"
+      FROM impact i LEFT JOIN changed_paths p ON p."authorId" = i."authorId"
       WHERE "authorId" > ${after}
       ORDER BY "authorId" LIMIT ${limit + 1}`;
     const records = rows.slice(0, limit).map(r => ({
