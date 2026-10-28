@@ -41,12 +41,16 @@ export class ObjectCache {
     this.options = {
       maxDiskBytes: 512 * 1024 * 1024, maxObjectBytes: 16 * 1024 * 1024,
       maxEntries: 20000, maxInflight: 8, maxQueued: 32,
-      maxReaders: 32, maxReaderQueue: 128, timeoutMs: 12000,
+      maxReaders: 32, maxReaderQueue: 128, timeoutMs: 12000, maxOriginRetries: 1, maxRegionalRetries: 0,
       failureThreshold: 3, breakerBaseMs: 1000, breakerMaxMs: 60000, ...options,
     };
     const o = this.options;
     if (!o.root || !o.originUrl || (!o.socketPath && !o.port) || o.maxObjectBytes > o.maxDiskBytes || !Number.isSafeInteger(o.maxDiskBytes) || o.maxDiskBytes <= 0 || o.maxEntries < 1 || o.maxInflight < 1 || o.maxReaders < 1) throw new Error('Invalid cache configuration');
     if (o.port && (!o.accessToken || o.accessToken.length < 24)) throw new Error('TCP cache requires a service access token');
+    if (!o.accessToken && (o.originToken || o.originUrl.startsWith('https://')) && o.requireClientAuthorization === false)
+      throw new Error('Service credential requires per-caller authorization checks');
+    if (![o.maxOriginRetries, o.maxRegionalRetries].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 3))
+      throw new Error('Retry budgets must be between zero and three');
     // TCP regional instances trust only a configured service-to-service bearer.
     // Node-local daemons verify each client against the authoritative service,
     // including warm hits. No positive authorization verdict is cached.
@@ -214,21 +218,46 @@ export class ObjectCache {
   }
   async upstream(url, token, circuit, counter, assumedKind) {
     if (!circuit.ready()) throw Object.assign(new Error('Upstream circuit open'), { status: 503 });
-    this.stats[counter]++;
-    try {
-      const response = await fetch(url, { headers: { accept: 'application/octet-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) }, signal: AbortSignal.timeout(this.options.timeoutMs) });
-      if ([401, 403, 404].includes(response.status)) throw Object.assign(new Error('Object access denied or missing'), { status: response.status, terminal: true });
-      if (response.status === 413) { await response.body?.cancel(); throw Object.assign(new Error('Streaming required'), { status: 413, streamingRequired: true }); }
-      if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error(`Upstream returned ${response.status}`); }
-      const kind = assumedKind || response.headers.get('x-devhub-object-kind');
-      if (!KINDS.has(kind)) throw new Error('Missing or invalid object kind');
-      const size = Number(response.headers.get('content-length'));
-      if (response.headers.get('content-length') && (!Number.isSafeInteger(size) || size > this.options.maxObjectBytes)) throw new Error('Oversized object');
-      circuit.success();
-      return { response, kind };
-    } catch (error) { if (!error.terminal && !error.streamingRequired) circuit.failure(); throw error; }
+    const retries = counter === 'regionalRequests' ? this.options.maxRegionalRetries : this.options.maxOriginRetries;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      this.stats[counter]++;
+      try {
+        const response = await fetch(url, {
+          headers: { accept: 'application/octet-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+          signal: AbortSignal.timeout(this.options.timeoutMs), redirect: 'error',
+        });
+        if ([401, 403, 404].includes(response.status)) {
+          await response.body?.cancel();
+          throw Object.assign(new Error('Object access denied or missing'), { status: response.status, terminal: true });
+        }
+        if (response.status === 413) {
+          await response.body?.cancel();
+          throw Object.assign(new Error('Streaming required'), { status: 413, streamingRequired: true });
+        }
+        if (!response.ok || !response.body) {
+          await response.body?.cancel();
+          throw new Error(`Upstream returned ${response.status}`);
+        }
+        const kind = assumedKind || response.headers.get('x-devhub-object-kind');
+        if (!KINDS.has(kind)) {
+          await response.body.cancel();
+          throw Object.assign(new Error('Missing or invalid object kind'), { terminal: true });
+        }
+        const size = Number(response.headers.get('content-length'));
+        if (response.headers.get('content-length') && (!Number.isSafeInteger(size) || size > this.options.maxObjectBytes)) {
+          await response.body.cancel();
+          throw Object.assign(new Error('Oversized object'), { terminal: true });
+        }
+        circuit.success(); return { response, kind };
+      } catch (error) {
+        if (error.terminal || error.streamingRequired) throw error;
+        if (attempt === retries) { circuit.failure(); throw error; }
+        await new Promise(resolve => setTimeout(resolve, Math.min(500, 50 * (2 ** attempt))));
+      }
+    }
+    throw Object.assign(new Error('Upstream retry budget exhausted'), { status: 503 });
   }
-  async fill(key, repositoryId, id) {
+    async fill(key, repositoryId, id) {
     const release = await this.capacity.acquire().catch(error => { this.stats.rejected++; throw error; });
     let reserved = false;
     try {

@@ -201,3 +201,23 @@ test('node cache reauthorizes every warm hit and rejects cross-tenant credential
   assert.equal(cache.stats.authorizationDenials, 2);
   await assert.rejects(() => getCachedObject({ ...allowed, repositoryId: randomUUID() }), CacheUnavailable);
 });
+
+
+test('bounded retry recovers transient origin failure and rejects unsafe configuration', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'devhub-retry-cache-'));
+  const r = randomUUID(), x = blob('retryable');
+  let hits = 0;
+  const origin = http.createServer((_req, res) => {
+    hits++;
+    if (hits === 1) { res.writeHead(503); res.end(); return; }
+    res.writeHead(200, { 'x-devhub-object-kind': 'BLOB' }); res.end(x.data);
+  });
+  const url = await listen(origin);
+  const cache = new ObjectCache({ root: join(dir, 'data'), socketPath: join(dir, 'cache.sock'), originUrl: url });
+  t.after(async () => { await cache.close(); await new Promise(resolve => origin.close(resolve)); await rm(dir, { recursive: true, force: true }); });
+  await cache.start();
+  assert.deepEqual((await getCachedObject({ socketPath: join(dir, 'cache.sock'), repositoryId: r, id: x.id })).data, x.data);
+  assert.equal(hits, 2);
+  assert.throws(() => new ObjectCache({ root: join(dir, 'invalid'), socketPath: join(dir, 'other.sock'),
+    originUrl: url, originToken: 'privileged-token', requireClientAuthorization: false }), /requires per-caller authorization/);
+});
