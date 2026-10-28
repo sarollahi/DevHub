@@ -830,6 +830,14 @@ model SourceReview {
   costMicros       BigInt       @default(0)
   latencyMs        Int?
   embedding        Json?
+  equivalenceHash String?      @db.Char(64)
+  candidateCount  Int          @default(0)
+  relatedTruncated Boolean     @default(false)
+  targetRevisionId String?     @db.Char(64)
+  indexedAt       DateTime?
+  signals         SourceReviewSignal[]
+  intervals       SourceReviewRegion[]
+  modelCalls      SourceReviewModelCall[]
   attempts         Int          @default(0)
   leaseUntil       DateTime?
   nextAttemptAt    DateTime     @default(now())
@@ -842,6 +850,49 @@ model SourceReview {
   @@index([repositoryId, state, createdAt(sort: Desc)])
   @@index([repositoryId, fingerprint])
   @@index([repositoryId, groupKey])
+}
+
+// Materialized repository-scoped inverted signals. Records are versioned and
+// rebuilt from immutable authoritative changesets; a match is never an approval.
+model SourceReviewSignal {
+  repositoryId String @db.Uuid
+  changesetId  String @db.Char(64)
+  kind         String @db.VarChar(20)
+  key          String @db.VarChar(128)
+  review       SourceReview @relation(fields: [changesetId], references: [changesetId], onDelete: Cascade)
+  @@id([changesetId, kind, key])
+  @@index([repositoryId, kind, key, changesetId])
+}
+
+// Each changed line range is searchable without decoding every review JSON.
+model SourceReviewRegion {
+  id           BigInt @id @default(autoincrement())
+  repositoryId String @db.Uuid
+  changesetId  String @db.Char(64)
+  path         String
+  startLine    BigInt
+  endLine      BigInt
+  baseObject   String? @db.Char(64)
+  review       SourceReview @relation(fields: [changesetId], references: [changesetId], onDelete: Cascade)
+  @@index([repositoryId, path, startLine, endLine])
+  @@index([changesetId])
+}
+
+model SourceReviewModelCall {
+  id           String @id @default(uuid()) @db.Uuid
+  changesetId  String @db.Char(64)
+  operation    String
+  provider     String
+  model        String
+  tokens       Int?
+  costMicros   BigInt @default(0)
+  latencyMs    Int
+  succeeded    Boolean
+  error        String?
+  confidence   Float?
+  createdAt    DateTime @default(now())
+  review       SourceReview @relation(fields: [changesetId], references: [changesetId], onDelete: Cascade)
+  @@index([changesetId, createdAt])
 }
 
 // Upload sessions are bounded and survive client or server restarts.
@@ -867,6 +918,8 @@ model SourceReviewRequest {
   description String @default("")
   actorId String
   status String @default("OPEN")
+  lastTargetRevisionId String? @db.Char(64)
+  lastTargetCheckedAt DateTime?
   createdAt DateTime @default(now())
   repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
   changeset SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Restrict)
