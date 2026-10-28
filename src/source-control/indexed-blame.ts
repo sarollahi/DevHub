@@ -1,15 +1,15 @@
 import { db } from "../lib/prisma";
 import { verifiedBlobStream } from "../object-store/service";
-import { linesOf, matchingLines } from "./query-algorithms";
+import { linesOf, matchingLines, matchingLinesLarge } from "./query-algorithms";
 import { objectId, decodeTree } from "./storage";
 import { SnapshotTree } from "./snapshot-tree";
 import { DERIVED_VERSION, enqueueDerived, readDerived, checksum } from "./derived-index";
 import { IndexedWalk } from "./derived-queries";
 
-const MAX_TEXT_BYTES = 1024 * 1024;
-const MAX_LINES = 10_000;
+export const MAX_TEXT_BYTES = 16 * 1024 * 1024;
+const MAX_LINES = 250_000;
 const MAX_INDEXED_FILES = 128;
-const MAX_TOTAL_LINES = 50_000;
+const MAX_TOTAL_LINES = 500_000;
 type Span = [number, number, string];
 type State = { changesetId: string; version: number; position: number; path: string;
   repositoryId: string; generation: number; objectId: string;
@@ -154,8 +154,31 @@ export async function computeBlameFiles(change: {
           if (before === null) { skipped++; continue; }
           const oldLines = linesOf(before);
           if (oldLines.length !== oldOrigins.length) throw new Error("CORRUPT_BLAME_INDEX");
-          const pairs = matchingLines(oldLines, newLines);
-          if (!pairs) { skipped++; continue; }
+          let pairs = matchingLines(oldLines, newLines);
+          if (!pairs) {
+            // Exact LCS in linear memory; avoid quadratic CPU amplification for
+            // extremely unrelated files. A fully disjoint rewrite needs no DP.
+            const prefix = (() => {
+              let i = 0; while (i < oldLines.length && i < newLines.length &&
+                oldLines[i] === newLines[i]) i++; return i;
+            })();
+            let suffix = 0;
+            while (suffix < oldLines.length - prefix && suffix < newLines.length - prefix &&
+                oldLines[oldLines.length - suffix - 1] === newLines[newLines.length - suffix - 1]) suffix++;
+            const oldMiddle = oldLines.slice(prefix, oldLines.length - suffix);
+            const newMiddle = newLines.slice(prefix, newLines.length - suffix);
+            const shared = new Set(oldMiddle);
+            const disjoint = !newMiddle.some(line => shared.has(line));
+            if (!disjoint && oldMiddle.length * newMiddle.length > 50_000_000) {
+              skipped++; continue; // explicit UNAVAILABLE, never an incorrect origin
+            }
+            pairs = disjoint
+              ? [...Array.from({ length: prefix }, (_, i) => [i, i] as [number, number]),
+                 ...Array.from({ length: suffix }, (_, i) => [
+                   oldLines.length - suffix + i, newLines.length - suffix + i,
+                 ] as [number, number])]
+              : matchingLinesLarge(oldLines, newLines);
+          }
           for (const [oldIndex, newIndex] of pairs) origins[newIndex] = oldOrigins[oldIndex];
         }
       }
@@ -180,4 +203,22 @@ export async function indexedBlameLines(repositoryId: string, revision: string,
   if (lines.length !== state.lineCount) throw new Error("CORRUPT_BLAME_INDEX");
   const origins = expandOrigins(state.spans, state.lineCount);
   return lines.map((text, index) => ({ line: index + 1, text, changesetId: origins[index] }));
+}
+
+/** Bounded, paginated line output with immutable origin provenance. */
+export async function indexedBlamePage(repositoryId: string, revision: string, path: string,
+  objectId: string, offset: number, limit: number) {
+  const indexed = await readDerived(repositoryId, revision, "blame");
+  if (!indexed) { await enqueueDerived(repositoryId, revision, ["blame"]); return null; }
+  const state = await latestBlameFile(repositoryId, revision, path);
+  if (!state || state.state !== "READY" || state.objectId !== objectId) return null;
+  if (checksum(state.spans) !== state.checksum) throw new Error("CORRUPT_BLAME_INDEX");
+  const content = await verifiedText(objectId);
+  if (content === null) return null; // caller will distinguish binary/unavailable
+  const lines = linesOf(content);
+  if (lines.length !== state.lineCount) throw new Error("CORRUPT_BLAME_INDEX");
+  const origins = expandOrigins(state.spans, state.lineCount);
+  return { lines: lines.slice(offset, offset + limit).map((text, index) => ({
+    line: offset + index + 1, text, changesetId: origins[offset + index],
+  })), totalLines: lines.length, nextOffset: offset + limit < lines.length ? offset + limit : null };
 }
