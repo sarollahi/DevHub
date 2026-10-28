@@ -3,7 +3,7 @@ import { ensureIndexJob } from "../workers/query-indexer";
 import { enqueueDerived } from "./derived-index";
 import { indexedFileHistory, indexedLinearAncestry, indexedDagMergeBases, indexedDagIsAncestor } from "./derived-queries";
 import { exactDagReachability, exactDagAncestors, exactDagMergeBases, exactDagPathImpact, exactDagContributions } from "./dag-queries";
-import { indexedBlamePage, MAX_TEXT_BYTES } from "./indexed-blame";
+import { indexedBlamePage } from "./indexed-blame";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
