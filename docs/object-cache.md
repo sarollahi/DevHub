@@ -51,3 +51,23 @@ node scripts/benchmark-cache.mjs
 ```
 
 The benchmark uses a controlled local HTTP origin with 12 ms simulated latency. It reports elapsed time and upstream call counts for cold startup, eight concurrent CI jobs, repeated warm checkouts, explicit misses and a sparse (10% file-selection) workspace. It is a repeatable **synthetic** baseline, not production throughput or a multi-gigabyte object benchmark. The authoritative object API supports PostgreSQL-backed manifests and S3-backed streaming blobs. The daemon first tries the v2 raw-object response, and on an explicit 413 STREAM_REQUIRED response uses the authenticated v1 streaming endpoint. It re-verifies the same immutable digest before publication. A streamed object larger than the daemon's configured maxObjectBytes fails closed; clients may use the authenticated authoritative streaming endpoint directly.
+
+
+## Native Rust workspace integration
+
+The Rust client automatically tries the node-local daemon when DEVHUB_CACHE_SOCKET is set on Linux or macOS. It sends the caller's DevHub bearer credential over the protected Unix socket, verifies the returned BLOB digest, size, kind and identity, and copies only explicitly selected objects into its bounded workspace cache. If the daemon is absent or unavailable, it uses its existing authorized HTTP download with byte-range resume and final digest checking. A 401/403 access denial from the daemon is treated as an error, not a cache miss. Windows currently uses portable explicit hydration and the verified authoritative HTTP path; native named-pipe integration is not implemented.
+
+Use the following environment when configuring a shared cache for developer or CI clients:
+
+    DEVHUB_CACHE_SOCKET="$HOME/.cache/devhub/cache.sock"
+    DEVHUB_CACHE_DIR="$HOME/.cache/devhub/objects"
+    DEVHUB_ORIGIN_URL="https://devhub.example"
+    DEVHUB_ORIGIN_TOKEN="<repository-scoped-cache-service-token>"
+    DEVHUB_CACHE_REPOSITORIES="<repository-uuid>"
+    DEVHUB_CACHE_REQUIRE_AUTHORIZATION=true
+
+Each caller must have its own DEVHUB_TOKEN or configured credential. A cache daemon with an origin service credential performs a fresh authenticated HEAD request to /api/v2/repositories/:repositoryId/objects/:objectId/authorize for **every** requested object, even on warm hits. That route checks repository and object ownership as well as file-path permissions before the daemon uses the higher-privilege cache service credential. HEAD never transfers object bytes. In the absence of a token, an unauthorized response, or an unavailable authorization authority, strict cache mode fails closed. Do not configure a node daemon with a regional service access token: only the regional TCP service should accept service-to-service identities.
+
+The unrestricted no-token cache mode exists for isolated loopback development/tests only. It is not a tenant-safe deployment. Disabling strict authorization while providing an origin service credential would break the authorization boundary; do not do so.
+
+The native e2e suite exercises independent developer/CI workspaces warming the same daemon, per-request reauthorization, and the direct-fetch fallback after daemon shutdown. Persistent caches are disposable; they are not sources of authority. Current limitations: no Windows named-pipe transport, no kernel-level on-demand virtualization (FUSE/ProjFS/File Provider), and no verified resumable partial-block ledger inside the daemon. Native HTTP range resume remains available for explicit hydration. No production-scale multi-OS benchmark numbers are claimed by this implementation.

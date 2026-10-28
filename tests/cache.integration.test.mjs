@@ -157,3 +157,47 @@ test('authoritative S3 streaming fallback preserves immutable object verificatio
   assert.deepEqual((await getCachedObject({ socketPath: socket, repositoryId: repo, id: selected.id })).data, selected.data);
   assert.equal(streamingReads, 1, 'verified streaming bytes are shared without another request');
 });
+
+
+test('node cache reauthorizes every warm hit and rejects cross-tenant credentials', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'devhub-auth-cache-'));
+  const repositoryId = randomUUID();
+  const selected = blob('private authorized content');
+  let originReads = 0, authChecks = 0;
+  const origin = http.createServer((req, res) => {
+    if (req.method === 'HEAD' && req.url.endsWith('/authorize')) {
+      authChecks++;
+      res.writeHead(req.headers.authorization === 'Bearer authorized-credential-000000000000' ? 204 : 403);
+      res.end();
+      return;
+    }
+    originReads++;
+    res.writeHead(200, { 'x-devhub-object-kind': 'BLOB', 'content-length': selected.data.length });
+    res.end(selected.data);
+  });
+  const url = await listen(origin);
+  const socketPath = join(directory, 'cache.sock');
+  const cache = new ObjectCache({
+    root: join(directory, 'objects'), socketPath, originUrl: url,
+    originToken: 'internal-origin-service-credential', requireClientAuthorization: true,
+    allowedRepositories: [repositoryId],
+  });
+  t.after(async () => {
+    await cache.close();
+    await new Promise(resolve => origin.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  await cache.start();
+  const allowed = { socketPath, repositoryId, id: selected.id, token: 'authorized-credential-000000000000' };
+  const denied = { ...allowed, token: 'unauthorized-credential-0000000000' };
+  await assert.rejects(() => getCachedObject(denied), CacheUnavailable);
+  assert.equal(originReads, 0, 'denial must occur before filling a cache miss');
+  assert.deepEqual((await getCachedObject(allowed)).data, selected.data);
+  assert.deepEqual((await getCachedObject(allowed)).data, selected.data);
+  assert.equal(originReads, 1);
+  await assert.rejects(() => getCachedObject(denied), CacheUnavailable);
+  assert.equal(originReads, 1, 'denied caller must never receive existing warm bytes');
+  assert.equal(authChecks, 4, 'authorization must never be cached');
+  assert.equal(cache.stats.authorizationDenials, 2);
+  await assert.rejects(() => getCachedObject({ ...allowed, repositoryId: randomUUID() }), CacheUnavailable);
+});
