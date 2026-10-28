@@ -128,8 +128,8 @@ export async function exactDagContributions(repositoryId: string, revision: stri
       SELECT i.*, COALESCE(p."distinctPaths", 0) AS "distinctPaths",
         COUNT(*) OVER () AS "totalAuthors"
       FROM impact i LEFT JOIN changed_paths p ON p."authorId" = i."authorId"
-      WHERE "authorId" > ${after}
-      ORDER BY "authorId" LIMIT ${limit + 1}`;
+      WHERE i."authorId" > ${after}
+      ORDER BY i."authorId" LIMIT ${limit + 1}`;
     const records = rows.slice(0, limit).map(r => ({
       authorId: r.authorId, revisions: Number(r.revisions),
       operations: Number(r.operations), distinctPaths: Number(r.distinctPaths),
