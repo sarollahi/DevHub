@@ -221,3 +221,81 @@ test('bounded retry recovers transient origin failure and rejects unsafe configu
   assert.throws(() => new ObjectCache({ root: join(dir, 'invalid'), socketPath: join(dir, 'other.sock'),
     originUrl: url, originToken: 'privileged-token', requireClientAuthorization: false }), /requires per-caller authorization/);
 });
+
+
+test('durable journal resumes verified chunks after daemon restart and detects tampering', { timeout: 45000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'devhub-resume-'));
+  const socket = join(dir, 'node.sock'), root = join(dir, 'objects');
+  const big = Buffer.alloc(768 * 1024 + 11, 0x61);
+  const second = Buffer.alloc(768 * 1024 + 11, 0x62);
+  const objects = [big, second].map(data => ({
+    data, kind: 'BLOB', id: kindHash('BLOB', data),
+  }));
+  const partialFailure = new Set(objects.map(item => item.id));
+  const rangeRequests = [];
+  let fullRequests = 0;
+  const origin = http.createServer((req, res) => {
+    const item = objects.find(x => req.url.includes(x.id));
+    if (!item) { res.writeHead(404); res.end(); return; }
+    const rawRange = req.headers.range;
+    if (rawRange) {
+      const offset = Number(/^bytes=(\d+)-$/.exec(rawRange)?.[1]);
+      rangeRequests.push(offset);
+      res.writeHead(206, {
+        'x-devhub-object-kind': 'BLOB', etag: '"' + item.id + '"',
+        'content-range': 'bytes ' + offset + '-' + (item.data.length - 1) + '/' + item.data.length,
+        'content-length': item.data.length - offset,
+      });
+      res.end(item.data.subarray(offset));
+      return;
+    }
+    fullRequests++;
+    res.writeHead(200, { 'x-devhub-object-kind': 'BLOB', 'content-length': item.data.length });
+    if (partialFailure.delete(item.id)) {
+      res.write(item.data.subarray(0, 512 * 1024));
+      setTimeout(() => res.destroy(), 75);
+      return;
+    }
+    res.end(item.data);
+  });
+  const url = await listen(origin);
+  let daemon;
+  const startCache = async () => {
+    daemon = new ObjectCache({
+      root, socketPath: socket, originUrl: url,
+      maxDiskBytes: 4 * 1024 * 1024, maxObjectBytes: 1024 * 1024,
+      maxOriginRetries: 0,
+    });
+    await daemon.start();
+  };
+  t.after(async () => {
+    if (daemon) await daemon.close();
+    await new Promise(resolve => origin.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  });
+  const opts = id => ({ socketPath: socket, repositoryId: repo, id });
+  await startCache();
+  await assert.rejects(() => getCachedObject(opts(objects[0].id)));
+  const shards = await readdir(join(root, 'objects'), { withFileTypes: true });
+  const folders = shards.filter(s => s.isDirectory()).map(s => join(root, 'objects', s.name));
+  const journals = (await Promise.all(folders.map(p => readdir(p)))).flat().filter(x => x.endsWith('.json.resume'));
+  assert.equal(journals.length, 1, 'interrupted transfer must leave a persisted journal');
+  await daemon.close(); daemon = null;
+  await startCache();
+  assert.deepEqual((await getCachedObject(opts(objects[0].id))).data, big);
+  assert.deepEqual(rangeRequests, [512 * 1024], 'only unfinished bytes should transfer after restart');
+  assert.equal(fullRequests, 1, 'no redundant full download');
+  await assert.rejects(() => getCachedObject(opts(objects[1].id)));
+  const shardName = await readdir(join(root, 'objects'));
+  const staged = [];
+  for (const folder of shardName) {
+    for (const name of await readdir(join(root, 'objects', folder))) {
+      if (name.endsWith('.bin.resume')) staged.push(join(root, 'objects', folder, name));
+    }
+  }
+  assert.equal(staged.length, 1);
+  await writeFile(staged[0], Buffer.alloc(512 * 1024, 0x7f));
+  assert.deepEqual((await getCachedObject(opts(objects[1].id))).data, second,
+    'corrupt journal is discarded and safe full transfer succeeds');
+  assert.equal(fullRequests, 3, 'tampered staged data must not be reused');
+});
