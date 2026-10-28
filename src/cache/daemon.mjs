@@ -182,7 +182,10 @@ export class ObjectCache {
         else {
           flight = this.fill(key, repositoryId, id);
           this.flights.set(key, flight);
-          void flight.finally(() => { this.flights.delete(key); }).catch(() => {});
+          void flight.finally(async () => {
+            this.flights.delete(key);
+            await pruneJournals(this.options.root, this.resumeBudgetBytes, new Set(this.flights.keys())).catch(() => {});
+          }).catch(() => {});
         }
         entry = await flight;
       }
@@ -364,7 +367,7 @@ export class ObjectCache {
     } finally {
       if (reserved) this.reserved -= this.options.maxObjectBytes;
       release();
-      await pruneJournals(this.options.root, this.resumeBudgetBytes).catch(() => {});
+      await pruneJournals(this.options.root, this.resumeBudgetBytes, new Set(this.flights.keys())).catch(() => {});
     }
   }
   async verifiedStaged(p, id) {
