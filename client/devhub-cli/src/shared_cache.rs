@@ -127,9 +127,42 @@ pub fn fetch(repository: &str, id: &str, bearer: &str) -> Result<Option<Vec<u8>>
     decode_response(id, &raw)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn fetch(repository: &str, id: &str, bearer: &str) -> Result<Option<Vec<u8>>> {
+    use std::fs::OpenOptions;
+    use std::io::{Read, Write};
+    use std::os::windows::fs::OpenOptionsExt;
+    const SECURITY_IDENTIFICATION: u32 = 0x00010000;
+    let pipe = match std::env::var("DEVHUB_CACHE_SOCKET") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Ok(None),
+    };
+    if !pipe.starts_with(r"\\.\pipe\devhub-") || pipe.len() > 256 {
+        bail!("Cache pipe must be a trusted local DevHub pipe");
+    }
+    if bearer.is_empty() || bearer.bytes().any(|c| c < 0x21 || c > 0x7e) ||
+        repository.len() != 36 || !repository.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') ||
+        id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+        bail!("Invalid cache request identity");
+    }
+    let mut pipe = match OpenOptions::new().read(true).write(true)
+        .security_qos_flags(SECURITY_IDENTIFICATION).open(&pipe) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    let request = format!(
+        "GET /v1/objects/{repository}/{id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n"
+    );
+    if pipe.write_all(request.as_bytes()).is_err() { return Ok(None); }
+    let mut raw = Vec::new();
+    if pipe.take((MAX_BYTES + MAX_HEADERS + 5) as u64).read_to_end(&mut raw).is_err() {
+        return Ok(None);
+    }
+    decode_response(id, &raw)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn fetch(_repository: &str, _id: &str, _bearer: &str) -> Result<Option<Vec<u8>>> {
-    // Windows retains verified explicit hydration until a named-pipe transport is available.
     Ok(None)
 }
 

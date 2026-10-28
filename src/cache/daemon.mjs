@@ -121,7 +121,7 @@ export class ObjectCache {
         if (this.options.socketPath) this.server.listen(this.options.socketPath, resolve);
         else this.server.listen(this.options.port, this.options.host || '127.0.0.1', resolve);
       });
-      if (this.options.socketPath) await chmod(this.options.socketPath, 0o600);
+      if (this.options.socketPath && process.platform !== 'win32') await chmod(this.options.socketPath, 0o600);
     } catch (error) { await this.close(); throw error; }
     return this;
   }
