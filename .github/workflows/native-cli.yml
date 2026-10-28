@@ -24,6 +24,16 @@ jobs:
         run: cargo test --manifest-path client/devhub-cli/Cargo.toml
       - name: Release build
         run: cargo build --release --manifest-path client/devhub-cli/Cargo.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+      - name: Verify native shared cache transport on all platforms
+        shell: bash
+        run: |
+          binary="$GITHUB_WORKSPACE/client/devhub-cli/target/debug/devhub"
+          if [ "$RUNNER_OS" = "Windows" ]; then binary="$GITHUB_WORKSPACE/client/devhub-cli/target/debug/devhub.exe"; fi
+          DEVHUB_CLI="$binary" node scripts/native-cache-smoke.mjs
+
       - uses: actions/upload-artifact@v4
         with:
           name: devhub-${{ runner.os }}-${{ runner.arch }}
