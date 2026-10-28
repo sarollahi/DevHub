@@ -157,11 +157,15 @@ impl Api {
     fn download_object(&self, object_id: &str, directory: &Path) -> Result<Vec<u8>> {
         check_object_id(object_id)?;
         fs::create_dir_all(directory)?;
+        if let Some(bytes) = shared_cache::memory_get(&self.repository, object_id) {
+            return Ok(bytes);
+        }
         let cache = directory.join(object_id);
         if cache.is_file() {
             let bytes = fs::read(&cache)?;
             if bytes.len() <= MAX_OBJECT && object_hash(&bytes) == object_id {
                 touch(&cache)?;
+                shared_cache::memory_put(&self.repository, object_id, &bytes);
                 return Ok(bytes);
             }
             fs::remove_file(&cache)?;
@@ -180,6 +184,7 @@ impl Api {
                 return Err(error.into());
             }
             prune_cache(directory, DEFAULT_CACHE)?;
+            shared_cache::memory_put(&self.repository, object_id, &bytes);
             return Ok(bytes);
         }
         let partial = directory.join(format!("{object_id}.part"));
@@ -216,6 +221,7 @@ impl Api {
         let bytes = fs::read(&partial)?;
         if object_hash(&bytes) != object_id { bail!("Object digest mismatch; partial transfer retained for diagnosis"); }
         fs::rename(&partial, &cache)?;
+        shared_cache::memory_put(&self.repository, object_id, &bytes);
         Ok(bytes)
     }
     fn upload_object(&self, bytes: &[u8]) -> Result<String> {

@@ -6,6 +6,51 @@ use sha2::{Digest, Sha256};
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_HEADERS: usize = 16 * 1024;
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, OnceLock};
+
+const MEMORY_LIMIT: usize = 8 * 1024 * 1024;
+const MEMORY_ENTRIES: usize = 1024;
+#[derive(Default)]
+struct Memory {
+    entries: HashMap<String, Vec<u8>>,
+    recent: VecDeque<String>,
+    bytes: usize,
+}
+static MEMORY: OnceLock<Mutex<Memory>> = OnceLock::new();
+fn memory() -> &'static Mutex<Memory> { MEMORY.get_or_init(|| Mutex::new(Memory::default())) }
+pub fn memory_get(repository: &str, id: &str) -> Option<Vec<u8>> {
+    let key = format!("{repository}/{id}");
+    let mut guard = memory().lock().ok()?;
+    let bytes = guard.entries.get(&key)?.clone();
+    if !verify_blob(id, &bytes) {
+        guard.bytes = guard.bytes.saturating_sub(bytes.len());
+        guard.entries.remove(&key);
+        guard.recent.retain(|x| x != &key);
+        return None;
+    }
+    guard.recent.retain(|x| x != &key);
+    guard.recent.push_back(key);
+    Some(bytes)
+}
+pub fn memory_put(repository: &str, id: &str, bytes: &[u8]) {
+    if bytes.len() > MEMORY_LIMIT || !verify_blob(id, bytes) { return; }
+    if let Ok(mut guard) = memory().lock() {
+        let key = format!("{repository}/{id}");
+        if let Some(old) = guard.entries.remove(&key) { guard.bytes -= old.len(); }
+        guard.recent.retain(|x| x != &key);
+        guard.bytes += bytes.len();
+        guard.entries.insert(key.clone(), bytes.to_vec());
+        guard.recent.push_back(key);
+        while guard.bytes > MEMORY_LIMIT || guard.entries.len() > MEMORY_ENTRIES {
+            let Some(oldest) = guard.recent.pop_front() else { break };
+            if let Some(removed) = guard.entries.remove(&oldest) {
+                guard.bytes = guard.bytes.saturating_sub(removed.len());
+            }
+        }
+    }
+}
+
 fn verify_blob(id: &str, bytes: &[u8]) -> bool {
     let mut h = Sha256::new();
     h.update(b"BLOB\0");
@@ -94,6 +139,15 @@ mod tests {
     fn id(bytes: &[u8]) -> String {
         let mut h = Sha256::new(); h.update(b"BLOB\0"); h.update(bytes);
         hex::encode(h.finalize())
+    }
+    #[test]
+    fn process_cache_is_repo_scoped_and_refuses_invalid_bytes() {
+        let expected = id(b"private");
+        memory_put("repo-one", &expected, b"private");
+        assert_eq!(memory_get("repo-one", &expected), Some(b"private".to_vec()));
+        assert_eq!(memory_get("repo-two", &expected), None);
+        memory_put("repo-one", &expected, b"tampered");
+        assert_eq!(memory_get("repo-one", &expected), Some(b"private".to_vec()));
     }
     #[test]
     fn accepts_only_verified_framed_blobs() -> Result<()> {
