@@ -109,10 +109,10 @@ export async function processReview(changesetId: string, lease: Date, attempt: n
     const requestedTarget=await db.sourceReviewRequest.findFirst({where:{
       repositoryId:change.repositoryId,changesetId,status:"OPEN",
     },orderBy:{createdAt:"asc"},select:{targetRef:true}});
-    const target=requestedTarget?await db.sourceReference.findUnique({where:{
+    const targetRefRecord=requestedTarget?await db.sourceReference.findUnique({where:{
       repositoryId_name:{repositoryId:change.repositoryId,name:requestedTarget.targetRef},
     },select:{changesetId:true,deletedAt:true}}):null;
-    const targetRevisionId=target&&!target.deletedAt?target.changesetId:null;
+    const targetRevisionId=targetRefRecord&&!targetRefRecord.deletedAt?targetRefRecord.changesetId:null;
     // A moving target is a deterministic conflict concern, not a model verdict.
     // Compare only touched paths against the first-parent base.
     let riskScore=assessed.riskScore;
