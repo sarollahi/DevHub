@@ -53,13 +53,17 @@ try {
         }, 5);
         try {
           await Promise.all(Array.from({ length: 4 }, async () => {
-            await Promise.all(selected.map(async object => {
-              const start = performance.now();
-              const read = await getCachedObject({ socketPath, repositoryId, id: object.id });
-              samples.push(performance.now() - start);
-              clientReceivedBytes += read.data.length;
-              if (!read.data.equals(object.data)) throw new Error('Verification mismatch');
-            }));
+            // Bound each client's active requests. A workload that saturates the
+            // local socket's listen backlog measures EAGAIN, not cache latency.
+            for (let offset = 0; offset < selected.length; offset += 16) {
+              await Promise.all(selected.slice(offset, offset + 16).map(async object => {
+                const requestStart = performance.now();
+                const read = await getCachedObject({ socketPath, repositoryId, id: object.id });
+                samples.push(performance.now() - requestStart);
+                clientReceivedBytes += read.data.length;
+                if (!read.data.equals(object.data)) throw new Error('Verification mismatch');
+              }));
+            }
           }));
         } finally { clearInterval(timer); }
         maxRssBytes = Math.max(maxRssBytes, process.memoryUsage().rss);
