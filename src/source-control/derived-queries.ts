@@ -96,12 +96,16 @@ export async function indexedDagSpines(walk: IndexedWalk, repositoryId: string, 
 export async function indexedFirstParentLca(walk: IndexedWalk, a: string, b: string): Promise<string | null> {
   const [left, right] = await Promise.all([walk.summary(a), walk.summary(b)]);
   if (!left || !right) return null;
-  let x: string | null = a, y: string | null = b;
-  if (left.firstParentDepth > right.firstParentDepth)
-    x = await walk.lift(a, left.firstParentDepth - right.firstParentDepth);
-  else if (right.firstParentDepth > left.firstParentDepth)
-    y = await walk.lift(b, right.firstParentDepth - left.firstParentDepth);
-  if (!x || !y) return null;
+  let x = a, y = b;
+  if (left.firstParentDepth > right.firstParentDepth) {
+    const ancestor = await walk.lift(a, left.firstParentDepth - right.firstParentDepth);
+    if (!ancestor) return null;
+    x = ancestor;
+  } else if (right.firstParentDepth > left.firstParentDepth) {
+    const ancestor = await walk.lift(b, right.firstParentDepth - left.firstParentDepth);
+    if (!ancestor) return null;
+    y = ancestor;
+  }
   if (x === y) return x;
   for (let bit = Math.floor(Math.log2(Math.min(left.firstParentDepth, right.firstParentDepth) + 1));
        bit >= 0; bit--) {
