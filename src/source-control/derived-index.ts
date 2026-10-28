@@ -27,7 +27,7 @@ export function stableJson(value: unknown): string {
   if (Array.isArray(value)) return "[" + value.map(stableJson).join(",") + "]";
   if (value !== null && typeof value === "object") return "{" +
     Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined)
-      .sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => JSON.stringify(k) + ":" + stableJson(v)).join(",") + "}";
+      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([k, v]) => JSON.stringify(k) + ":" + stableJson(v)).join(",") + "}";
   const encoded = JSON.stringify(value);
   if (encoded === undefined) throw new Error("INVALID_DERIVED_JSON");
   return encoded;
@@ -49,7 +49,7 @@ async function loadRevision(repositoryId: string, changesetId: string) {
   // derived postings by that non-unique legacy value. Canonical v2 retains its
   // explicit order; ties are deterministically ordered by unique path.
   const ordered = [...change.operations].sort((a, b) =>
-    a.position - b.position || a.path.localeCompare(b.path));
+    a.position - b.position || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return { ...change, operations: ordered.map((op, position) => ({ ...op, position })) };
 }
 export async function readDerived(repositoryId: string, changesetId: string, kind: DerivedKind): Promise<Payload | null> {
