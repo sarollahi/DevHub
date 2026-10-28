@@ -832,9 +832,9 @@ mod tests {
         let id = object_hash(bytes);
         fs::write(temp.path().join(format!("{id}.part")), bytes)?;
         let api = Api::new("http://127.0.0.1:1", "00000000-0000-0000-0000-000000000000", "test-token".into())?;
-        assert_eq!(api.download_object(&id, temp.path())?, bytes);
+        assert_eq!(api.download_object(&id, temp.path())?, bytes.to_vec());
         assert!(!temp.path().join(format!("{id}.part")).exists());
-        assert_eq!(fs::read(temp.path().join(id))?, bytes);
+        assert_eq!(fs::read(temp.path().join(id))?, bytes.to_vec());
         Ok(())
     }
     #[test]
@@ -859,7 +859,7 @@ mod tests {
             Ok(())
         });
         let api = Api::new(&url, "00000000-0000-0000-0000-000000000000", "test-token".into())?;
-        assert_eq!(api.download_object(&id, temp.path())?, bytes);
+        assert_eq!(api.download_object(&id, temp.path())?, bytes.to_vec());
         worker.join().map_err(|_| anyhow!("mock server thread failed"))??;
         assert!(!partial.exists());
         Ok(())
