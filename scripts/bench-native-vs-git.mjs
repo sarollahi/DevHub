@@ -1,6 +1,7 @@
 // Real native-workspace vs Git checkout measurement on an explicitly configured
 // deployment. Does NOT run against a synthetic source-control server.
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdtemp, readFile, readdir, readlink, rm, stat } from 'node:fs/promises';
@@ -22,6 +23,35 @@ if (!config.native?.server || !config.native?.repository ||
   throw Error('Configuration must describe both backends and scenario selectors');
 const passes = Math.min(20, Math.max(1, Number(config.repetitions || 3)));
 const runDir = await mkdtemp(join(tmpdir(), 'devhub-native-git-bench-'));
+const cacheStatus = async () => {
+  const socketPath = process.env.DEVHUB_CACHE_SOCKET;
+  if (!socketPath) return null;
+  return new Promise(resolve => {
+    const req = http.get({ socketPath, path: '/v1/status', timeout: 3000 }, response => {
+      const buffers = [];
+      response.on('data', bytes => buffers.push(bytes));
+      response.on('end', () => {
+        try { resolve(JSON.parse(Buffer.concat(buffers).toString('utf8'))); } catch { resolve(null); }
+      });
+      response.on('error', () => resolve(null));
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+};
+const annotateCache = (sample, before, after) => {
+  if (!before || !after) return sample;
+  const hits = after.hits - before.hits, misses = after.misses - before.misses;
+  return { ...sample, cacheOriginRequests: after.upstreamRequests - before.upstreamRequests,
+    cacheRegionalRequests: after.regionalRequests - before.regionalRequests,
+    cacheHitRatePercent: hits + misses ? +(100 * hits / (hits + misses)).toFixed(2) : null };
+};
+const combine = (base, extra) => {
+  for (const key of ['elapsedMs', 'receivedInterfaceBytes', 'sentInterfaceBytes', 'userCpuSec', 'systemCpuSec'])
+    base[key] += extra[key];
+  base.peakRssKiB = Math.max(base.peakRssKiB, extra.peakRssKiB);
+  return base;
+};
 const timeBinary = '/usr/bin/time';
 await stat(timeBinary);
 const net = async () => {
@@ -98,6 +128,10 @@ const aggregate = list => {
     totalUserCpuSec: +sum('userCpuSec').toFixed(2),
     totalSystemCpuSec: +sum('systemCpuSec').toFixed(2),
     maximumRssKiB: Math.max(...list.map(x => x.peakRssKiB)),
+    ...(list.every(x => x.cacheOriginRequests != null) ? {
+      totalCacheOriginRequests: sum('cacheOriginRequests'),
+      totalCacheRegionalRequests: sum('cacheRegionalRequests'),
+    } : {}),
     individualSamples: list,
   };
 };
@@ -113,27 +147,27 @@ try {
       const folder = join(runDir, scenario.name.replace(/[^a-z0-9_-]/gi, '_') + '-' + iteration);
       const ndir = join(folder, 'native'), gdir = join(folder, 'git');
       await import('node:fs/promises').then(fs => fs.mkdir(ndir, { recursive: true }));
-      await exec(resolve(client), ['init', '--server', config.native.server, '--repository',
+      const nativeBefore = await cacheStatus();
+      const nativeInit = await exec(resolve(client), ['init', '--server', config.native.server, '--repository',
         config.native.repository, '--ref', config.native.ref], { cwd: ndir });
       const selectArgs = ['select'];
       for (const s of scenario.selectors) selectArgs.push(s.startsWith('f:') ? '--file' : '--dir', s.slice(2));
-      await exec(resolve(client), selectArgs, { cwd: ndir });
-      nativeCold.push(await exec(resolve(client), ['sync', '--materialize'], { cwd: ndir, label: 'native cold sync' }));
+      const nativeSelect = await exec(resolve(client), selectArgs, { cwd: ndir });
+      const nativeSync = await exec(resolve(client), ['sync', '--materialize'], { cwd: ndir, label: 'native cold sync' });
+      const nativeAfter = await cacheStatus();
+      nativeCold.push(annotateCache(combine(combine(nativeSync, nativeInit), nativeSelect), nativeBefore, nativeAfter));
       gitCold.push(await exec('git', ['clone', '--filter=blob:none', '--no-checkout', '--single-branch',
         '--branch', config.git.ref, config.git.url, gdir], { label: 'Git filtered clone' }));
       const gitPatterns = scenario.selectors.map(s => s.startsWith('f:') ?
         '/' + s.slice(2) : '/' + s.slice(2).replace(/\/$/, '') + '/**').join('\n') + '\n';
-      await exec('git', ['-C', gdir, 'sparse-checkout', 'set', '--no-cone', '--stdin'], { stdin: gitPatterns });
+      const sparseSetup = await exec('git', ['-C', gdir, 'sparse-checkout', 'set', '--no-cone', '--stdin'], { stdin: gitPatterns });
       const checkout = await exec('git', ['-C', gdir, 'checkout', '--force'], { label: 'Git sparse checkout' });
       const clone = gitCold[gitCold.length - 1];
-      clone.elapsedMs += checkout.elapsedMs;
-      clone.receivedInterfaceBytes += checkout.receivedInterfaceBytes;
-      clone.sentInterfaceBytes += checkout.sentInterfaceBytes;
-      clone.userCpuSec += checkout.userCpuSec;
-      clone.systemCpuSec += checkout.systemCpuSec;
-      clone.peakRssKiB = Math.max(clone.peakRssKiB, checkout.peakRssKiB);
+      combine(combine(clone, sparseSetup), checkout);
       verified = await validate(ndir, gdir, scenario.expectedPaths);
-      nativeWarm.push(await exec(resolve(client), ['sync', '--materialize'], { cwd: ndir }));
+      const warmBefore = await cacheStatus();
+      const warmSample = await exec(resolve(client), ['sync', '--materialize'], { cwd: ndir });
+      nativeWarm.push(annotateCache(warmSample, warmBefore, await cacheStatus()));
       gitWarm.push(await exec('git', ['-C', gdir, 'checkout', '--force'], { label: 'warm Git checkout' }));
       await rm(folder, { recursive: true, force: true });
     }
