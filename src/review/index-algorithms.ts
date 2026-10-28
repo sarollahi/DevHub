@@ -13,7 +13,7 @@ const hex = (v: number) => v.toString(16).padStart(3, "0");
 
 /** Normalized work-item labels cannot contain user-controlled SQL or index keys. */
 export function issueKeys(message: string): string[] {
-  return [...new Set((message.match(/\\b[A-Z][A-Z0-9]{1,9}-[0-9]{1,8}\\b|#[0-9]{1,10}\\b/g) ?? [])
+  return [...new Set((message.match(/\b[A-Z][A-Z0-9]{1,9}-[0-9]{1,8}\b|#[0-9]{1,10}\b/g) ?? [])
     .map(x => x.toUpperCase()))].slice(0, 16);
 }
 export function subsystem(path: string): string {

@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { type NativeAssessment, type Region } from "./analysis";
-import { classifyCandidate, type Relation, type Signal, type SignalKind, RELATED_PREVIEW_LIMIT } from "./index-algorithms";
+import { classifyCandidate, vectorBuckets, type Relation, type Signal, type SignalKind, RELATED_PREVIEW_LIMIT } from "./index-algorithms";
 
 const limits: Record<SignalKind, number> = {
   EXACT: 64, EQUIVALENT: 64, CONTENT: 32, PATH: 96,
@@ -15,7 +15,7 @@ const regions = (value: Prisma.JsonValue | null): Region[] =>
 
 export async function discoverRelated(input: {
   repositoryId: string; changesetId: string; assessment: NativeAssessment;
-  equivalenceHash: string; signals: Signal[]; embedding: number[];
+  equivalenceHash: string; signals: Signal[]; embedding: number[]; vectorNamespace:string;
 }) {
   const hits = new Map<string,Set<SignalKind>>();
   let indexedSignalMatches = 0;
@@ -23,7 +23,8 @@ export async function discoverRelated(input: {
   // Separate indexed lookups prioritize exact identity even in very large
   // same-path histories; never let a high-frequency path consume its budget.
   for (const kind of kinds) {
-    const keys = input.signals.filter(s=>s.kind===kind).map(s=>s.key);
+    const keys = kind==="VECTOR" ? vectorBuckets(input.embedding,input.vectorNamespace,true) :
+      input.signals.filter(s=>s.kind===kind).map(s=>s.key);
     if (!keys.length) continue;
     const where = {repositoryId:input.repositoryId,kind,key:{in:keys},
       changesetId:{not:input.changesetId}};
