@@ -29,7 +29,7 @@ export async function reconcileReviewTargets(cursor?:string, batch=100){
       // Rerun advisory analysis on a new target; do not change stored approvals.
       const updated=await tx.sourceReview.updateMany({where:{
         repositoryId:request.repositoryId,changesetId:request.changesetId,
-        state:"COMPLETED",targetRevisionId:{not:target},
+        state:"COMPLETED",
       },data:{state:"QUEUED",attempts:0,nextAttemptAt:new Date(),indexedAt:null}});
       if(updated.count){
         changed++;

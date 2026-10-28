@@ -69,7 +69,7 @@ export async function processReview(changesetId: string, lease: Date, attempt: n
         embeddingVector=result.embedding;costMicros+=result.costMicros;
         if(embeddingVector)vectorNamespace=provider+":"+model;
         modelCalls.push({changesetId,operation:"ANALYSIS",provider,model,
-          tokens:null,costMicros:result.costMicros,latencyMs:Date.now()-callStarted,
+          tokens:result.tokens,costMicros:result.costMicros,latencyMs:Date.now()-callStarted,
           succeeded:true,error:null,confidence});
       }catch(error){
         const reason=error instanceof Error?error.message:"Unknown model error";

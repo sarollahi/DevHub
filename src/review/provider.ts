@@ -3,7 +3,7 @@ import type { Finding } from "./analysis";
 
 export type ProviderResult = {
   summary: string; findings: Finding[]; confidence: number | null;
-  embedding: number[] | null; costMicros: bigint; model: string; provider: string;
+  embedding: number[] | null; costMicros: bigint; model: string; provider: string; tokens: number | null;
 };
 export interface ReviewModelProvider {
   analyze(metadata: string, excerpt: string): Promise<ProviderResult>;
@@ -81,6 +81,7 @@ export function createReviewProvider(): ReviewModelProvider | null {
         findings: analyzed.findings.map(f => ({ ...f, advisory: true as const })),
         confidence: analyzed.confidence ?? null,
         embedding: vector, costMicros: price, model, provider: parsed.host,
+        tokens: Number.isSafeInteger(tokens) && tokens >= 0 && tokens > 0 ? tokens : null,
       };
     },
   };
