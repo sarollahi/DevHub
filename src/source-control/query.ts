@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ensureIndexJob } from "../workers/query-indexer";
-import { enqueueDerived } from "./derived-index";
+import { enqueueDerived, readDerived } from "./derived-index";
 import { indexedFileHistory, indexedLinearAncestry, indexedDagMergeBases, indexedDagIsAncestor } from "./derived-queries";
 import { exactDagReachability, exactDagAncestors, exactDagMergeBases, exactDagPathImpact, exactDagContributions } from "./dag-queries";
-import { indexedBlamePage } from "./indexed-blame";
+import { indexedBlamePage, MAX_TEXT_BYTES, latestBlameFile } from "./indexed-blame";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
@@ -330,10 +330,19 @@ export async function blameQuery(repositoryId: string, revision: string, path: s
     select: { kind: true, byteSize: true } });
   if (!object || object.kind !== "BLOB") throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing indexed file object");
   // Preserve legacy cold reads only for small files with complete history.
-  // Never return a guessed author when a bounded historical walk was truncated.
+  // Oversized inputs and completed but unavailable indexes fail explicitly.
+  // A missing index is retryable; an algorithmic resource limit is not.
+  if (object.byteSize > BigInt(MAX_TEXT_BYTES)) {
+    throw new SourceControlError(413, "BLAME_FILE_TOO_LARGE",
+      "Text file exceeds configured indexed-blame processing limit");
+  }
   if (object.byteSize > 1024n * 1024n) {
+    const completed = await readDerived(repositoryId, resolved, "blame");
+    const provenance = completed ? await latestBlameFile(repositoryId, resolved, path) : null;
+    if (completed) throw new SourceControlError(422, "BLAME_INDEX_UNAVAILABLE",
+      "Blame provenance cannot be computed under the configured resource limits");
     throw new SourceControlError(503, "BLAME_INDEX_PENDING",
-      "Large-file provenance requires a completed derived index");
+      "Large-file provenance is being indexed");
   }
   const history = await fileHistory(repositoryId, revision, path, true, maxHistory);
   if (history.truncated) throw new SourceControlError(503, "BLAME_INDEX_PENDING",
