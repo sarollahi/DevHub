@@ -37,7 +37,9 @@ impl SparseFuse {
                 current.push_str(segment);
                 let last = idx + 1 == segments.len();
                 if let Some(inode) = paths.get(&current) {
-                    if last { bail!("Duplicate virtual entry"); }
+                    if last || fs.nodes[(*inode - 1) as usize].entry.is_some() {
+                        bail!("Conflicting file and directory paths in virtual tree");
+                    }
                     parent = *inode;
                     continue;
                 }
