@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use walkdir::WalkDir;
 mod shared_cache;
+#[cfg(all(unix, feature = "fuse"))]
+mod fuse_workspace;
 
 const MAX_OBJECT: usize = 4 * 1024 * 1024;
 const CHUNK: usize = 256 * 1024;
@@ -33,6 +35,8 @@ enum Command {
         #[arg(long)] clear: bool },
     Sync { #[arg(long)] materialize: bool },
     Hydrate { paths: Vec<String> },
+    #[cfg(all(unix, feature = "fuse"))]
+    Mount { #[arg(long)] at: PathBuf },
     Status { #[arg(long)] json: bool },
     History { #[arg(long)] revision: Option<String>, #[arg(long)] path: Option<String>,
         #[arg(long, default_value_t=30)] limit: usize },
@@ -720,6 +724,12 @@ fn run(cli: Cli) -> Result<()> {
         Command::Hydrate { paths } => {
             let root = workspace_root()?; let mut state = load_state(&root)?;
             hydrate(&root, &mut state, &paths)
+        },
+        #[cfg(all(unix, feature = "fuse"))]
+        Command::Mount { at } => {
+            let root = workspace_root()?;
+            let state = load_state(&root)?;
+            fuse_workspace::mount(&root, &at, &state)
         },
         Command::Status { json } => {
             let root = workspace_root()?; let state = load_state(&root)?;

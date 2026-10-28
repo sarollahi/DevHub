@@ -78,3 +78,9 @@ Ref updates remain administrator-only and separate from immutable changeset publ
     npx tsx tests/native-client.e2e.ts
 
 The last command requires DEVHUB_CLI to point to a compiled executable and a running DevHub server backed by PostgreSQL. CI runs real-server end-to-end checks, plus Linux/macOS/Windows Rust unit tests and builds.
+
+## Kernel-visible read-only sparse mount (FUSE)
+
+Linux supports an **opt-in** read-only virtual view when /dev/fuse and mount permissions are available. Build with `cargo build --manifest-path client/devhub-cli/Cargo.toml --features fuse` and run `devhub sync` after sparse selection, then from inside that workspace run `devhub mount --at /path/to/empty/mountpoint` (mountpoint must be outside the editable workspace). The mount exposes only the selected server-authoritative revision and fetches SHA-256 verified blobs via the same memory → disk → node → regional/origin hierarchy when the kernel accesses a file. Metadata access may hydrate content to report an exact size. Mounts are read-only: writing requires the original explicit hydration workflow, so modified local files are never overlaid or overwritten.
+
+Unmount using `fusermount3 -u /path/to/empty/mountpoint` on Linux, or the local macFUSE unmount command where available. macFUSE support depends on a separately installed driver and is not asserted until validated on the target macOS release. Windows does not expose a projected virtual workspace in this implementation; it supports named-pipe cache reads and portable explicit hydration instead. When FUSE cannot mount (for example, an unprivileged CI container), ordinary `devhub hydrate` remains the cross-platform fallback.
