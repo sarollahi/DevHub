@@ -47,12 +47,18 @@ export class ObjectCache {
     const o = this.options;
     if (!o.root || !o.originUrl || (!o.socketPath && !o.port) || o.maxObjectBytes > o.maxDiskBytes || !Number.isSafeInteger(o.maxDiskBytes) || o.maxDiskBytes <= 0 || o.maxEntries < 1 || o.maxInflight < 1 || o.maxReaders < 1) throw new Error('Invalid cache configuration');
     if (o.port && (!o.accessToken || o.accessToken.length < 24)) throw new Error('TCP cache requires a service access token');
+    // TCP regional instances trust only a configured service-to-service bearer.
+    // Node-local daemons verify each client against the authoritative service,
+    // including warm hits. No positive authorization verdict is cached.
+    this.requireClientAuthorization = o.requireClientAuthorization ??
+      (!o.accessToken && (Boolean(o.originToken) || o.originUrl.startsWith('https://')));
+    if (this.requireClientAuthorization && !o.originUrl) throw new Error('Authorization origin required');
     this.entries = new Map(); this.flights = new Map(); this.activeReaders = new Map();
     this.capacity = new Capacity(o.maxInflight, o.maxQueued);
     this.readCapacity = new Capacity(o.maxReaders, o.maxReaderQueue);
     this.regionCircuit = new Circuit(o); this.originCircuit = new Circuit(o);
     this.bytes = 0; this.reserved = 0; this.locked = false;
-    this.stats = { hits: 0, misses: 0, coalesced: 0, upstreamRequests: 0, regionalRequests: 0, integrityFailures: 0, evictions: 0, rejected: 0 };
+    this.stats = { hits: 0, misses: 0, coalesced: 0, upstreamRequests: 0, regionalRequests: 0, integrityFailures: 0, evictions: 0, rejected: 0, authorizationChecks: 0, authorizationDenials: 0 };
   }
   paths(key) { const dir = join(this.options.root, 'objects', key.slice(0, 2)); return { dir, bin: join(dir, `${key}.bin`), meta: join(dir, `${key}.json`) }; }
   async initialize() {
@@ -121,6 +127,31 @@ export class ObjectCache {
     const a = Buffer.from(provided), b = Buffer.from(this.options.accessToken);
     return a.length === b.length && timingSafeEqual(a, b);
   }
+  async authorizeCaller(req, repositoryId, id) {
+    if (!this.requireClientAuthorization) return;
+    const credential = req.headers.authorization;
+    if (!credential || !/^Bearer [!-~]{24,}$/.test(credential)) {
+      this.stats.authorizationDenials++;
+      throw Object.assign(new Error('Client credential required'), { status: 401 });
+    }
+    this.stats.authorizationChecks++;
+    let response;
+    try {
+      response = await fetch(`${this.options.originUrl.replace(/\/$/, '')}/api/v2/repositories/${repositoryId}/objects/${id}/authorize`, {
+        method: 'HEAD', headers: { authorization: credential },
+        cache: 'no-store', redirect: 'error',
+        signal: AbortSignal.timeout(this.options.timeoutMs),
+      });
+    } catch {
+      // Fail closed: no stale authorization or service-token substitute.
+      throw Object.assign(new Error('Authorization authority unavailable'), { status: 503 });
+    }
+    if (response.status === 204) return;
+    this.stats.authorizationDenials++;
+    const status = [401, 403, 404].includes(response.status) ? response.status : 503;
+    throw Object.assign(new Error('Object access not authorized'), { status });
+  }
+
   async handle(req, res) {
     if (!this.authorized(req)) return json(res, 401, { error: 'UNAUTHORIZED' });
     if (req.method !== 'GET') return json(res, 405, { error: 'METHOD_NOT_ALLOWED' });
@@ -132,6 +163,7 @@ export class ObjectCache {
     const release = await this.readCapacity.acquire().catch(error => { this.stats.rejected++; throw error; });
     try {
       const [ , repositoryId, id ] = match;
+      await this.authorizeCaller(req, repositoryId, id);
       const key = keyOf(repositoryId, id);
       let entry = this.entries.get(key);
       if (entry && !(await this.verified(key, entry))) { await this.remove(key); entry = null; this.stats.integrityFailures++; }
@@ -185,7 +217,7 @@ export class ObjectCache {
     this.stats[counter]++;
     try {
       const response = await fetch(url, { headers: { accept: 'application/octet-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) }, signal: AbortSignal.timeout(this.options.timeoutMs) });
-      if (response.status === 404) throw Object.assign(new Error('Object does not exist'), { status: 404, terminal: true });
+      if ([401, 403, 404].includes(response.status)) throw Object.assign(new Error('Object access denied or missing'), { status: response.status, terminal: true });
       if (response.status === 413) { await response.body?.cancel(); throw Object.assign(new Error('Streaming required'), { status: 413, streamingRequired: true }); }
       if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error(`Upstream returned ${response.status}`); }
       const kind = assumedKind || response.headers.get('x-devhub-object-kind');
@@ -259,6 +291,9 @@ export async function startFromEnvironment() {
     ...(env.DEVHUB_CACHE_DISK_BYTES ? { maxDiskBytes: Number(env.DEVHUB_CACHE_DISK_BYTES) } : {}),
     ...(env.DEVHUB_CACHE_OBJECT_BYTES ? { maxObjectBytes: Number(env.DEVHUB_CACHE_OBJECT_BYTES) } : {}),
     allowedRepositories: env.DEVHUB_CACHE_REPOSITORIES?.split(',').filter(Boolean),
+    ...(env.DEVHUB_CACHE_REQUIRE_AUTHORIZATION ? {
+      requireClientAuthorization: env.DEVHUB_CACHE_REQUIRE_AUTHORIZATION === 'true'
+    } : {}),
   });
   await cache.start();
   const shutdown = async () => { await cache.close(); process.exit(0); };
