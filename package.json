@@ -44,7 +44,8 @@
     "ops:cache-exporter": "node scripts/cache-exporter.mjs",
     "ops:fault-drill": "node scripts/fault-drill.mjs",
     "bench:snapshot-scale": "tsx scripts/bench-snapshot-scale.ts",
-    "snapshot:backfill": "tsx scripts/backfill-snapshots.ts"
+    "snapshot:backfill": "tsx scripts/backfill-snapshots.ts",
+    "bench:related-review": "node --experimental-strip-types scripts/bench-related-review.mjs"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",

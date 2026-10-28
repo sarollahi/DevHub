@@ -85,6 +85,8 @@ jobs:
         run: npm run typecheck
       - name: Unit tests
         run: npm test
+      - name: Synthetic related-review benchmark smoke
+        run: npm run bench:related-review -- --sizes=1000
       - name: Start MinIO and initialize object bucket
         run: |
           docker run -d --name devhub-minio \
