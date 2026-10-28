@@ -1,0 +1,29 @@
+{
+  "native": {
+    "server": "https://devhub.example.com",
+    "repository": "REPLACE_WITH_REAL_DEVHUB_REPOSITORY_UUID",
+    "ref": "main"
+  },
+  "git": {
+    "url": "https://git.example.com/organization/repository.git",
+    "ref": "main"
+  },
+  "repetitions": 20,
+  "scenarios": [
+    {
+      "name": "1-percent",
+      "selectors": ["d:packages/small"],
+      "expectedPaths": 10000
+    },
+    {
+      "name": "10-percent",
+      "selectors": ["d:packages"],
+      "expectedPaths": 100000
+    },
+    {
+      "name": "50-percent",
+      "selectors": ["d:packages", "d:services"],
+      "expectedPaths": 500000
+    }
+  ]
+}

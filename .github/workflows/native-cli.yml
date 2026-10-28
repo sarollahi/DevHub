@@ -108,6 +108,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22.18"
+      - name: Check production-endpoint benchmark runner syntax
+        run: node --check scripts/bench-native-vs-git.mjs
+      - name: Verify durable object cache regression tests
+        run: node --test tests/cache.integration.test.mjs
       - name: Run measured synthetic cache hierarchy benchmark
         shell: bash
         run: |

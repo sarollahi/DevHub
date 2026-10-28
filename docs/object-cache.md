@@ -55,7 +55,7 @@ The benchmark uses a controlled local HTTP origin with 12 ms simulated latency. 
 
 ## Native Rust workspace integration
 
-The Rust client automatically tries the node-local daemon when DEVHUB_CACHE_SOCKET is set on Linux or macOS. It sends the caller's DevHub bearer credential over the protected Unix socket, verifies the returned BLOB digest, size, kind and identity, and copies only explicitly selected objects into its bounded workspace cache. If the daemon is absent or unavailable, it uses its existing authorized HTTP download with byte-range resume and final digest checking. A 401/403 access denial from the daemon is treated as an error, not a cache miss. Windows currently uses portable explicit hydration and the verified authoritative HTTP path; native named-pipe integration is not implemented.
+The Rust client automatically tries the node-local daemon when DEVHUB_CACHE_SOCKET is set on Linux or macOS. It sends the caller's DevHub bearer credential over the protected Unix socket, verifies the returned BLOB digest, size, kind and identity, and copies only explicitly selected objects into its bounded workspace cache. If the daemon is absent or unavailable, it uses its existing authorized HTTP download with byte-range resume and final digest checking. A 401/403 access denial from the daemon is treated as an error, not a cache miss. Windows uses the same authenticated node cache protocol over a local named pipe; portable authenticated explicit hydration remains the fallback.
 
 Use the following environment when configuring a shared cache for developer or CI clients:
 
@@ -70,7 +70,7 @@ Each caller must have its own DEVHUB_TOKEN or configured credential. A cache dae
 
 The unrestricted no-token cache mode exists for isolated loopback development/tests only. It is not a tenant-safe deployment. Disabling strict authorization while providing an origin service credential would break the authorization boundary; do not do so.
 
-The native e2e suite exercises independent developer/CI workspaces warming the same daemon, per-request reauthorization, and the direct-fetch fallback after daemon shutdown. Persistent caches are disposable; they are not sources of authority. Current limitations: no Windows named-pipe transport, no kernel-level on-demand virtualization (FUSE/ProjFS/File Provider), and no verified resumable partial-block ledger inside the daemon. Native HTTP range resume remains available for explicit hydration. No production-scale multi-OS benchmark numbers are claimed by this implementation.
+The native e2e suite exercises independent developer/CI workspaces warming the same daemon, per-request reauthorization, and the direct-fetch fallback after daemon shutdown. Persistent caches are disposable; they are not sources of authority. Kernel-visible read-only sparse mounts are available with the optional Linux FUSE feature, and Windows named-pipe caching is enabled. A 256 KiB crash-resumable BLOB journal retains checksummed completed blocks and validates the complete object before publishing cached bytes. Windows ProjFS and native macOS File Provider integration remain unsupported. Native HTTP range resume remains available for explicit hydration. No production-scale native-versus-Git benchmark results are claimed.
 
 ## Measured synthetic hierarchy benchmark
 
@@ -79,3 +79,9 @@ Run `node scripts/benchmark-cache-hierarchy.mjs` to emit reproducible JSON for 1
 ## Windows pipe transport
 
 The Rust native client connects to local named pipes that start with `\\\\.\\pipe\\devhub-` (for example `\\\\.\\pipe\\devhub-cache`) when `DEVHUB_CACHE_SOCKET` is configured. It requests `SECURITY_IDENTIFICATION` on the Windows pipe handle to restrict server impersonation. Both native Unix socket and Windows pipe transports send the caller's token for server-side authorization and cryptographically verify returned objects. If the pipe is unavailable, the client uses explicit authenticated HTTP hydration. Node does not apply Unix chmod to Windows pipes; the daemon must run under a protected user/service account and use a trusted local pipe name. `scripts/native-cache-smoke.mjs` exercises two native subprocesses against one daemon per OS.
+
+## Durable shared-cache transfer journal
+
+Cache misses write to `*.bin.resume`, and an adjacent `*.json.resume` journal persists complete 256 KiB chunk SHA-256 digests after data `fsync`. Restart validates the recorded chunk bytes, discards uncommitted tails, and resumes BLOB downloads through the authoritative v2 ranged endpoint using `If-Range` and a strong object ID ETag. If range support is absent, the daemon discards staged data and downloads the full object. An object is never served until the full `SHA256(BLOB\\0 || bytes)` matches its immutable identity. Tampered journals are discarded. Unfinished journals have a bounded disk budget and cannot be pruned while in flight. Trees are verified and published atomically without chunk resume.
+
+For real native-versus-Git workspace measurements, see [benchmark guide](bench-native-vs-git.md).
