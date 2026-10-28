@@ -115,6 +115,8 @@ export class ObjectCache {
   async start() {
     await this.initialize();
     this.server = http.createServer((req, res) => { this.handle(req, res).catch(error => {
+      if (process.env.DEVHUB_CACHE_DEBUG === '1')
+        console.error('[cache request failure]', error?.message, error?.stack);
       if (!res.headersSent) json(res, error.status || 503, { error: error.status === 404 ? 'NOT_FOUND' : 'CACHE_UNAVAILABLE' }, { 'retry-after': '2' });
       else res.destroy();
     }); });

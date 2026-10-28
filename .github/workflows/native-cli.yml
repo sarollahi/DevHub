@@ -116,7 +116,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/benchmark-cache-hierarchy.mjs | tee cache-benchmark.json
+          DEVHUB_CACHE_DEBUG=1 node scripts/benchmark-cache-hierarchy.mjs | tee cache-benchmark.json
       - uses: actions/upload-artifact@v4
         with:
           name: cache-hierarchy-benchmark
