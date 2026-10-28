@@ -92,7 +92,7 @@ jobs:
           trap 'kill "$pid" 2>/dev/null || true' EXIT
           for i in $(seq 1 50); do
             if curl --fail --silent http://127.0.0.1:3000/api/health >/dev/null; then
-              DEVHUB_CLI="$GITHUB_WORKSPACE/client/devhub-cli/target/release/devhub" \
+              DEVHUB_CLI="$GITHUB_WORKSPACE/client/devhub-cli/target/debug/devhub" \
                 npx tsx tests/native-client.e2e.ts
               exit $?
             fi
