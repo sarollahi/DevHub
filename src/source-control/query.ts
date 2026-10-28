@@ -3,7 +3,7 @@ import { ensureIndexJob } from "../workers/query-indexer";
 import { enqueueDerived } from "./derived-index";
 import { indexedFileHistory, indexedLinearAncestry, indexedDagMergeBases, indexedDagIsAncestor } from "./derived-queries";
 import { exactDagReachability, exactDagAncestors, exactDagMergeBases, exactDagPathImpact, exactDagContributions } from "./dag-queries";
-import { indexedBlameLines } from "./indexed-blame";
+import { indexedBlamePage, MAX_TEXT_BYTES } from "./indexed-blame";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
@@ -311,26 +311,45 @@ export async function contributionImpactQuery(repositoryId: string, revision: st
   return exactDagContributions(repositoryId, id, limitQuery(max, 200), after);
 }
 
-export async function blameQuery(repositoryId: string, revision: string, path: string, maxHistory = 500) {
+export async function blameQuery(repositoryId: string, revision: string, path: string,
+  maxHistory = 500, offset = 0, maxLines = 200) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(maxLines) || maxLines < 1) {
+    throw new SourceControlError(422, "INVALID_PAGE", "Blame requires a valid line range");
+  }
+  const size = Math.min(maxLines, 500);
   const resolved = await resolveRevision(repositoryId, revision);
   await enqueueDerived(repositoryId, resolved, ["blame"]);
-  const entry = await resolvePath(repositoryId, revision, path);
+  const entry = await resolvePath(repositoryId, resolved, path);
   if (entry.kind !== "file" || !entry.objectId) throw new SourceControlError(422, "NOT_A_FILE", "Blame requires a file");
-  const presentBlobs = await verifiedBlobs([entry.objectId]);
-  const present = textOf(presentBlobs.get(entry.objectId)!);
-  if (present === null) throw new SourceControlError(415, "BINARY_FILE", "Blame is only available for UTF-8 text files");
-  const indexed = await indexedBlameLines(repositoryId, entry.revision, path, entry.objectId, present);
+  // An immutable line-origin checkpoint avoids any historical file replay on a
+  // warm read, including text files larger than the legacy 4 MiB blob limit.
+  const indexed = await indexedBlamePage(repositoryId, entry.revision, path, entry.objectId, offset, size);
   if (indexed) return { revision: entry.revision, path, firstParentOnly: true,
-    truncated: false, lines: indexed };
+    truncated: false, ...indexed };
+  const object = await db.sourceObject.findFirst({ where: { id: entry.objectId },
+    select: { kind: true, byteSize: true } });
+  if (!object || object.kind !== "BLOB") throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing indexed file object");
+  // Preserve legacy cold reads only for small files with complete history.
+  // Never return a guessed author when a bounded historical walk was truncated.
+  if (object.byteSize > 1024n * 1024n) {
+    throw new SourceControlError(503, "BLAME_INDEX_PENDING",
+      "Large-file provenance requires a completed derived index");
+  }
   const history = await fileHistory(repositoryId, revision, path, true, maxHistory);
-  const ids = history.records.map(e => e.objectId).filter((id): id is string => !!id);
+  if (history.truncated) throw new SourceControlError(503, "BLAME_INDEX_PENDING",
+    "Complete line provenance is still being indexed");
+  const ids = [entry.objectId, ...history.records.map(e => e.objectId).filter((id): id is string => !!id)];
   const blobs = await verifiedBlobs(ids);
+  const present = textOf(blobs.get(entry.objectId)!);
+  if (present === null) throw new SourceControlError(415, "BINARY_FILE", "Blame is only available for UTF-8 text files");
   const eventData = history.records.filter(e => e.objectId).map(e => ({
     changesetId: e.changesetId, content: textOf(blobs.get(e.objectId!)!),
   }));
   if (eventData.some(e => e.content === null)) throw new SourceControlError(415, "BINARY_HISTORY", "File history contains non-text content");
-  return { revision: entry.revision, path, firstParentOnly: true, truncated: history.truncated,
-    lines: blameLines(present, eventData as { changesetId: string; content: string }[]) };
+  const lines = blameLines(present, eventData as { changesetId: string; content: string }[]);
+  return { revision: entry.revision, path, firstParentOnly: true, truncated: false,
+    lines: lines.slice(offset, offset + size), totalLines: lines.length,
+    nextOffset: offset + size < lines.length ? offset + size : null };
 }
 
 export async function mergeQuery(repositoryId: string, ours: string, theirs: string) {
