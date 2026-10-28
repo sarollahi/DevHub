@@ -31,6 +31,9 @@ export default async function ReviewDetail({params}:{params:Promise<{id:string}>
         <span>State</span><strong>{record.state}</strong><span>Risk</span><strong>{record.riskTier??"Pending"} · {record.riskScore??"—"}</strong>
         <span>Duplicate of</span><code>{record.exactDuplicateOf?.slice(0,16)??"None"}</code>
         <span>Processing time</span><strong>{record.latencyMs==null?"—":record.latencyMs+" ms"}</strong>
+        <span>Indexed signal matches</span><strong>{record.candidateCount.toLocaleString()} {record.relatedTruncated?"(preview truncated)":""}</strong>
+        <span>Target revision</span><code>{record.targetRevisionId?.slice(0,16)??"No target bound"}</code>
+        <span>Index freshness</span><strong>{record.indexedAt?.toISOString()??"Pending"}</strong>
         <span>Model provider</span><strong>{record.provider||"Disabled (deterministic only)"}</strong>
         <span>Model confidence</span><strong>{record.confidence==null?"Not reported":Math.round(record.confidence*100)+"%"}</strong>
         <span>Recorded model cost</span><strong>{(Number(record.costMicros)/1_000_000).toFixed(6)} USD</strong></div>
@@ -39,9 +42,9 @@ export default async function ReviewDetail({params}:{params:Promise<{id:string}>
         {record.changeset.operations.map(op=><code key={op.path}>{op.kind} · {op.previousPath?op.previousPath+" → ":""}{op.path}</code>)}</div>
       <h3>Findings ({findings.length})</h3>{findings.length?findings.map((f,i)=><div className="review-finding" key={i}>
         <strong>{f.severity} · {f.code}</strong><p>{f.message}</p><small>Advisory: never an authorization decision</small></div>):<p className="detail-muted">No findings recorded.</p>}
-      <h3>Related revisions</h3>{related.length?related.map(link=><p key={link.changesetId} className="review-related">
+      <h3>Related revisions</h3><p className="muted">This is a bounded preview, not a limit on indexed history. Browse all matches through the paginated related-change API. Similarity is advisory.</p>{related.length?related.map(link=><p key={link.changesetId} className="review-related">
         <Link href={"/reviews/"+link.changesetId}>{link.changesetId.slice(0,15)}</Link>
-        <span>{link.kind} · {Math.round(link.score*100)}% signal</span></p>):<p className="detail-muted">No related revisions in the indexed candidate window.</p>}
+        <span>{link.kind} · {Math.round(link.score*100)}% signal</span></p>):<p className="detail-muted">No relationships in the current preview.</p>}
     </section><aside className="surface-card detail-panel"><h2>Human decision</h2>
       <p>Content checks and model findings do not grant approval or bypass branch policies.</p>
       <div className="note">Integrity validation: {record.changeset.validation?.state??"Unknown"} · Human owner approval: {approved?"Approved":"Not approved"}</div>

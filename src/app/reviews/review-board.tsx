@@ -7,7 +7,7 @@ import { RiskBadge } from "@/components/status";
 type Item = {
   id: string; repositoryId: string; title: string; author: string; repository: string; createdAt: string;
   state: string; riskTier: string | null; riskScore: number | null; groupKey: string | null;
-  paths: string[]; duplicateOf: string | null; relatedCount: number; approved: boolean;
+  paths: string[]; duplicateOf: string | null; relatedCount: number; candidateCount: number; relatedTruncated: boolean; approved: boolean;
   summary: string | null; latencyMs: number | null; confidence: number | null;
 };
 const priority = (item: Item) => (item.riskScore ?? 0) * 2 + item.relatedCount * 10 +
@@ -68,6 +68,7 @@ export default function ReviewBoard({ items }: { items: Item[] }) {
           <div className="review-row-tags"><RiskBadge tier={item.riskTier}/><Badge state={item.state}/>
             {item.duplicateOf && <span className="review-pill duplicate">Exact duplicate</span>}
             {!item.duplicateOf && item.relatedCount > 0 && <span className="review-pill related">{item.relatedCount} related</span>}
+            {item.relatedTruncated && <span className="review-pill related">More index matches</span>}
             {item.approved && <span className="review-pill approved">Approved</span>}</div>
         </Link>;
       })}</section>)}</div> :
