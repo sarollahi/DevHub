@@ -10,8 +10,11 @@ type Item = {
   paths: string[]; duplicateOf: string | null; relatedCount: number; candidateCount: number; relatedTruncated: boolean; approved: boolean;
   summary: string | null; latencyMs: number | null; confidence: number | null;
 };
-const priority = (item: Item) => (item.riskScore ?? 0) * 2 + item.relatedCount * 10 +
-  (item.state === "FAILED" ? 100 : 0) + (item.approved ? -150 : 0);
+// Only deterministic risk, verified exact duplicates and failure state affect priority.
+// Advisory semantic neighbors and model confidence never elevate a change above security work.
+const priority = (item: Item) => (item.riskScore ?? 0) * 3 +
+  (item.state === "FAILED" ? 120 : 0) +
+  (item.duplicateOf ? 35 : 0) + (item.approved ? -500 : 0);
 function Badge({ state }: { state: string }) {
   return <span className={"review-pill " + state.toLowerCase().replaceAll("_", "-")}>{state.replaceAll("_"," ").toLowerCase()}</span>;
 }

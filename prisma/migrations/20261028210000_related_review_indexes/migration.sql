@@ -43,3 +43,6 @@ UPDATE "SourceReview" SET "state"='QUEUED', "attempts"=0,
   "nextAttemptAt"=CURRENT_TIMESTAMP, "leaseUntil"=NULL,
   "indexedAt"=NULL
 WHERE "state" IN ('COMPLETED','FAILED');
+
+-- Reconciliation scans OPEN requests in stable UUID cursor order.
+CREATE INDEX "SourceReviewRequest_status_id_idx" ON "SourceReviewRequest"("status", "id");

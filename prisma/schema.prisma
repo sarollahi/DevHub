@@ -925,6 +925,7 @@ model SourceReviewRequest {
   changeset SourceChangeset @relation(fields: [changesetId], references: [id], onDelete: Restrict)
   @@unique([repositoryId, changesetId, targetRef])
   @@index([repositoryId, createdAt(sort: Desc)])
+  @@index([status, id])
 }
 
 enum MembershipRole {
