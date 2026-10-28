@@ -87,3 +87,17 @@ jobs:
           done
           cat /tmp/devhub-cli-server.log
           exit 1
+
+  hierarchy-cache-benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+      - name: Run measured synthetic cache hierarchy benchmark
+        run: node scripts/benchmark-cache-hierarchy.mjs | tee cache-benchmark.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cache-hierarchy-benchmark
+          path: cache-benchmark.json
