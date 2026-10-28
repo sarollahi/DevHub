@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type SourceRefKind } from "@prisma/client";
 import { db } from "../lib/prisma";
+import { DERIVED_KINDS, DERIVED_VERSION } from "./derived-index";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { assertRepositoryPermission } from "../lib/authorization";
 import { assertSignedProtectedTip, assertSignedGitProtectedUpdate } from "../integration/protected-evidence";
@@ -263,6 +264,11 @@ async function mutateWithinTransaction(tx: Prisma.TransactionClient, repositoryI
     await tx.auditEvent.create({ data: { repositoryId, actorType: actor.type, actorId: actor.id,
       action: `reference.${input.operation.toLowerCase()}`, subjectId: target,
       metadata: payload } });
+    if (kind === "BRANCH" && input.operation !== "DELETE" && oldId !== target) {
+      await tx.sourceDerivedIndex.createMany({ data: DERIVED_KINDS.filter(k => k !== "blame").map(indexKind => ({
+        repositoryId, changesetId: target!, kind: indexKind, version: DERIVED_VERSION,
+      })), skipDuplicates: true });
+    }
     await tx.outboxEvent.create({ data: {
       aggregateType: "SourceReference", aggregateId: repositoryId,
       kind: `source.ref.${input.operation.toLowerCase()}`, payload,

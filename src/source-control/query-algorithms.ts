@@ -143,3 +143,57 @@ export function blameLines(content: string, events: { changesetId: string; conte
   }
   return result;
 }
+
+
+/** Exact linear-space LCS for large text edits. Common prefix/suffix lines
+ * are stripped before quadratic work, making million-line sparse edits cheap.
+ * No heuristic match is ever assigned an older author. The caller must run
+ * this in a background worker, not a synchronous HTTP read.
+ */
+export function matchingLinesLarge(older: string[], newer: string[]): [number, number][] {
+  let prefix = 0;
+  while (prefix < older.length && prefix < newer.length && older[prefix] === newer[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < older.length - prefix && suffix < newer.length - prefix &&
+    older[older.length - 1 - suffix] === newer[newer.length - 1 - suffix]) suffix++;
+  const result: [number, number][] = Array.from({ length: prefix }, (_, i) => [i, i]);
+  const aEnd = older.length - suffix, bEnd = newer.length - suffix;
+  function lengths(a0: number, a1: number, b0: number, b1: number, reverse: boolean) {
+    const width = b1 - b0;
+    let previous = new Uint32Array(width + 1);
+    let current = new Uint32Array(width + 1);
+    for (let i = 0; i < a1 - a0; i++) {
+      const a = reverse ? older[a1 - 1 - i] : older[a0 + i];
+      for (let j = 0; j < width; j++) {
+        const b = reverse ? newer[b1 - 1 - j] : newer[b0 + j];
+        current[j + 1] = a === b ? previous[j] + 1 :
+          Math.max(current[j], previous[j + 1]);
+      }
+      [previous, current] = [current, previous];
+      current.fill(0);
+    }
+    return previous;
+  }
+  function solve(a0: number, a1: number, b0: number, b1: number) {
+    if (a0 >= a1 || b0 >= b1) return;
+    if (a1 - a0 === 1) {
+      for (let j = b0; j < b1; j++) {
+        if (older[a0] === newer[j]) { result.push([a0, j]); break; }
+      }
+      return;
+    }
+    const mid = Math.floor((a0 + a1) / 2);
+    const left = lengths(a0, mid, b0, b1, false);
+    const right = lengths(mid, a1, b0, b1, true);
+    let best = -1, split = 0;
+    for (let j = 0; j <= b1 - b0; j++) {
+      const value = left[j] + right[b1 - b0 - j];
+      if (value > best) { best = value; split = j; }
+    }
+    solve(a0, mid, b0, b0 + split);
+    solve(mid, a1, b0 + split, b1);
+  }
+  solve(prefix, aEnd, prefix, bEnd);
+  for (let i = suffix; i > 0; i--) result.push([older.length - i, newer.length - i]);
+  return result;
+}

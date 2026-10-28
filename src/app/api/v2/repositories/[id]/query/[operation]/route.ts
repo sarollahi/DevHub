@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/prisma";
 import { validPath } from "@/lib/review-logic";
 import { requireRepositoryAccess, sourceFailure } from "@/source-control/http";
-import { runAuthorizedQuery, ancestryQuery, fileHistory, diffQuery, blameQuery, mergeQuery } from "@/source-control/query";
+import { runAuthorizedQuery, ancestryQuery, fileHistory, pathImpactQuery, contributionImpactQuery, diffQuery, blameQuery, mergeQuery } from "@/source-control/query";
 import { SourceControlError } from "@/source-control/contracts";
 
 export const runtime = "nodejs";
@@ -40,9 +40,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       }
       case "diff": result = await diffQuery(id, necessary(q.get("from"), "from"),
         necessary(q.get("to"), "to"), max); break;
+      case "impact":
+        if (!path) throw new SourceControlError(422, "INVALID_PATH", "Path required");
+        result = await pathImpactQuery(id, necessary(revision, "revision"), path, max); break;
+      case "contributions":
+        result = await contributionImpactQuery(id, necessary(revision, "revision"), max, q.get("cursor") || ""); break;
       case "blame":
         if (!path) throw new SourceControlError(422, "INVALID_PATH", "Path required");
-        result = await blameQuery(id, necessary(revision, "revision"), path); break;
+        result = await blameQuery(id, necessary(revision, "revision"), path, 500,
+          Math.max(0, Number(q.get("offset") || 0)), max); break;
       case "merge": result = await mergeQuery(id, necessary(q.get("ours"), "ours"),
         necessary(q.get("theirs"), "theirs")); break;
       default: throw new SourceControlError(404, "NOT_FOUND", "Unknown query");

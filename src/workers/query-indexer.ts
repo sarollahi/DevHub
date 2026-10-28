@@ -1,4 +1,5 @@
 import { measured } from "../observability/telemetry";
+import { processDerivedBatch } from "../source-control/derived-index";
 import { db } from "../lib/prisma";
 import { indexSearchBatch, enqueueSearchObjects } from "./search-indexer";
 
@@ -86,8 +87,9 @@ async function main() {
     while (!stopping) {
       const batch = await indexBatch();
       const search = await indexSearchBatch();
-      if (!batch.inspected && !search.inspected) await sleep(1000);
-      else if (!batch.completed && !search.completed) await sleep(250);
+      const derived = await processDerivedBatch();
+      if (!batch.inspected && !search.inspected && !derived.inspected) await sleep(1000);
+      else if (!batch.completed && !search.completed && !derived.completed) await sleep(250);
     }
   } finally { await db.$disconnect(); }
 }

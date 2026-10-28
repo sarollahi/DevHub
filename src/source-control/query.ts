@@ -1,5 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ensureIndexJob } from "../workers/query-indexer";
+import { enqueueDerived, readDerived } from "./derived-index";
+import { indexedFileHistory, indexedLinearAncestry, indexedDagMergeBases, indexedDagIsAncestor } from "./derived-queries";
+import { exactDagReachability, exactDagAncestors, exactDagMergeBases, exactDagPathImpact, exactDagContributions } from "./dag-queries";
+import { indexedBlamePage, MAX_TEXT_BYTES } from "./indexed-blame";
 import { db } from "../lib/prisma";
 import { validPath } from "../lib/review-logic";
 import { SourceControlError, type TreeEntry, type SourceActor } from "./contracts";
@@ -50,6 +54,7 @@ export async function resolveRevision(repositoryId: string, revision: string): P
     throw new SourceControlError(404, "REVISION_NOT_FOUND", "Revision does not exist in this repository");
   }
   await ensureIndexJob(repositoryId, id);
+  await enqueueDerived(repositoryId, id, ["ancestry", "history", "changed-paths", "impact", "directory"]);
   return id;
 }
 
@@ -57,68 +62,32 @@ export async function resolveRevision(repositoryId: string, revision: string): P
 // merge-heavy DAGs. Edges are read from the parent table, not from file trees.
 // Legacy bulk ancestry helper retained for callers that explicitly request
 // the complete DAG. Ordinary history and merge-base queries avoid this map.
+/** Explicit unpaged legacy helper. Ordinary APIs use bounded ancestor pages. */
 export async function ancestors(repositoryId: string, revision: string): Promise<string[]> {
   const id = await resolveRevision(repositoryId, revision);
-  const rows = await db.$queryRaw<{ id: string }[]>`
-    WITH RECURSIVE reachable(id) AS (
-      SELECT id FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
-      UNION
-      SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON r.id = p."changesetId"
-    )
-    SELECT id FROM reachable
-  `;
-  return rows.map(row => row.id);
+  return (await exactDagAncestors(repositoryId, id, 2_147_483_647)).ancestors;
 }
 
 export async function isAncestor(repositoryId: string, ancestor: string, descendant: string): Promise<boolean> {
   const [a, d] = await Promise.all([resolveRevision(repositoryId, ancestor), resolveRevision(repositoryId, descendant)]);
-  const rows = await db.$queryRaw<{ found: boolean }[]>`
-    WITH RECURSIVE reachable(id) AS (
-      SELECT id FROM "SourceChangeset" WHERE id = ${d} AND "repositoryId" = ${repositoryId}::uuid
-      UNION
-      SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON r.id = p."changesetId"
-    )
-    SELECT EXISTS(SELECT 1 FROM reachable WHERE id = ${a}) AS found
-  `;
-  return rows[0]?.found === true;
+  const indexed = await indexedDagIsAncestor(repositoryId, a, d);
+  return indexed ?? exactDagReachability(repositoryId, a, d);
 }
 
-// Merge bases are evaluated in the database. No 100k-vertex JavaScript Sets.
 export async function mergeBases(repositoryId: string, leftRevision: string, rightRevision: string) {
   const [left, right] = await Promise.all([
     resolveRevision(repositoryId, leftRevision), resolveRevision(repositoryId, rightRevision),
   ]);
-  const rows = await db.$queryRaw<{ id: string }[]>`
-    WITH RECURSIVE lhs(id) AS (
-      SELECT id FROM "SourceChangeset" WHERE id = ${left} AND "repositoryId" = ${repositoryId}::uuid
-      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN lhs r ON p."changesetId" = r.id
-    ), rhs(id) AS (
-      SELECT id FROM "SourceChangeset" WHERE id = ${right} AND "repositoryId" = ${repositoryId}::uuid
-      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN rhs r ON p."changesetId" = r.id
-    ), shared AS (SELECT id FROM lhs INTERSECT SELECT id FROM rhs)
-    SELECT s.id FROM shared s WHERE NOT EXISTS (
-      SELECT 1 FROM "SourceChangesetParent" p JOIN shared child ON child.id = p."changesetId"
-      WHERE p."parentId" = s.id
-    ) ORDER BY s.id
-  `;
-  return rows.map(r => r.id);
+  const indexed = await indexedDagMergeBases(repositoryId, left, right);
+  return indexed ?? exactDagMergeBases(repositoryId, left, right);
 }
 
 export async function ancestryQuery(repositoryId: string, revision: string, other?: string, max = 100) {
   const resolved = await resolveRevision(repositoryId, revision);
   const size = limitQuery(max, 1000);
-  const rows = await db.$queryRaw<{ id: string; total: bigint }[]>`
-    WITH RECURSIVE reachable(id) AS (
-      SELECT id FROM "SourceChangeset" WHERE id = ${resolved} AND "repositoryId" = ${repositoryId}::uuid
-      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON p."changesetId" = r.id
-    )
-    SELECT id, COUNT(*) OVER () AS total FROM reachable LIMIT ${size + 1}
-  `;
-  const count = Number(rows[0]?.total || 0);
-  const common = other ? await mergeBases(repositoryId, resolved, other) : [];
-  return { revision: resolved, ancestorCount: Math.max(0, count - 1),
-    ancestors: rows.map(r => r.id).slice(0, size),
-    truncated: count > size, mergeBases: common };
+  const accelerated = await indexedLinearAncestry(repositoryId, resolved, size);
+  const result = accelerated ?? await exactDagAncestors(repositoryId, resolved, size);
+  return { ...result, mergeBases: other ? await mergeBases(repositoryId, resolved, other) : [] };
 }
 
 // Exact immutable-root reads require no complete snapshot reconstruction.
@@ -277,6 +246,8 @@ export async function fileHistory(repositoryId: string, revision: string, path: 
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
   const size = limitQuery(max, 1000);
+  const accelerated = await indexedFileHistory(repositoryId, id, path, followRenames, size);
+  if (accelerated) return accelerated;
   const events: FileHistoryRow[] = [];
   let current = path;
   let fromDepth = 0;
@@ -331,44 +302,50 @@ export async function fileHistory(repositoryId: string, revision: string, path: 
 export async function pathImpactQuery(repositoryId: string, revision: string, path: string, max = 100) {
   if (!validPath(path)) throw new SourceControlError(422, "INVALID_PATH", "Invalid repository path");
   const id = await resolveRevision(repositoryId, revision);
-  const size = limitQuery(max, 1000);
-  // Use authoritative operations for revisions without a completed touch index.
-  // A failed/stale index must never replace those operations. Only a bounded
-  // result page leaves the database even for million-revision histories.
-  const rows = await db.$queryRaw<{
-    changesetId: string; operationPath: string; role: string; total: bigint;
-  }[]>`
-    WITH RECURSIVE reachable(id) AS (
-      SELECT id FROM "SourceChangeset" WHERE id = ${id} AND "repositoryId" = ${repositoryId}::uuid
-      UNION SELECT p."parentId" FROM "SourceChangesetParent" p JOIN reachable r ON p."changesetId" = r.id
-    ), touched AS (
-      SELECT t."changesetId", t."operationPath", t.role
-      FROM reachable r JOIN "SourceQueryIndexJob" job ON job."changesetId" = r.id AND job.state = 'SUCCEEDED'
-      JOIN "SourceQueryPathTouch" t ON t."changesetId" = r.id AND t.path = ${path}
-      UNION ALL
-      SELECT op."changesetId", op.path AS "operationPath",
-        CASE WHEN op.path = ${path} THEN 'destination' ELSE 'source' END AS role
-      FROM reachable r JOIN "SourceFileOperation" op ON op."changesetId" = r.id
-      WHERE (op.path = ${path} OR op."previousPath" = ${path})
-        AND NOT EXISTS (SELECT 1 FROM "SourceQueryIndexJob" job
-          WHERE job."changesetId" = r.id AND job.state = 'SUCCEEDED')
-    ), distinct_touch AS (SELECT DISTINCT "changesetId", "operationPath", role FROM touched)
-    SELECT d."changesetId", d."operationPath", d.role, COUNT(*) OVER () AS total
-    FROM distinct_touch d JOIN "SourceChangeset" c ON c.id = d."changesetId"
-    ORDER BY c."createdAt" DESC, d."changesetId", d.role
-    LIMIT ${size + 1}
-  `;
-  const total = Number(rows[0]?.total ?? 0n);
-  const records = rows.slice(0, size).map(row => ({
-    changesetId: row.changesetId, path, operationPath: row.operationPath, role: row.role,
-  }));
-  return { revision: id, path, records, total, truncated: total > size };
+  return exactDagPathImpact(repositoryId, id, path, limitQuery(max, 1000));
 }
 
-export async function blameQuery(repositoryId: string, revision: string, path: string, maxHistory = 500) {
-  const entry = await resolvePath(repositoryId, revision, path);
+export async function contributionImpactQuery(repositoryId: string, revision: string, max = 100, after = "") {
+  if (after.length > 256) throw new SourceControlError(422, "INVALID_CURSOR", "Invalid contribution cursor");
+  const id = await resolveRevision(repositoryId, revision);
+  return exactDagContributions(repositoryId, id, limitQuery(max, 200), after);
+}
+
+export async function blameQuery(repositoryId: string, revision: string, path: string,
+  maxHistory = 500, offset = 0, maxLines = 200) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(maxLines) || maxLines < 1) {
+    throw new SourceControlError(422, "INVALID_PAGE", "Blame requires a valid line range");
+  }
+  const size = Math.min(maxLines, 500);
+  const resolved = await resolveRevision(repositoryId, revision);
+  await enqueueDerived(repositoryId, resolved, ["blame"]);
+  const entry = await resolvePath(repositoryId, resolved, path);
   if (entry.kind !== "file" || !entry.objectId) throw new SourceControlError(422, "NOT_A_FILE", "Blame requires a file");
+  // An immutable line-origin checkpoint avoids any historical file replay on a
+  // warm read, including text files larger than the legacy 4 MiB blob limit.
+  const indexed = await indexedBlamePage(repositoryId, entry.revision, path, entry.objectId, offset, size);
+  if (indexed) return { revision: entry.revision, path, firstParentOnly: true,
+    truncated: false, ...indexed };
+  const object = await db.sourceObject.findFirst({ where: { id: entry.objectId },
+    select: { kind: true, byteSize: true } });
+  if (!object || object.kind !== "BLOB") throw new SourceControlError(409, "CORRUPT_HISTORY", "Missing indexed file object");
+  // Preserve legacy cold reads only for small files with complete history.
+  // Oversized inputs and completed but unavailable indexes fail explicitly.
+  // A missing index is retryable; an algorithmic resource limit is not.
+  if (object.byteSize > BigInt(MAX_TEXT_BYTES)) {
+    throw new SourceControlError(413, "BLAME_FILE_TOO_LARGE",
+      "Text file exceeds configured indexed-blame processing limit");
+  }
+  if (object.byteSize > 1024n * 1024n) {
+    const completed = await readDerived(repositoryId, resolved, "blame");
+    if (completed) throw new SourceControlError(422, "BLAME_INDEX_UNAVAILABLE",
+      "Blame provenance cannot be computed under the configured resource limits");
+    throw new SourceControlError(503, "BLAME_INDEX_PENDING",
+      "Large-file provenance is being indexed");
+  }
   const history = await fileHistory(repositoryId, revision, path, true, maxHistory);
+  if (history.truncated) throw new SourceControlError(503, "BLAME_INDEX_PENDING",
+    "Complete line provenance is still being indexed");
   const ids = [entry.objectId, ...history.records.map(e => e.objectId).filter((id): id is string => !!id)];
   const blobs = await verifiedBlobs(ids);
   const present = textOf(blobs.get(entry.objectId)!);
@@ -377,8 +354,10 @@ export async function blameQuery(repositoryId: string, revision: string, path: s
     changesetId: e.changesetId, content: textOf(blobs.get(e.objectId!)!),
   }));
   if (eventData.some(e => e.content === null)) throw new SourceControlError(415, "BINARY_HISTORY", "File history contains non-text content");
-  return { revision: entry.revision, path, firstParentOnly: true, truncated: history.truncated,
-    lines: blameLines(present, eventData as { changesetId: string; content: string }[]) };
+  const lines = blameLines(present, eventData as { changesetId: string; content: string }[]);
+  return { revision: entry.revision, path, firstParentOnly: true, truncated: false,
+    lines: lines.slice(offset, offset + size), totalLines: lines.length,
+    nextOffset: offset + size < lines.length ? offset + size : null };
 }
 
 export async function mergeQuery(repositoryId: string, ours: string, theirs: string) {
