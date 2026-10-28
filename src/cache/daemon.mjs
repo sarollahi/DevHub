@@ -186,7 +186,7 @@ export class ObjectCache {
           this.flights.set(key, flight);
           void flight.finally(async () => {
             this.flights.delete(key);
-            await pruneJournals(this.options.root, this.resumeBudgetBytes, new Set(this.flights.keys())).catch(() => {});
+            await pruneJournals(this.options.root, this.resumeBudgetBytes, new Set(this.flights.keys()), 30000).catch(() => {});
           }).catch(() => {});
         }
         entry = await flight;
@@ -369,7 +369,7 @@ export class ObjectCache {
     } finally {
       if (reserved) this.reserved -= this.options.maxObjectBytes;
       release();
-      await pruneJournals(this.options.root, this.resumeBudgetBytes, new Set(this.flights.keys())).catch(() => {});
+      await pruneJournals(this.options.root, this.resumeBudgetBytes, new Set(this.flights.keys()), 30000).catch(() => {});
     }
   }
   async verifiedStaged(p, id) {

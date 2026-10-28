@@ -124,7 +124,7 @@ export async function receiveToJournal(response, p, { repositoryId, id, kind, ma
   }
   return publishVerified(p, { repositoryId, id, kind, bytes: written });
 }
-export async function pruneJournals(root, maxBytes, activeKeys = new Set()) {
+export async function pruneJournals(root, maxBytes, activeKeys = new Set(), minAgeMs = 0) {
   const items = [];
   let total = 0;
   const shards = await readdir(join(root, 'objects'), { withFileTypes: true }).catch(e => e.code === 'ENOENT' ? [] : Promise.reject(e));
@@ -137,6 +137,9 @@ export async function pruneJournals(root, maxBytes, activeKeys = new Set()) {
       const part = join(folder, item), ledger = join(folder, item.slice(0, 64) + '.json.resume');
       try {
         const info = await stat(part);
+        // Live transfers may begin after a pruning pass takes its flight snapshot.
+        // Never touch a recently written stage during routine cleanup.
+        if (Date.now() - info.mtimeMs < minAgeMs) continue;
         await stat(ledger);
         items.push({ part, ledger, time: info.mtimeMs, bytes: info.size });
         total += info.size;
