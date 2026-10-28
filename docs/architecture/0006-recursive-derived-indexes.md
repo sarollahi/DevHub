@@ -39,18 +39,43 @@ place. Rebuild a new version and leave the canonical data unchanged.
 
 ## Queries, complexity and limitations
 
-For a fully indexed **linear** history, first-parent ancestor tests use binary
-lifting, O(log depth), rather than re-running a recursive SQL walk. File history
-uses an indexed path-posting lookup, tests exact first-parent membership and
-follows rename edges. A bounded scan cap falls back to the canonical SQL
-reference query instead of publishing truncated or unsound results.
-`blameQuery` preferentially reads immutable, sparse per-file origin runs computed from indexed parent provenance and exact line matching. Binary, oversized, unavailable, and high-cost files use the existing bounded reference matcher as a correctness fallback. Per-file state is capped at 1 MiB and 10,000 lines; each changeset is capped at 128 indexed files and 50,000 indexed output lines. No complete repository blame snapshot is materialized.
+For any fully indexed merge DAG, the ancestry index stores immutable nearest-merge
+spine pointers and first-parent binary-lifting jumps. Exact reachability skips
+long linear stretches and visits the merge vertices and their side-parent
+branches. Exact merge-base discovery intersects the compressed first-parent
+spines, removes ancestor candidates, and returns **all** lowest common ancestors
+in criss-cross merges. Wide DAGs and missing or stale indexes use bounded-batch
+nonrecursive graph staging (`src/source-control/dag-queries.ts`), not recursive
+CTEs or full snapshot reconstruction. The temporary PostgreSQL work table
+deduplicates reachable changesets and can spill to disk, while the application
+reads at most 512 vertex IDs per step. Such cold walks still cost O(reachable
+vertices); no sublinear promise is made for arbitrary merge topologies.
 
-Merge-heavy graph reachability, criss-cross merge bases and path impact continue
-to use the exact recursive reference implementation. The ancestry accelerator is
-deliberately limited to purely linear lineages; the generic DAG job scheduler
-itself supports multiple parents. The cumulative impact number is explicitly a
-first-parent statistic, not a deduplicated entire-DAG contribution count.
+`operation=impact` uses the same exact staged ancestor closure and canonical
+operation rows. `operation=contributions` groups by author across the **entire
+reachable DAG**, deduplicates revisions reached through multiple parents,
+and reports revision, operation and distinct changed-path counts. These
+aggregate queries remain proportional to reachable source history; they do not
+use recursive SQL or first-parent-only impact estimates. Incremental
+`impact` metadata remains an advisory first-parent statistic.
+
+`blameQuery` prefers persisted immutable changed-file provenance; it maps
+unchanged lines to parent origins with exact LCS, including a linear-memory
+implementation for large sparse edits. It serves bounded pages (`offset` and
+`limit`) without revisiting historical changesets. Current worker limits are
+16 MiB / 250,000 lines per indexed text file, 128 changed files and 500,000
+processed lines per changeset. CPU-intensive diffs beyond the configured
+50-million-cell bound remain explicitly unavailable; they are **not** assigned
+guessed line origins. Cold small files retain the complete reference matcher,
+but truncated histories no longer produce incomplete blame results. Large cold
+files require completion of their derived job; overly large, binary or otherwise
+unsupported files must be rejected explicitly instead of silently replaying a
+bounded history.
+
+File history still uses indexed changed-path postings and exact first-parent
+membership checks, following rename edges. A 20,000-candidate guard can defer
+to the canonical path query for unusually dense rename activity. That specific
+path query is separate from DAG ancestry and impact computations.
 
 Directories use existing immutable radix roots; they do not copy entire
 snapshots into index rows. A missing snapshot root is marked unavailable;
@@ -58,19 +83,16 @@ a background index must not invent one. Historical v2 root migration is the
 separate resumable process documented in
 `docs/architecture/0005-scalable-snapshot-indexes.md`.
 
-File-history and blame postings are sparse (O(changed paths)), jump rows are O(log history
-depth) per changeset, and worker batches and read-page sizes are bounded. The
-posting scan has a 20,000-candidate guard, after which the canonical query is
-used. This can still be expensive on cold and highly branched histories.
-No unmeasured throughput or latency claim follows from asymptotic complexity.
+File-history and blame postings are sparse in changed paths, jump rows are logarithmic in first-parent depth, and query pages are bounded. Runtime and storage amplification are measured rather than inferred.
 
 ## Authorization and operations
 
 The public route remains
 `GET /api/v2/repositories/:id/query/:operation` and enforces
 `requireRepositoryAccess(..., "changesets:read")` before entering
-`runAuthorizedQuery`. The addition `operation=impact` accepts `revision`,
-`path` and `limit`. Internal acceleration helpers should **never** be exposed
+`runAuthorizedQuery`. `operation=impact` accepts `revision`, `path` and `limit`. The new
+`operation=contributions` accepts `revision`, `limit` and `cursor` and
+returns a paginated author summary. Blame accepts `offset` and `limit`. Internal acceleration helpers should **never** be exposed
 directly as unauthenticated routes. Cross-repository derived lookups check
 repository identity and immutable revision binding. Full object-content
 authorization stays in the existing query and source services.
@@ -106,7 +128,7 @@ elapsed time, not an end-to-end cold-read result.
 
 ### Recovery and rollout
 
-1. Apply schema migration, generate Prisma client, and deploy code and workers.
+1. Apply schema migration, generate Prisma client, and deploy code and workers (derived index version 2).
 2. Enqueue a handful of active heads and verify state transitions, index
    checksums, immutable posting counts and source-query parity.
 3. Ramp throughput while monitoring queue depth, FAILED rows, lease expirations,
