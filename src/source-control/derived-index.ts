@@ -45,7 +45,12 @@ async function loadRevision(repositoryId: string, changesetId: string) {
     },
   });
   if (!change) throw new Error("Index revision does not belong to repository");
-  return change;
+  // Legacy v1 persisted every operation with default position=0. Never key
+  // derived postings by that non-unique legacy value. Canonical v2 retains its
+  // explicit order; ties are deterministically ordered by unique path.
+  const ordered = [...change.operations].sort((a, b) =>
+    a.position - b.position || a.path.localeCompare(b.path));
+  return { ...change, operations: ordered.map((op, position) => ({ ...op, position })) };
 }
 export async function readDerived(repositoryId: string, changesetId: string, kind: DerivedKind): Promise<Payload | null> {
   const row = await db.sourceDerivedIndex.findUnique({ where: { changesetId_kind_version: key(changesetId, kind) } });
