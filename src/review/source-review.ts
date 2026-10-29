@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
+import { fairCandidates, fairClaim } from "../workers/tenant-scheduler";
 import { getCanonicalReviewEntries } from "../source-control/canonical";
 import { verifyAndReadBlob } from "../source-control/git-import-blobs";
 import { assessNativeChangeset, type Entry } from "./analysis";
@@ -173,27 +174,30 @@ export async function processReview(changesetId: string, lease: Date, attempt: n
 }
 
 export async function processNextReview(): Promise<boolean> {
-  const now = new Date();
-  const next = await db.sourceReview.findFirst({ where: {
-    attempts: { lt: maxAttempts },
-    OR: [
-      { state: "QUEUED", nextAttemptAt: { lte: now } },
-      { state: "RUNNING", leaseUntil: { lt: now } },
-    ],
-  }, orderBy: [{ nextAttemptAt: "asc" }, { changesetId: "asc" }],
-  select: { changesetId: true, attempts: true, state: true, leaseUntil: true } });
-  if (!next) return false;
-  const lease = new Date(Date.now() + 120_000);
-  const claimed = await db.sourceReview.updateMany({ where: {
-    changesetId: next.changesetId, state: next.state, attempts: next.attempts,
-    ...(next.state === "RUNNING" ? { leaseUntil: { lt: now } } : { nextAttemptAt: { lte: now } }),
-  }, data: {
-    state: "RUNNING", attempts: { increment: 1 },
-    leaseUntil: lease, startedAt: new Date(), error: null,
-  } });
-  if (claimed.count === 0) return true;
-  await processReview(next.changesetId, lease, next.attempts + 1);
-  return true;
+  const candidates = await fairCandidates("review");
+  for (const candidate of candidates) {
+    const claimed = await fairClaim("review", candidate.tenantId, async tx => {
+      const next = await tx.sourceReview.findUnique({ where: { changesetId: candidate.id } });
+      if (!next || next.attempts >= maxAttempts) return null;
+      const now = new Date();
+      const eligible = (next.state === "QUEUED" && next.nextAttemptAt <= now) ||
+        (next.state === "RUNNING" && !!next.leaseUntil && next.leaseUntil < now);
+      if (!eligible) return null;
+      const lease = new Date(Date.now() + 120_000);
+      const updated = await tx.sourceReview.updateMany({ where: {
+        changesetId: next.changesetId, state: next.state, attempts: next.attempts,
+        ...(next.state === "RUNNING" ? { leaseUntil: { lt: now } } : { nextAttemptAt: { lte: now } }),
+      }, data: {
+        state: "RUNNING", attempts: { increment: 1 },
+        leaseUntil: lease, startedAt: new Date(), error: null,
+      } });
+      return updated.count ? { changesetId: next.changesetId, lease, attempt: next.attempts + 1 } : null;
+    });
+    if (!claimed) continue;
+    await processReview(claimed.changesetId, claimed.lease, claimed.attempt);
+    return true;
+  }
+  return false;
 }
 
 async function main() {
