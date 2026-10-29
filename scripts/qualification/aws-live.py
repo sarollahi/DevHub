@@ -6,6 +6,7 @@ results. Source is pinned to a 40-byte Git commit. All resources belong to a
 run-scoped CloudFormation stack and the GitHub workflow always deletes it.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import json
 import os
@@ -233,9 +234,58 @@ def main():
     if not any(x.get("status")=="PASS" and x.get("committed")==3*args.changesets for x in stats):
         raise RuntimeError("Real multi-host workload completed without an independently verifiable PASS")
     (evidence/"measured-summary.json").write_text(json.dumps(stats[-1],indent=2)+"\n")
+    # Real writers now run on each *distinct physical host*, not only in
+    # independent child processes of the driver. All share the same real DB/S3.
+    def remote_writer(i):
+        role = ["driver","api-a","api-b"][i]
+        count = args.changesets
+        remote = "/tmp/qualification/multi-writers/" + role
+        work = (
+            "cd /opt/devhub\\n"
+            "set -a; source /etc/devhub-qualification.env; set +a\\n"
+            "mkdir -p " + remote + "\\n"
+            "node --import tsx scripts/bench-lifecycle.ts "
+            "--submissions=24 --changesets=" + str(count) +
+            " --concurrency=24 --depth=16 --monorepo-paths=32 "
+            "--ref-writers=12 --integration-jobs=4 --ci-jobs=0 "
+            "--queries=12 --blobs=5 "
+            "--output=" + remote + "/lifecycle.json "
+            "> " + remote + "/stdout.log 2> " + remote + "/stderr.log\\n"
+            "python3 - <<'PY'\\n"
+            "import json\\n"
+            "x=json.load(open('" + remote + "/lifecycle.json'))\\n"
+            "assert x['integrity']['persistedAfterIndependentPhase']==" + str(count + 1) + "\\n"
+            "assert x['phases']['concurrent_change_submissions']['completed']==24\\n"
+            "print(json.dumps({'status':'PASS','runId':x['runId'],"
+            "'persisted':x['integrity']['persistedAfterIndependentPhase'],"
+            "'p95Ms':x['phases']['concurrent_change_submissions']['p95Ms']}))\\n"
+            "PY\\n"
+            "aws s3 cp " + remote + "/ s3://" + outputs["EvidenceBucket"] +
+            "/real-writers/" + role + "/ --recursive --quiet\\n"
+        )
+        output = ssm(ids[i],work,"live-physical-writer-"+role,timeout=1500)
+        row = [json.loads(x) for x in output.splitlines() if x.startswith("{")]
+        if not row or row[-1].get("status")!="PASS":
+            raise RuntimeError("No verified durable native publication on "+role)
+        return {"role":role,"host":attestation[i]["host"],
+                "instanceId":ids[i],**row[-1]}
+
+    writes=[]
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        jobs=[pool.submit(remote_writer,i) for i in range(3)]
+        for job in as_completed(jobs):
+            writes.append(job.result())
+    if len(writes)!=3 or len({r["host"] for r in writes})!=3 or (
+        len({r["runId"] for r in writes})!=3 or
+        not all(r["persisted"]==args.changesets+1 for r in writes)
+    ):
+        raise RuntimeError("Cross-host native writers did not independently persist and verify content")
+    (evidence/"physical-writers.json").write_text(json.dumps(writes,indent=2)+"\\n")
     print(json.dumps({"qualification":"MEASURED_MULTI_HOST_NATIVE_PUBLICATION",
-                      "fullEndToEndCertification":False,
-                      "note":"HTTP requests are health/identity probes, not authenticated source-content writes"}),flush=True)
+        "writersOnSeparateKernels":len(writes),
+        "persistedIndependentRevisions":len(writes)*args.changesets,
+        "fullEndToEndCertification":False,
+        "note":"Actual native DB/content writers ran on 3 hosts; HTTP probes are separately only health/identity"}),flush=True)
 
 if __name__ == "__main__":
     try:
