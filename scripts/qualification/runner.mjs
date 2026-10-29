@@ -235,6 +235,15 @@ try{
             repositoryId:link.evidence.repositoryId}});
       }
       await writeSummary();
+      await run("linked-query-percentiles",npm,["exec","--","tsx",
+        "scripts/qualification/query-suite.ts",
+        "--input="+join(destination,"linked-lifecycle.json"),
+        "--output="+join(destination,"linked-queries.json"),
+        "--samples=30"],{
+          timeout:600,parse:async()=>{
+            const report=await readJSON("linked-queries.json");
+            return {accepted:report.status==="PASSED",queries:report.results};
+          }});
       await run("linked-resource-snapshot",npm,["exec","--","tsx",
         "scripts/qualification/resources.ts",
         "--input="+join(destination,"linked-lifecycle.json"),
@@ -347,10 +356,28 @@ try{
               sampleWarning:"bounded reservoir of genuine operations"};
           }});
     };
+    const querySeed=async(name,seedPath,mode)=>{
+      if(!seedPath)return;
+      await run(name,npm,["exec","--","tsx",
+        "scripts/qualification/query-suite.ts",
+        "--input="+seedPath,
+        "--checkpoint="+join(destination,mode+"-checkpoint.json"),
+        "--output="+join(destination,name+".json"),
+        "--samples=10"],{
+          timeout:7200,parse:async()=>{
+            const report=await readJSON(name+".json");
+            return {accepted:report.status==="PASSED",queries:report.results,
+              revision:report.revision};
+          }});
+    };
     await scale("history-100000","history",100000,deepSeed,36000);
+    await querySeed("queries-history-100000",deepSeed,"history");
     await scale("history-1000000","history",1000000,deepSeed,259200);
+    await querySeed("queries-history-1000000",deepSeed,"history");
     await scale("files-100000","paths",100000,pathSeed,18000);
+    await querySeed("queries-files-100000",pathSeed,"paths");
     await scale("files-1000000","paths",1000000,pathSeed,86400);
+    await querySeed("queries-files-1000000",pathSeed,"paths");
   }
   // A lifecycle report with QUEUED validations or integrations is not an
   // end-to-end completion measurement. Unrun service restart and partition
