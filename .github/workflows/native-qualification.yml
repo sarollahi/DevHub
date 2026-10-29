@@ -52,6 +52,10 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run db:generate && npm run db:deploy
       - run: node --test tests/qualification.test.mjs
+      - name: Compile AWS SSM orchestrator and verify multi-host safety invariants
+        run: |
+          python3 -m py_compile scripts/qualification/aws-live.py
+          node --test tests/qualification-infra.test.mjs
       - name: Real-content smoke and persisted-state inspection
         run: npm run qualification:smoke -- --output=artifacts/qualification/smoke
       - name: Preserve even failed and partial evidence
