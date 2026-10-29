@@ -118,3 +118,37 @@ jobs:
       - name: Container state
         if: always()
         run: docker compose ps
+
+  archived-wal-pitr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEVHUB_FAULT_DRILL: isolated-local-only
+      OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
+      OBJECT_STORE_BUCKET: devhub-objects
+      OBJECT_STORE_REGION: us-east-1
+      OBJECT_STORE_ACCESS_KEY: devhub-local
+      OBJECT_STORE_SECRET_KEY: devhub-local-password-change-in-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Generate database client
+        run: npm run db:generate
+      - name: Start isolated S3 source
+        run: |
+          docker compose up -d --wait minio
+          docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c \
+            'until mc alias set old http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing old/devhub-objects'
+      - name: Restore actual physical backup and archived WAL to a target LSN
+        run: bash scripts/pg-wal-pitr-drill.sh
+      - name: Upload WAL PITR and complete object inventory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archived-wal-pitr
+          path: artifacts/distributed-faults/
+          if-no-files-found: warn
