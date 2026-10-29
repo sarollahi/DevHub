@@ -1254,3 +1254,13 @@ model GitGatewayLease {
   updatedAt    DateTime @default(now())
   @@index([expiresAt])
 }
+
+// Shared tenant-wide API admission buckets: one atomic counter across replicas
+// and repositories, never per-process Redis memory.
+model TenantRateBucket {
+  tenantId    String   @db.Uuid
+  windowStart DateTime
+  count       Int      @default(0)
+  @@id([tenantId, windowStart])
+  @@index([windowStart])
+}

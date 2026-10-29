@@ -285,8 +285,6 @@ export async function mutateReferencesBatch(repositoryId: string, actor: SourceA
   if (!requested.length || requested.length > 32) {
     throw new SourceControlError(422, "INVALID_BATCH", "Git pushes may change 1 to 32 refs");
   }
-  if (actor.gitCredentialId && !gitLeaseToken)
-    throw new SourceControlError(409, "GIT_LEASE_REQUIRED", "Git push must use a fenced gateway session");
   const names = requested.map(x => x.name);
   if (new Set(names).size !== names.length) {
     throw new SourceControlError(422, "DUPLICATE_REFERENCE", "One update per Git ref is allowed");
