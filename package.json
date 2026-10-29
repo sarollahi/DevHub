@@ -53,7 +53,8 @@
     "ops:certify-resources": "tsx scripts/certify-resource-attribution.ts",
     "bench:multi-process": "node scripts/certify-multi-process.mjs",
     "qualification:smoke": "node scripts/qualification/runner.mjs --profile=smoke",
-    "qualification:full": "node scripts/qualification/runner.mjs --profile=full"
+    "qualification:full": "node scripts/qualification/runner.mjs --profile=full",
+    "qualification:baseline": "node scripts/qualification/repeat-baseline.mjs"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",
