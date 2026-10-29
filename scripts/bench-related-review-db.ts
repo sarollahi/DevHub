@@ -16,7 +16,7 @@ const workerCount = Number(option("workers", "32"));
 const concurrency = Number(option("concurrency", "4"));
 const output = option("output", "reports/review-db-" + total + ".json");
 if (![1000, 10000, 100000].includes(total)) throw new Error("--count must be 1000, 10000 or 100000");
-if (!Number.isSafeInteger(workerCount) || workerCount < 0 || workerCount > 128 ||
+if (!Number.isSafeInteger(workerCount) || workerCount < 0 || workerCount > 2000 ||
   !Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new Error("Invalid worker settings");
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 const uuidSuffix = randomBytes(7).toString("hex");
@@ -133,9 +133,13 @@ async function measureWorkerThroughput() {
   const elapsedMs = performance.now() - start;
   if (failures || successes !== workerCount) throw new Error("Real review worker failure: " + failures);
   const indexed = await db.sourceReviewSignal.count({ where: { repositoryId: repository.id } });
+  const completed = await db.sourceReview.findMany({ where: {repositoryId:repository.id,
+    changesetId:{in:queue}}, select: { createdAt:true,indexedAt:true } });
+  const freshness=completed.map(x=>x.indexedAt?x.indexedAt.getTime()-x.createdAt.getTime():NaN);
+  if(freshness.some(x=>!Number.isFinite(x)))throw new Error("Missing index freshness record");
   const output = { count: workerCount, concurrency, successes, failures, elapsedMs,
     throughputChangesPerSecond: successes * 1000 / elapsedMs,
-    reviewLatencyMs: quantile(latencies), indexedSignals: indexed,
+    reviewLatencyMs: quantile(latencies), indexFreshnessFromQueueMs:quantile(freshness), indexedSignals: indexed,
     fullNativeSnapshotRead: false, actualSourceControlWorker: true };
   return output;
 }
