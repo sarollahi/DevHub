@@ -64,7 +64,7 @@ try {
     } });
     report("incomplete_integrated_journal", brokenIntegrations);
     const invalidValidationEvidence = await db.validationTask.count({ where: {
-      state: "SUCCEEDED", signature: null, reusedFromId: null,
+      state: "PASSED", signature: null, reusedFromId: null,
     } });
     report("unsigned_successful_validation_tasks", invalidValidationEvidence, "warning");
     const incompleteQueryIndex = await db.sourceQueryIndexJob.count({ where: {
