@@ -16,6 +16,7 @@ cleanup() {
   docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
+trap 'rc=$?; echo "FAILOVER_DRILL_FAILED line=$LINENO command=$BASH_COMMAND status=$rc" >&2; docker logs --tail 35 "$primary" >&2 2>/dev/null || true; docker logs --tail 35 "$standby" >&2 2>/dev/null || true; exit "$rc"' ERR
 docker network create "$network" >/dev/null
 docker volume create "$volume" >/dev/null
 docker run -d --name "$primary" --network "$network" --network-alias pg-primary \
@@ -26,6 +27,7 @@ for i in $(seq 1 45); do
   sleep 1
 done
 docker exec "$primary" pg_isready -U devhub -d devhub >/dev/null
+echo "primary ready"
 docker exec "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
   -c "CREATE ROLE replica WITH LOGIN REPLICATION PASSWORD 'replica-ci-only';"
 docker exec "$primary" sh -c \
@@ -36,6 +38,7 @@ docker run --rm --network "$network" --user root -v "$volume":/var/lib/postgresq
 docker run --rm --network "$network" --user postgres -v "$volume":/var/lib/postgresql/data \
   -e PGPASSWORD=replica-ci-only postgres:16-alpine \
   pg_basebackup -h pg-primary -U replica -D /var/lib/postgresql/data -Fp -Xs -R -P >/dev/null
+echo "replica basebackup completed"
 # Add the application_name used for synchronous_commit=remote_apply.
 docker run --rm --network "$network" --user postgres -v "$volume":/var/lib/postgresql/data \
   postgres:16-alpine sh -c \
@@ -45,7 +48,7 @@ docker run -d --rm --name "$standby" --network "$network" --network-alias pg-sta
 for i in $(seq 1 60); do
   state="$(docker exec "$primary" psql -U devhub -d devhub -Atc \
     "SELECT COUNT(*) FROM pg_stat_replication WHERE application_name='standby1' AND state='streaming'" 2>/dev/null || echo 0)"
-  if [[ "$state" == 1 ]]; then break; fi
+  if [[ "$state" == 1 ]]; then echo "physical standby streaming"; break; fi
   sleep 1
 done
 [[ "$state" == 1 ]] || { echo "Physical standby never joined streaming state" >&2; exit 1; }
