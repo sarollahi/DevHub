@@ -31,10 +31,10 @@ docker run -d --rm --name "$minio" -p 127.0.0.1:19000:9000 \
   -e MINIO_ROOT_PASSWORD=devhub-local-password-change-in-production \
   cgr.dev/chainguard/minio:latest server /data >/dev/null
 for i in $(seq 1 45); do
-  if docker exec "$pg" pg_isready -U devhub -d devhub >/dev/null 2>&1; then break; fi
+  if docker exec "$pg" pg_isready -h 127.0.0.1 -U devhub -d devhub >/dev/null 2>&1; then break; fi
   sleep 1
 done
-docker exec "$pg" pg_isready -U devhub -d devhub >/dev/null
+docker exec "$pg" pg_isready -h 127.0.0.1 -U devhub -d devhub >/dev/null
 docker exec -i "$pg" pg_restore -U devhub -d devhub --no-owner --no-acl < "$work/db.dump"
 # Separate S3 process and bucket: copy actual stored objects, not fixture mocks.
 docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c '
