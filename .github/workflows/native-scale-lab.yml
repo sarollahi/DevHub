@@ -1,0 +1,75 @@
+name: True native million-scale lab (manual, single host)
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: "Run 100k or 1m real native revisions/files. May consume significant CI minutes."
+        type: choice
+        options: ["100000","1000000"]
+        default: "100000"
+      confirmation:
+        description: "Enter RUN_ISOLATED_SCALE_AND_ACCEPT_COST"
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  scale:
+    if: inputs.confirmation == 'RUN_ISOLATED_SCALE_AND_ACCEPT_COST'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [history, paths]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: devhub, POSTGRES_PASSWORD: devhub, POSTGRES_DB: devhub }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U devhub -d devhub"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://devhub:devhub@127.0.0.1:5432/devhub?schema=public
+      REDIS_URL: redis://127.0.0.1:6379
+      APP_SECRET: disposable-native-scale-lab-only-no-production
+      DEVHUB_QUALIFICATION_ISOLATED: YES
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22.18", cache: npm }
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run db:generate && npm run db:deploy
+      - name: Create genuine verified content and scoped agent in the isolated DB
+        run: |
+          mkdir -p artifacts/qualification/scale-${{ matrix.mode }}
+          npx tsx scripts/qualification/seed.ts --output=artifacts/qualification/scale-${{ matrix.mode }}/seed.json
+      - name: Execute and checkpoint real 100,000/1,000,000 native operations
+        env:
+          SCALE_COUNT: ${{ inputs.scale }}
+          SCALE_MODE: ${{ matrix.mode }}
+        run: |
+          set -Eeuo pipefail
+          prefix="artifacts/qualification/scale-${SCALE_MODE}"
+          test "$SCALE_COUNT" = "100000" -o "$SCALE_COUNT" = "1000000"
+          npx tsx scripts/qualification/scale.ts \
+            --seed="$prefix/seed.json" \
+            --checkpoint="$prefix/checkpoint.json" \
+            --report="$prefix/progress.jsonl" \
+            --mode="$SCALE_MODE" --count="$SCALE_COUNT"
+      - name: Preserve checkpoints, raw metrics and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-true-scale-${{ matrix.mode }}-${{ inputs.scale }}-${{ github.run_id }}
+          path: artifacts/qualification/scale-${{ matrix.mode }}/
+          retention-days: 30
+          if-no-files-found: warn
