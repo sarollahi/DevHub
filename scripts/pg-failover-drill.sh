@@ -60,36 +60,41 @@ docker exec "$primary" psql -U devhub -d devhub -c "SELECT pg_reload_conf()" >/d
 docker exec "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
   -c "CREATE TABLE public.failover_sentinel (id integer PRIMARY KEY, payload text NOT NULL);" \
   -c "INSERT INTO public.failover_sentinel VALUES (1, 'durable-before-promotion');" >/dev/null
-# A real asymmetric network partition while the old primary is alive:
-# synchronous ack must fail closed, and the uncommitted sentinel must not
-# reach either side. Then reconnect before choosing the new fenced writer.
+# Exercise a genuine half-open network link. PostgreSQL can locally WAL-log
+# an in-flight synchronous commit *before* standby acknowledgement, so the
+# only sound invariant is: NO successful client acknowledgement during the
+# partition. Never infer a rollback from statement_timeout/connection loss.
 partition_start_ms="$(date +%s%3N)"
 docker network disconnect -f "$network" "$standby"
-if docker exec -e PGOPTIONS="-c statement_timeout=2500" "$primary" \
-  psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
-  -c "INSERT INTO public.failover_sentinel VALUES (99,'must-not-commit');" >/dev/null 2>&1; then
-  echo "UNSAFE: acknowledged a write without required synchronous standby" >&2; exit 1
+docker exec -d "$primary" sh -c \
+  "psql -U devhub -d devhub -v ON_ERROR_STOP=1 -c \"INSERT INTO public.failover_sentinel VALUES (99,'commit-after-standby-ack');\" > /tmp/devhub-ci-sync.out 2>&1; echo \\\$? > /tmp/devhub-ci-sync.exit"
+sleep 3
+if docker exec "$primary" test -f /tmp/devhub-ci-sync.exit; then
+  echo "Synchronous commit acknowledged while standby network unavailable" >&2; exit 1
 fi
 partition_block_ms="$(( $(date +%s%3N) - partition_start_ms ))"
-blocked_count="$(docker exec "$primary" psql -U devhub -d devhub -Atc \
-  'SELECT COUNT(*) FROM public.failover_sentinel WHERE id=99')"
-[[ "$blocked_count" == 0 ]] || { echo "Unacknowledged partition write persisted"; exit 1; }
 docker network connect --alias pg-standby "$network" "$standby"
-# Force release of any half-open replication TCP socket after a hard network cut.
-# The volume is persistent and the restarted standby must replay verified WAL.
+# Old WAL-sender TCP sockets can stay half-open indefinitely after a hard
+# partition; close them explicitly before rejoining the same replica.
+docker exec "$primary" psql -U devhub -d devhub -Atc \
+  "SELECT pg_terminate_backend(pid) FROM pg_stat_replication WHERE application_name='standby1'" >/dev/null
 docker restart "$standby" >/dev/null
-for i in $(seq 1 40); do
+for i in $(seq 1 45); do
   joined="$(docker exec "$primary" psql -U devhub -d devhub -Atc \
     "SELECT COUNT(*) FROM pg_stat_replication WHERE application_name='standby1' AND state='streaming'" 2>/dev/null || echo 0)"
   if [[ "$joined" == 1 ]]; then break; fi
   sleep 1
 done
 [[ "$joined" == 1 ]] || { echo "Partition recovery did not resume replication"; exit 1; }
-docker exec -e PGOPTIONS="-c statement_timeout=5000" "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
-  -c "INSERT INTO public.failover_sentinel VALUES (3,'after-rejoin');" >/dev/null
+for i in $(seq 1 35); do
+  if docker exec "$primary" test -f /tmp/devhub-ci-sync.exit; then break; fi
+  sleep 1
+done
+[[ "$(docker exec "$primary" cat /tmp/devhub-ci-sync.exit 2>/dev/null || echo 99)" == 0 ]] ||
+  { echo "Sync commit did not finish safely after restored connectivity"; exit 1; }
 [[ "$(docker exec "$standby" psql -U devhub -d devhub -Atc \
-  'SELECT COUNT(*) FROM public.failover_sentinel WHERE id=3')" == 1 ]] ||
-  { echo "Rejoined replica lost acknowledged committed write"; exit 1; }
+  'SELECT COUNT(*) FROM public.failover_sentinel WHERE id=99')" == 1 ]] ||
+  { echo "Rejoined replica did not apply acknowledged commit"; exit 1; }
 before="$(docker exec "$primary" psql -U devhub -d devhub -Atc \
   "SELECT pg_current_wal_lsn()")"
 standby_seen="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
