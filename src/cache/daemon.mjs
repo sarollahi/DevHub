@@ -42,7 +42,8 @@ export class ObjectCache {
     this.options = {
       maxDiskBytes: 512 * 1024 * 1024, maxObjectBytes: 16 * 1024 * 1024,
       maxEntries: 20000, maxInflight: 8, maxQueued: 32,
-      maxReaders: 32, maxReaderQueue: 128, timeoutMs: 12000, maxOriginRetries: 1, maxRegionalRetries: 0,
+      maxReaders: 32, maxReaderQueue: 128, timeoutMs: 12000, evictionWaitMs: 1500,
+      maxOriginRetries: 1, maxRegionalRetries: 0,
       failureThreshold: 3, breakerBaseMs: 1000, breakerMaxMs: 60000, ...options,
     };
     const o = this.options;
@@ -50,6 +51,8 @@ export class ObjectCache {
     if (o.port && (!o.accessToken || o.accessToken.length < 24)) throw new Error('TCP cache requires a service access token');
     if (!o.accessToken && (o.originToken || o.originUrl.startsWith('https://')) && o.requireClientAuthorization === false)
       throw new Error('Service credential requires per-caller authorization checks');
+    if (!Number.isSafeInteger(o.evictionWaitMs) || o.evictionWaitMs < 0 || o.evictionWaitMs > 30000)
+      throw new Error('Eviction reader-drain wait must be within 0..30000ms');
     if (![o.maxOriginRetries, o.maxRegionalRetries].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 3))
       throw new Error('Retry budgets must be between zero and three');
     // TCP regional instances trust only a configured service-to-service bearer.
@@ -218,10 +221,25 @@ export class ObjectCache {
     await Promise.all([rm(p.meta, { force: true }), rm(p.bin, { force: true })]);
   }
   async evictTo(additionalBytes, additionalEntries) {
-    while (this.bytes + this.reserved + additionalBytes > this.options.maxDiskBytes - this.resumeBudgetBytes || this.entries.size + additionalEntries > this.options.maxEntries) {
-      const victim = [...this.entries].filter(([k]) => !this.activeReaders.has(k) && !this.flights.has(k)).sort((a, b) => a[1].time - b[1].time)[0];
-      if (!victim) throw Object.assign(new Error('Cache is full'), { status: 503 });
-      await this.remove(victim[0]); this.stats.evictions++;
+    // Client response 'end' can precede the server-side pipeline's finally
+    // block that releases activeReaders. Under a tight disk budget, rejecting
+    // a new immutable object immediately produces a spurious HTTP 503 even
+    // though the previous reader is about to finish. Wait *boundedly* for a
+    // safe victim; never evict an in-flight object or an active reader.
+    const deadline = Date.now() + this.options.evictionWaitMs;
+    while (this.bytes + this.reserved + additionalBytes > this.options.maxDiskBytes - this.resumeBudgetBytes ||
+           this.entries.size + additionalEntries > this.options.maxEntries) {
+      const victim = [...this.entries]
+        .filter(([k]) => !this.activeReaders.has(k) && !this.flights.has(k))
+        .sort((a, b) => a[1].time - b[1].time)[0];
+      if (victim) {
+        await this.remove(victim[0]);
+        this.stats.evictions++;
+        continue;
+      }
+      if (Date.now() >= deadline)
+        throw Object.assign(new Error('Cache is full after bounded reader drain'), { status: 503 });
+      await new Promise(resolve => setTimeout(resolve, 20));
     }
   }
   async upstream(url, token, circuit, counter, assumedKind) {
