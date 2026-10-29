@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { db } from "../src/lib/prisma";
 import { verifyBlob } from "../src/object-store/service";
@@ -21,8 +20,6 @@ const record = (check: string, id?: string, error?: unknown) => {
     ...(error ? { message: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200) } : {}),
   });
 };
-const count = async (sql: TemplateStringsArray, ...values: unknown[]) =>
-  db.$queryRawUnsafe<Array<{ total: bigint }>>(sql.join("?"), ...values);
 
 try {
   const integrity = await db.$queryRaw<Array<{ name: string; total: bigint }>>`
@@ -40,7 +37,7 @@ try {
     WHERE op."objectId" IS NOT NULL AND g."objectId" IS NULL
     UNION ALL
     SELECT 'missing_snapshot_root', COUNT(*)::bigint
-    FROM "SourceSnapshotRoot" r LEFT JOIN "SourceSnapshotNode" n ON n.id=r."rootNodeId"
+    FROM "SourceSnapshotRoot" r LEFT JOIN "SourceSnapshotNode" n ON n.id=r."rootId"
     WHERE n.id IS NULL
     UNION ALL
     SELECT 'missing_external_record', COUNT(*)::bigint
