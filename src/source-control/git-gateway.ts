@@ -12,6 +12,18 @@ import { withGitLease } from "./git-lease";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const transport = /^\/git\/([0-9a-f-]{36})\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
 const maxRequestBytes = Number(process.env.GIT_INTEROP_MAX_PUSH_BYTES || 2147483648);
+
+// Each gateway owns a private on-node Git projection. This mutex protects
+// only its disposable local directory, never authoritative repository state.
+const localLocks = new Map<string, Promise<void>>();
+function localExclusive<T>(repositoryId: string, task: () => Promise<T>): Promise<T> {
+  const previous = localLocks.get(repositoryId) ?? Promise.resolve();
+  const active = previous.catch(() => undefined).then(task);
+  const tail = active.then(() => undefined, () => undefined);
+  localLocks.set(repositoryId, tail);
+  void tail.then(() => { if (localLocks.get(repositoryId) === tail) localLocks.delete(repositoryId); });
+  return active;
+}
 function credentialFromRequest(req: IncomingMessage): string | null {
   const header = req.headers.authorization;
   if (!header || header.length > 4096) return null;
@@ -168,15 +180,25 @@ export function createGitGateway() {
         throw new SourceControlError(403, "TLS_REQUIRED", "Git authentication requires HTTPS");
       }
       const identity = await authenticate(req, repositoryId, writing);
-      await withGitLease(repositoryId, async (leaseToken) => {
-        const dir = await gitCacheDirectory(repositoryId);
-        await installHooks(dir);
-        await syncGitProjection(repositoryId, identity.actor, dir);
-        res.setHeader("Content-Type", `application/x-${service}-${isDiscovery ? "advertisement" : "result"}`);
-        res.setHeader("Cache-Control", "no-cache, no-store, max-age=0");
-        res.setHeader("Pragma", "no-cache");
-        await serveGitRpc(req, res, dir, service, isDiscovery, identity, repositoryId, leaseToken);
-      }, () => req.destroy(new Error("Git gateway lease lost")));
+      await localExclusive(repositoryId, async () => {
+        const serve = async (leaseToken: string) => {
+          const dir = await gitCacheDirectory(repositoryId);
+          await installHooks(dir);
+          await syncGitProjection(repositoryId, identity.actor, dir);
+          res.setHeader("Content-Type", `application/x-${service}-${isDiscovery ? "advertisement" : "result"}`);
+          res.setHeader("Cache-Control", "no-cache, no-store, max-age=0");
+          res.setHeader("Pragma", "no-cache");
+          await serveGitRpc(req, res, dir, service, isDiscovery, identity, repositoryId, leaseToken);
+        };
+        // Independent gateway replicas may serve cache-only reads concurrently.
+        // Only native-writing push sessions require the cross-replica DB lease.
+        if (writing) {
+          await withGitLease(repositoryId, serve,
+            () => req.destroy(new Error("Git gateway lease lost")));
+        } else {
+          await serve("");
+        }
+      });
     } catch (error) {
       console.error("Git interoperability gateway", error);
       replyError(res, error);
