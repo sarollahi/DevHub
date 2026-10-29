@@ -155,6 +155,18 @@ try{
         note:"Native in-process service calls, not HTTP or final integration"};
     }});
   if(life?.status==="PASSED"){
+    await run("run-real-index-and-review-workers",npm,["exec","--","tsx",
+      "scripts/qualification/drain.ts",
+      "--input="+join(destination,lifecycleFile),
+      "--output="+join(destination,"worker-drain.json"),
+      "--seconds="+(full?7200:120),
+      "--parallel="+(full?8:4)],{
+        timeout:full?7300:130,parse:async()=>{
+          const data=await readJSON("worker-drain.json");
+          return {accepted:data.status==="PASSED",
+            actualWorkerClaims:data.actualWorkerClaims,
+            durableStates:data.persisted};
+        }});
     await run("durable-audit",npm,["exec","--","tsx","scripts/qualification/evidence.ts",
       "--input="+join(destination,lifecycleFile),
       "--output="+join(destination,"durable-evidence.json")],{
