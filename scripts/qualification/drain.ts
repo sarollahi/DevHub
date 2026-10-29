@@ -29,8 +29,9 @@ const snapshot=async()=>{
     db.sourceQueryIndexJob.groupBy({by:["state"],where:{repositoryId},_count:{_all:true}}),
     db.sourceReview.groupBy({by:["state"],where:{repositoryId},_count:{_all:true}}),
   ]);
-  const counts=(rows:typeof indices)=>Object.fromEntries(rows.map(r=>[r.state,r._count._all]));
-  return {published,indices:counts(indices),reviews:counts(reviews as typeof indices)};
+  const counts=(rows: Array<{state: string; _count: {_all: number}}>)=>
+    Object.fromEntries(rows.map(r=>[r.state,r._count._all]));
+  return {published,indices:counts(indices),reviews:counts(reviews)};
 };
 try{
   let current=await snapshot();
