@@ -122,7 +122,16 @@ async function recordArtifacts(task:Claimed,root:string) {
     }
   }
   await visit(root);
-  if(pending.length) await db.validationArtifact.createMany({data:pending});
+  if(pending.length) await db.$transaction(async tx => {
+    // Publishing artifacts must be fenced by a live lease. A process that
+    // survived past expiry cannot append evidence after another worker claims.
+    const owned = await tx.$queryRaw<Array<{id: string}>>`
+      SELECT id FROM "ValidationTask" WHERE id=${task.id}::uuid
+        AND "leaseToken"=${task.leaseToken}::uuid
+        AND state='RUNNING' AND "leaseUntil">now() FOR UPDATE`;
+    if (!owned.length) throw Error("Validation lease expired before artifact publication");
+    await tx.validationArtifact.createMany({data:pending});
+  });
   return digest(JSON.stringify(hashes.sort(([a],[b])=>a.localeCompare(b))));
 }
 async function capture(task:Claimed,source:string,artifacts:string,isCancelled:()=>boolean) {
@@ -148,7 +157,7 @@ async function capture(task:Claimed,source:string,artifacts:string,isCancelled:(
     length+=Buffer.byteLength(content,"utf8");hash.update(content);sequence++;
     const index=sequence;
     chain=chain.then(async()=>{
-      const owned=await db.validationTask.count({where:{id:task.id,leaseToken:task.leaseToken,state:"RUNNING"}});
+      const owned=await db.validationTask.count({where:{id:task.id,leaseToken:task.leaseToken,state:"RUNNING",leaseUntil:{gt:new Date()}}});
       if(owned) await db.validationLogChunk.create({data:{taskId:task.id,attempt:task.attempt,sequence:index,content}});
     });
   }
@@ -197,7 +206,7 @@ export async function executeTask(task:Claimed) {
         const signature=signTask(signed);
         await db.$transaction(async tx=>{
           const owned=await tx.validationTask.findFirst({where:{
-            id:task.id,state:"RUNNING",leaseToken:task.leaseToken}});
+            id:task.id,state:"RUNNING",leaseToken:task.leaseToken,leaseUntil:{gt:new Date()}}});
           if(!owned)return;
           if(logs.length)await tx.validationLogChunk.createMany({data:logs.map(x=>({
             taskId:task.id,attempt:task.attempt,sequence:x.sequence,content:x.content
