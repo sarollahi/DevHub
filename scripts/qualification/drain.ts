@@ -47,7 +47,7 @@ try{
     current=await snapshot();
     if(current.published>0&&current.indices.SUCCEEDED===current.published&&
         current.reviews.COMPLETED===current.published){
-      status="PASSED";break;
+      status=thrown===0?"PASSED":"RECOVERED_WITH_ERRORS";break;
     }
     if(!batch.inspected&&!reviews.some(r=>r.status==="fulfilled"&&r.value))await sleep(250);
   }
