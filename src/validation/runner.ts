@@ -141,7 +141,7 @@ async function capture(task:Claimed,source:string,artifacts:string,isCancelled:(
     "--cap-drop=ALL","--security-opt=no-new-privileges","--pids-limit=128",
     "--memory=1024m","--cpus=1.5","--user=65534:65534","--init",
     "--tmpfs","/work:rw,exec,nosuid,nodev,size=640m",
-    "--tmpfs","/tmp:rw,nosuid,nodev,size=96m",
+    "--tmpfs","/tmp:rw,nosuid,nodev,size=512m",
     "--mount","type=bind,src="+source+",dst=/source,readonly",
     "--mount","type=bind,src="+artifacts+",dst=/artifacts",
     "--env","HOME=/tmp","--env","npm_config_cache=/tmp/npm-cache",
