@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
 import { type NativeAssessment, type Region } from "./analysis";
-import { classifyCandidate, vectorBuckets, type Relation, type Signal, type SignalKind, RELATED_PREVIEW_LIMIT } from "./index-algorithms";
+import { classifyCandidate, vectorBuckets, configuredSemanticThreshold, type Relation, type Signal, type SignalKind, RELATED_PREVIEW_LIMIT } from "./index-algorithms";
 
 const limits: Record<SignalKind, number> = {
   EXACT: 64, EQUIVALENT: 64, CONTENT: 32, PATH: 96,
@@ -70,7 +70,7 @@ export async function discoverRelated(input: {
       changesetId:candidate.changesetId,fingerprint:candidate.fingerprint,
       equivalenceHash:candidate.equivalenceHash,regions:regions(candidate.regions),
       embedding:vector(candidate.embedding),signals:hits.get(candidate.changesetId)??new Set(),
-    },input.embedding);
+    },input.embedding,configuredSemanticThreshold());
     return result?[result]:[];
   }).sort((a,b)=>b.score-a.score||a.changesetId.localeCompare(b.changesetId));
   return {relations:matches.slice(0,RELATED_PREVIEW_LIMIT),
