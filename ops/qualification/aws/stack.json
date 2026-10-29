@@ -1,0 +1,447 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Disposable 3-host DevHub qualification lab, no inbound internet, cross-AZ APIs, auto-shutdown within 150 minutes",
+  "Parameters": {
+    "RunId": {
+      "Type": "String",
+      "AllowedPattern": "^[0-9]{1,20}$"
+    },
+    "InstanceType": {
+      "Type": "String",
+      "Default": "m7i.large",
+      "AllowedValues": [
+        "m7i.large",
+        "m7i.xlarge",
+        "m7i.2xlarge",
+        "m6i.large",
+        "m6i.xlarge"
+      ]
+    },
+    "VolumeGiB": {
+      "Type": "Number",
+      "Default": 80,
+      "MinValue": 60,
+      "MaxValue": 500
+    }
+  },
+  "Resources": {
+    "Network": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": "10.47.0.0/16",
+        "EnableDnsSupport": true,
+        "EnableDnsHostnames": true,
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "disposable-devhub-qualification"
+          }
+        ]
+      }
+    },
+    "Gateway": {
+      "Type": "AWS::EC2::InternetGateway"
+    },
+    "GatewayAttachment": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Network"
+        },
+        "InternetGatewayId": {
+          "Ref": "Gateway"
+        }
+      }
+    },
+    "PublicRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Network"
+        }
+      }
+    },
+    "DefaultRoute": {
+      "Type": "AWS::EC2::Route",
+      "DependsOn": "GatewayAttachment",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PublicRouteTable"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "Gateway"
+        }
+      }
+    },
+    "SubnetA": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Network"
+        },
+        "CidrBlock": "10.47.1.0/24",
+        "AvailabilityZone": {
+          "Fn::Select": [
+            0,
+            {
+              "Fn::GetAZs": ""
+            }
+          ]
+        },
+        "MapPublicIpOnLaunch": true
+      }
+    },
+    "RouteA": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "SubnetA"
+        },
+        "RouteTableId": {
+          "Ref": "PublicRouteTable"
+        }
+      }
+    },
+    "SubnetB": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Network"
+        },
+        "CidrBlock": "10.47.2.0/24",
+        "AvailabilityZone": {
+          "Fn::Select": [
+            1,
+            {
+              "Fn::GetAZs": ""
+            }
+          ]
+        },
+        "MapPublicIpOnLaunch": true
+      }
+    },
+    "RouteB": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "SubnetB"
+        },
+        "RouteTableId": {
+          "Ref": "PublicRouteTable"
+        }
+      }
+    },
+    "ClusterSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "No inbound internet traffic, only private VPC hosts",
+        "VpcId": {
+          "Ref": "Network"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ]
+      }
+    },
+    "PrivateClusterTraffic": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "ClusterSecurityGroup"
+        },
+        "IpProtocol": "-1",
+        "SourceSecurityGroupId": {
+          "Ref": "ClusterSecurityGroup"
+        },
+        "Description": "Traffic only among instances in this disposable security group"
+      }
+    },
+    "InstanceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        ],
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "disposable-devhub-qualification"
+          }
+        ]
+      }
+    },
+    "InstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Roles": [
+          {
+            "Ref": "InstanceRole"
+          }
+        ]
+      }
+    },
+    "Control": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": [
+        "RouteA",
+        "DefaultRoute"
+      ],
+      "Properties": {
+        "InstanceType": {
+          "Ref": "InstanceType"
+        },
+        "ImageId": "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}",
+        "SubnetId": {
+          "Ref": "SubnetA"
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "ClusterSecurityGroup"
+          }
+        ],
+        "IamInstanceProfile": {
+          "Ref": "InstanceProfile"
+        },
+        "InstanceInitiatedShutdownBehavior": "terminate",
+        "MetadataOptions": {
+          "HttpTokens": "required",
+          "HttpEndpoint": "enabled"
+        },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/xvda",
+            "Ebs": {
+              "VolumeSize": {
+                "Ref": "VolumeGiB"
+              },
+              "VolumeType": "gp3",
+              "DeleteOnTermination": true,
+              "Encrypted": true
+            }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Sub": "#!/bin/bash\nset -euxo pipefail\ndnf install -y docker git jq nodejs22 nodejs22-npm python3\nsystemctl enable --now docker amazon-ssm-agent\nshutdown -h +150\n"
+          }
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "devhub-${RunId}-driver"
+            }
+          },
+          {
+            "Key": "Purpose",
+            "Value": "disposable-devhub-qualification"
+          }
+        ]
+      }
+    },
+    "ApiA": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": [
+        "RouteA",
+        "DefaultRoute"
+      ],
+      "Properties": {
+        "InstanceType": {
+          "Ref": "InstanceType"
+        },
+        "ImageId": "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}",
+        "SubnetId": {
+          "Ref": "SubnetA"
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "ClusterSecurityGroup"
+          }
+        ],
+        "IamInstanceProfile": {
+          "Ref": "InstanceProfile"
+        },
+        "InstanceInitiatedShutdownBehavior": "terminate",
+        "MetadataOptions": {
+          "HttpTokens": "required",
+          "HttpEndpoint": "enabled"
+        },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/xvda",
+            "Ebs": {
+              "VolumeSize": {
+                "Ref": "VolumeGiB"
+              },
+              "VolumeType": "gp3",
+              "DeleteOnTermination": true,
+              "Encrypted": true
+            }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Sub": "#!/bin/bash\nset -euxo pipefail\ndnf install -y docker git jq nodejs22 nodejs22-npm python3\nsystemctl enable --now docker amazon-ssm-agent\nshutdown -h +150\n"
+          }
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "devhub-${RunId}-api-a"
+            }
+          },
+          {
+            "Key": "Purpose",
+            "Value": "disposable-devhub-qualification"
+          }
+        ]
+      }
+    },
+    "ApiB": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": [
+        "RouteB",
+        "DefaultRoute"
+      ],
+      "Properties": {
+        "InstanceType": {
+          "Ref": "InstanceType"
+        },
+        "ImageId": "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}",
+        "SubnetId": {
+          "Ref": "SubnetB"
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "ClusterSecurityGroup"
+          }
+        ],
+        "IamInstanceProfile": {
+          "Ref": "InstanceProfile"
+        },
+        "InstanceInitiatedShutdownBehavior": "terminate",
+        "MetadataOptions": {
+          "HttpTokens": "required",
+          "HttpEndpoint": "enabled"
+        },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/xvda",
+            "Ebs": {
+              "VolumeSize": {
+                "Ref": "VolumeGiB"
+              },
+              "VolumeType": "gp3",
+              "DeleteOnTermination": true,
+              "Encrypted": true
+            }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Sub": "#!/bin/bash\nset -euxo pipefail\ndnf install -y docker git jq nodejs22 nodejs22-npm python3\nsystemctl enable --now docker amazon-ssm-agent\nshutdown -h +150\n"
+          }
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "devhub-${RunId}-api-b"
+            }
+          },
+          {
+            "Key": "Purpose",
+            "Value": "disposable-devhub-qualification"
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "DriverId": {
+      "Value": {
+        "Ref": "Control"
+      }
+    },
+    "ApiAId": {
+      "Value": {
+        "Ref": "ApiA"
+      }
+    },
+    "ApiBId": {
+      "Value": {
+        "Ref": "ApiB"
+      }
+    },
+    "DriverPrivateIp": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Control",
+          "PrivateIp"
+        ]
+      }
+    },
+    "ApiAPrivateIp": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ApiA",
+          "PrivateIp"
+        ]
+      }
+    },
+    "ApiBPrivateIp": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ApiB",
+          "PrivateIp"
+        ]
+      }
+    },
+    "DriverZone": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Control",
+          "AvailabilityZone"
+        ]
+      }
+    },
+    "ApiAZone": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ApiA",
+          "AvailabilityZone"
+        ]
+      }
+    },
+    "ApiBZone": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ApiB",
+          "AvailabilityZone"
+        ]
+      }
+    },
+    "VpcId": {
+      "Value": {
+        "Ref": "Network"
+      }
+    }
+  }
+}
