@@ -1,0 +1,111 @@
+name: Provision and qualify disposable AWS multi-host lab
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type PROVISION_ISOLATED_AWS_AND_ACCEPT_COST to create billable EC2 resources"
+        required: true
+        type: string
+      instance_type:
+        description: "Bounded EC2 instance size (3 hosts, in 2 AZs)"
+        required: true
+        type: choice
+        options: [m7i.large, m7i.xlarge, m7i.2xlarge, m6i.large, m6i.xlarge]
+        default: m7i.large
+      changesets_per_client:
+        description: "Real native revisions per process (3 independent clients; this is a smoke baseline)"
+        required: true
+        type: choice
+        options: ["240", "500", "1000"]
+        default: "240"
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  provision-and-qualify:
+    if: inputs.confirmation == 'PROVISION_ISOLATED_AWS_AND_ACCEPT_COST'
+    # Configure AWS role and protected environment once. No long-lived AWS keys.
+    environment: devhub-performance-isolated
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      STACK_NAME: devhub-qualification-${{ github.run_id }}
+      AWS_REGION: ${{ vars.DEVHUB_PERF_AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.DEVHUB_PERF_AWS_ROLE_ARN }}
+      DEVHUB_QUALIFICATION_ISOLATED: YES
+      DEVHUB_QUALIFICATION_APPROVAL: PROVISION_ISOLATED_AWS_AND_ACCEPT_COST
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse missing AWS OIDC authorization
+        run: |
+          test -n "$AWS_ROLE_ARN"
+          test -n "$AWS_REGION"
+          test "$DEVHUB_QUALIFICATION_APPROVAL" = "PROVISION_ISOLATED_AWS_AND_ACCEPT_COST"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+      - name: Exchange GitHub OIDC for scoped, temporary AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DEVHUB_PERF_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.DEVHUB_PERF_AWS_REGION }}
+          role-session-name: devhub-qualification-${{ github.run_id }}
+      - name: Validate disposable AWS CloudFormation template
+        run: |
+          python3 -m json.tool ops/qualification/aws/stack.json > /dev/null
+          aws cloudformation validate-template --template-body file://ops/qualification/aws/stack.json
+      - name: Provision three independent hosts in two availability zones
+        run: |
+          aws cloudformation deploy \
+            --stack-name "$STACK_NAME" \
+            --template-file ops/qualification/aws/stack.json \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "RunId=${{ github.run_id }}" \
+              "InstanceType=${{ inputs.instance_type }}" \
+              "VolumeGiB=80" \
+            --tags Purpose=disposable-devhub-qualification GitHubRun="${{ github.run_id }}"
+      - name: Launch and attest real cross-AZ APIs and native source-control load
+        env:
+          CHANGES: ${{ inputs.changesets_per_client }}
+        run: |
+          mkdir -p artifacts/qualification/aws
+          python3 scripts/qualification/aws-live.py \
+            --stack "$STACK_NAME" \
+            --sha "$GITHUB_SHA" \
+            --changesets "$CHANGES" \
+            --evidence artifacts/qualification/aws
+      - name: Retrieve raw measurement evidence from this stack's private S3 bucket
+        if: always()
+        run: |
+          set +e
+          BUCKET="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].Outputs[?OutputKey==`EvidenceBucket`].OutputValue|[0]' --output text)"
+          if [ -n "$BUCKET" ] && [ "$BUCKET" != "None" ]; then
+            mkdir -p artifacts/qualification/aws/raw
+            aws s3 sync "s3://$BUCKET/multi-host/" artifacts/qualification/aws/raw/
+          fi
+      - name: Archive independent cross-AZ metrics and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: actual-aws-multi-host-${{ github.run_id }}
+          path: artifacts/qualification/aws/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Destroy every provisioned resource, including all stored evidence
+        if: always()
+        run: |
+          set +e
+          BUCKET="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].Outputs[?OutputKey==`EvidenceBucket`].OutputValue|[0]' --output text)"
+          if [ -n "$BUCKET" ] && [ "$BUCKET" != "None" ]; then
+            aws s3 rm "s3://$BUCKET/" --recursive
+          fi
+          aws cloudformation delete-stack --stack-name "$STACK_NAME"
+          aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+          result=$?
+          if [ "$result" -ne 0 ]; then
+            echo "::error::Stack teardown failed; immediately remove $STACK_NAME in AWS."
+          fi
+          exit "$result"
