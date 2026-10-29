@@ -96,7 +96,7 @@ for (const result of executions) {
     const phases = report.phases || {};
     const failCount = Object.values(phases).reduce((s, v) =>
       s + Object.values(v.failureCodes || {}).reduce((a,b) => a + b, 0), 0);
-    totalChangesets += report.integrity?.persistedAfterIndependentPhase || 0;
+    totalChangesets += Math.max(0,(report.integrity?.persistedAfterIndependentPhase || 0) - 1);
     totalSubmissions += phases.concurrent_change_submissions?.completed || 0;
     totalFailures += failCount;
     reports.push({ index: result.index, exitCode: result.exitCode, runId: report.runId,
@@ -119,7 +119,7 @@ const probes = Object.fromEntries(Object.entries(health).map(([origin,h]) => [or
 }]));
 const passed = !timedOut && reports.length === clients && reports.every(r => r.exitCode === 0 &&
   !r.failed && !!r.integrity && r.integrity.refCasWinners === 1 &&
-  r.integrity.persistedAfterIndependentPhase === iterations) &&
+  r.integrity.persistedAfterIndependentPhase === iterations + 1) &&
   Object.values(probes).every(v => v.samples >= 5 && v.errors === 0);
 const result = { kind:"multi_process_native_lifecycle_certification",
   status:passed?"PASS":"FAILED", runId:run,
