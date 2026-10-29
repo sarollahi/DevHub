@@ -1,0 +1,96 @@
+# Single-host, isolated multi-process repro, NOT a multi-node production certificate.
+# Require DEVHUB_QUALIFICATION_ISOLATED=YES and a disposable host before use.
+name: devhub-qualification
+x-app: &app
+  build:
+    context: ../..
+    dockerfile: ops/qualification/Dockerfile
+  restart: "no"
+  environment: &runtime
+    DATABASE_URL: postgresql://qual:qual@db:5432/devhub?schema=public
+    REDIS_URL: redis://redis:6379
+    APP_SECRET: ${DEVHUB_QUALIFICATION_APP_SECRET:?set-only-in-disposable-env}
+    OBJECT_STORE_ENDPOINT: http://minio:9000
+    OBJECT_STORE_REGION: us-east-1
+    OBJECT_STORE_BUCKET: devhub-qualification
+    OBJECT_STORE_ACCESS_KEY: ${DEVHUB_QUALIFICATION_STORAGE_USER:?required}
+    OBJECT_STORE_SECRET_KEY: ${DEVHUB_QUALIFICATION_STORAGE_PASSWORD:?required}
+    VALIDATION_NODE_IMAGE: ${VALIDATION_NODE_IMAGE:-}
+    VALIDATION_SCAN_IMAGE: ${VALIDATION_SCAN_IMAGE:-}
+    VALIDATION_SECRETS_IMAGE: ${VALIDATION_SECRETS_IMAGE:-}
+    VALIDATION_SIGNING_PRIVATE_KEY: ${VALIDATION_SIGNING_PRIVATE_KEY:-}
+    VALIDATION_SIGNING_PUBLIC_KEY: ${VALIDATION_SIGNING_PUBLIC_KEY:-}
+    DEVHUB_QUALIFICATION_ISOLATED: ${DEVHUB_QUALIFICATION_ISOLATED:?must-be-YES}
+  depends_on:
+    db: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    minio-init: { condition: service_completed_successfully }
+services:
+  db:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      POSTGRES_USER: qual
+      POSTGRES_PASSWORD: qual
+      POSTGRES_DB: devhub
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qual -d devhub"]
+      interval: 4s
+      retries: 30
+    ports: ["127.0.0.1:15432:5432"]
+    volumes: [qual_db:/var/lib/postgresql/data]
+  redis:
+    image: redis:7-alpine
+    restart: "no"
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 30
+    ports: ["127.0.0.1:16379:6379"]
+    volumes: [qual_redis:/data]
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    restart: "no"
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${DEVHUB_QUALIFICATION_STORAGE_USER:?required}
+      MINIO_ROOT_PASSWORD: ${DEVHUB_QUALIFICATION_STORAGE_PASSWORD:?required}
+    ports: ["127.0.0.1:19000:9000"]
+    volumes: [qual_objects:/data]
+  minio-init:
+    image: cgr.dev/chainguard/minio-client:latest-dev
+    depends_on: [minio]
+    environment:
+      Q_USER: ${DEVHUB_QUALIFICATION_STORAGE_USER:?required}
+      Q_PASSWORD: ${DEVHUB_QUALIFICATION_STORAGE_PASSWORD:?required}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until mc alias set test http://minio:9000 "$$Q_USER" "$$Q_PASSWORD"; do sleep 2; done
+        mc mb --ignore-existing test/devhub-qualification
+  api:
+    <<: *app
+    command: ["sh", "-ec", "npm run build && npm run start -- -H 0.0.0.0 -p 3000"]
+  index:
+    <<: *app
+    command: ["npm", "run", "worker:source-index"]
+  review:
+    <<: *app
+    command: ["npm", "run", "worker:review"]
+  validation:
+    <<: *app
+    command: ["npm", "run", "validation:runner"]
+  integration:
+    <<: *app
+    command: ["npm", "run", "worker:integration"]
+  gateway:
+    image: nginx:1.27-alpine
+    restart: "no"
+    volumes: ["./gateway.conf:/etc/nginx/nginx.conf:ro"]
+    depends_on: [api]
+    ports: ["127.0.0.1:18080:8080"]
+volumes:
+  qual_db:
+  qual_redis:
+  qual_objects:
