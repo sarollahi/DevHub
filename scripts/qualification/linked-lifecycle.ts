@@ -78,16 +78,21 @@ try {
   const actor={type:"AGENT" as const,id:agent.id,credentialId:credential.id};
   const files=new Map<string,Buffer>([
     ["package.json",Buffer.from(JSON.stringify({
-      name:"devhub-scale-fixture",private:true,version:"1.0.0",
-      scripts:{build:"node -e \"process.exit(0)\"",
-        test:"node -e \"process.exit(0)\"",
-        lint:"node -e \"process.exit(0)\""}
+      name:"devhub-scale-fixture",private:true,version:"1.0.0",type:"module",
+      scripts:{build:"node --check src/feature.js",
+        test:"node --test test/feature.test.mjs",
+        lint:"node --check src/feature.js"}
     },null,2)+"\n")],
     ["package-lock.json",Buffer.from(JSON.stringify({
       name:"devhub-scale-fixture",version:"1.0.0",lockfileVersion:3,
       requires:true,packages:{"":{name:"devhub-scale-fixture",version:"1.0.0"}}
     },null,2)+"\n")],
     ["src/feature.js",Buffer.from("export function feature() { return 'base'; }\n")],
+    ["test/feature.test.mjs",Buffer.from(
+      "import test from 'node:test';\n"+
+      "import assert from 'node:assert/strict';\n"+
+      "import {feature} from '../src/feature.js';\n"+
+      "test('integrated source contains the exact approved feature',()=>{assert.equal(feature(),'verified-change');});\n")],
   ]);
   const bytesTransferred={uploaded:0,downloaded:0,objects:0};
   const hashes=new Map<string,string>();
