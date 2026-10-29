@@ -68,10 +68,15 @@ docker stop "$primary" >/dev/null
 # New independent volume, separate container and TCP listener.
 docker run --rm -v "$backup":/backup -v "$restore":/data postgres:16-alpine \
   sh -c 'cp -a /backup/. /data/ && chown -R postgres:postgres /data' >/dev/null
-docker run --rm -v "$restore":/data postgres:16-alpine \
-  sh -c "touch /data/recovery.signal; rm -f /data/standby.signal; \
-    printf '\\nrestore_command = '\''cp /wal/%f %p'\''\\nrecovery_target_lsn = '\''$target_lsn'\''\\nrecovery_target_inclusive = on\\nrecovery_target_action = promote\\n' >> /data/postgresql.auto.conf; \
-    chown postgres:postgres /data/recovery.signal /data/postgresql.auto.conf" >/dev/null
+{
+  printf '%s\\n' \
+    "restore_command = 'cp /wal/%f %p'" \
+    "recovery_target_lsn = '$target_lsn'" \
+    "recovery_target_inclusive = on" \
+    "recovery_target_action = promote"
+} | docker run --rm -i -v "$restore":/data postgres:16-alpine \
+  sh -c 'cat >> /data/postgresql.auto.conf && touch /data/recovery.signal && \
+    rm -f /data/standby.signal && chown postgres:postgres /data/recovery.signal /data/postgresql.auto.conf'
 docker run -d --name "$recovered" --network "$net" -p 127.0.0.1:15433:5432 \
   -v "$restore":/var/lib/postgresql/data -v "$archive":/wal \
   postgres:16-alpine -c archive_mode=off >/dev/null
