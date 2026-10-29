@@ -55,3 +55,15 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "Object cache upstream circuit is open"
+      - alert: DevHubGitGatewayLeaseStalled
+        expr: devhub_git_gateway_expired_leases > 5
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Expired Git sessions accumulating across gateways"
+      - alert: DevHubPreflightLeaseStalled
+        expr: devhub_preflight_expired_leases > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Unreclaimed preflight jobs after worker loss"

@@ -7,21 +7,23 @@ import { db } from "../lib/prisma";
 import { assertRepositoryPermission, consumeRequestQuota } from "../lib/authorization";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { gitCacheDirectory, gitCommand, syncGitProjection } from "./git-interoperability";
+import { withGitLease } from "./git-lease";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const transport = /^\/git\/([0-9a-f-]{36})\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
 const maxRequestBytes = Number(process.env.GIT_INTEROP_MAX_PUSH_BYTES || 2147483648);
-const locks = new Map<string, Promise<void>>();
 
-function exclusive<T>(id: string, work: () => Promise<T>): Promise<T> {
-  const previous = locks.get(id) ?? Promise.resolve();
-  const active = previous.catch(() => undefined).then(work);
+// Each gateway owns a private on-node Git projection. This mutex protects
+// only its disposable local directory, never authoritative repository state.
+const localLocks = new Map<string, Promise<void>>();
+function localExclusive<T>(repositoryId: string, task: () => Promise<T>): Promise<T> {
+  const previous = localLocks.get(repositoryId) ?? Promise.resolve();
+  const active = previous.catch(() => undefined).then(task);
   const tail = active.then(() => undefined, () => undefined);
-  locks.set(id, tail);
-  void tail.then(() => { if (locks.get(id) === tail) locks.delete(id); });
+  localLocks.set(repositoryId, tail);
+  void tail.then(() => { if (localLocks.get(repositoryId) === tail) localLocks.delete(repositoryId); });
   return active;
 }
-
 function credentialFromRequest(req: IncomingMessage): string | null {
   const header = req.headers.authorization;
   if (!header || header.length > 4096) return null;
@@ -91,18 +93,19 @@ async function installHooks(dir: string) {
 
 async function serveGitRpc(req: IncomingMessage, res: ServerResponse, dir: string,
   service: "git-upload-pack" | "git-receive-pack", advertise: boolean,
-  identity: { actor: SourceActor; credentialId: string }, repositoryId: string) {
+  identity: { actor: SourceActor; credentialId: string }, repositoryId: string, leaseToken: string) {
   const max = service === "git-upload-pack" ? 4 * 1024 * 1024 : maxRequestBytes;
   const child = spawn("git", [service.replace(/^git-/, ""), "--stateless-rpc",
     ...(advertise ? ["--advertise-refs"] : []), dir], {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_NO_REPLACE_OBJECTS: "1",
       GIT_TERMINAL_PROMPT: "0",
-      DEVHUB_GIT_REPOSITORY_ID: repositoryId, DEVHUB_GIT_ACTOR_USER: identity.actor.id,
+      DEVHUB_GIT_REPOSITORY_ID: repositoryId, DEVHUB_GIT_LEASE_TOKEN: leaseToken,
+      DEVHUB_GIT_ACTOR_USER: identity.actor.id,
       DEVHUB_GIT_ACTOR_CREDENTIAL: identity.credentialId,
       DEVHUB_GIT_PUSH_GATE: service === "git-receive-pack" ? "enabled" : "disabled" },
   });
-  let stderr = "", transferred = 0;
+  let stderr = "", transferred = 0, sent = 0;
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (data: string) => { stderr = (stderr + data).slice(-8192); });
   const deadline = setTimeout(() => child.kill("SIGKILL"), advertise ? 60000 : 900000);
@@ -122,6 +125,7 @@ async function serveGitRpc(req: IncomingMessage, res: ServerResponse, dir: strin
       });
       req.pipe(child.stdin);
     }
+    child.stdout.on("data", (chunk: Buffer) => { sent += chunk.length; });
     child.stdout.pipe(res, { end: false });
     const result = await new Promise<number>((yes, no) => {
       child.on("error", no);
@@ -133,7 +137,20 @@ async function serveGitRpc(req: IncomingMessage, res: ServerResponse, dir: strin
       if (!res.headersSent) throw new Error("Git RPC rejected: " + stderr.slice(-500));
     }
     res.end();
-  } finally { clearTimeout(deadline); }
+  } finally {
+    clearTimeout(deadline);
+    // Persist only measured transport bytes; audit accounting is best-effort,
+    // not part of authorization or the native ref publication transaction.
+    if (transferred || sent) {
+      const day = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
+      await db.gitTrafficUsage.upsert({
+        where: { repositoryId_day: { repositoryId, day } },
+        create: { repositoryId, day, ingressBytes: BigInt(transferred), egressBytes: BigInt(sent) },
+        update: { ingressBytes: { increment: BigInt(transferred) }, egressBytes: { increment: BigInt(sent) } },
+      }).catch(error => console.error("Git usage accounting deferred",
+        error instanceof Error ? error.message : "unknown"));
+    }
+  }
 }
 
 export function createGitGateway() {
@@ -163,14 +180,24 @@ export function createGitGateway() {
         throw new SourceControlError(403, "TLS_REQUIRED", "Git authentication requires HTTPS");
       }
       const identity = await authenticate(req, repositoryId, writing);
-      await exclusive(repositoryId, async () => {
-        const dir = await gitCacheDirectory(repositoryId);
-        await installHooks(dir);
-        await syncGitProjection(repositoryId, identity.actor, dir);
-        res.setHeader("Content-Type", `application/x-${service}-${isDiscovery ? "advertisement" : "result"}`);
-        res.setHeader("Cache-Control", "no-cache, no-store, max-age=0");
-        res.setHeader("Pragma", "no-cache");
-        await serveGitRpc(req, res, dir, service, isDiscovery, identity, repositoryId);
+      await localExclusive(repositoryId, async () => {
+        const serve = async (leaseToken: string) => {
+          const dir = await gitCacheDirectory(repositoryId);
+          await installHooks(dir);
+          await syncGitProjection(repositoryId, identity.actor, dir);
+          res.setHeader("Content-Type", `application/x-${service}-${isDiscovery ? "advertisement" : "result"}`);
+          res.setHeader("Cache-Control", "no-cache, no-store, max-age=0");
+          res.setHeader("Pragma", "no-cache");
+          await serveGitRpc(req, res, dir, service, isDiscovery, identity, repositoryId, leaseToken);
+        };
+        // Independent gateway replicas may serve cache-only reads concurrently.
+        // Only native-writing push sessions require the cross-replica DB lease.
+        if (writing) {
+          await withGitLease(repositoryId, serve,
+            () => req.destroy(new Error("Git gateway lease lost")));
+        } else {
+          await serve("");
+        }
       });
     } catch (error) {
       console.error("Git interoperability gateway", error);

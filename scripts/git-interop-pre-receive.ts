@@ -9,6 +9,7 @@ import { gitCacheDirectory, gitCommand } from "../src/source-control/git-interop
 import { gitDiff, gitLines, gitText, readGitCommit, gitTreeEntries } from "../src/source-control/git-io";
 import { publishGitCommit } from "../src/source-control/git-importer";
 import { mutateReferencesBatch, type RefMutationRequest } from "../src/source-control/refs";
+import { requireGitLease } from "../src/source-control/git-lease";
 import { validPath } from "../src/lib/review-logic";
 import type { SourceActor } from "../src/source-control/contracts";
 
@@ -113,8 +114,10 @@ async function main() {
   const repositoryId = process.env.DEVHUB_GIT_REPOSITORY_ID ?? "";
   const userId = process.env.DEVHUB_GIT_ACTOR_USER ?? "";
   const credentialId = process.env.DEVHUB_GIT_ACTOR_CREDENTIAL ?? "";
-  if (!UUID.test(repositoryId) || !UUID.test(userId) || !UUID.test(credentialId) ||
+  const leaseToken = process.env.DEVHUB_GIT_LEASE_TOKEN ?? "";
+  if (!UUID.test(repositoryId) || !UUID.test(userId) || !UUID.test(credentialId) || !UUID.test(leaseToken) ||
       process.env.DEVHUB_GIT_PUSH_GATE !== "enabled") throw new Error("Git push gateway identity missing");
+  await requireGitLease(repositoryId, leaseToken);
   const dir = await gitCacheDirectory(repositoryId);
   if (await realpath(process.cwd()) !== await realpath(dir)) {
     throw new Error("Git receive hook invoked outside assigned cache");
@@ -229,7 +232,7 @@ async function main() {
       mutationId: "git-batch-" + digest.slice(0, 52),
     });
   }
-  await mutateReferencesBatch(repositoryId, actor, mutations);
+  await mutateReferencesBatch(repositoryId, actor, mutations, leaseToken);
   process.stderr.write("DevHub: all " + mutations.length + " native Git ref updates committed atomically\n");
 }
 

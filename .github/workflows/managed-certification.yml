@@ -1,0 +1,43 @@
+name: Managed staging failover certification (manual only)
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type PERFORM_STAGING_FAILOVER; triggers disruptive Aurora failover"
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  managed-aurora-failover:
+    if: inputs.confirmation == 'PERFORM_STAGING_FAILOVER'
+    environment: devhub-certification-staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEVHUB_CERT_STAGE: protected-staging
+      DEVHUB_CERT_CONFIRM: ${{ inputs.confirmation }}
+      CERT_AURORA_CLUSTER_ID: ${{ vars.DEVHUB_CERT_AURORA_CLUSTER_ID }}
+      DATABASE_URL: ${{ secrets.DEVHUB_CERT_DATABASE_URL }}
+      AWS_REGION: ${{ vars.DEVHUB_CERT_AWS_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authorize dedicated staging role (no long-lived IAM keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEVHUB_CERT_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.DEVHUB_CERT_AWS_REGION }}
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+      - name: Test actual managed cluster failover and acknowledged transactions
+        run: bash scripts/certify-managed-aurora.sh
+      - name: Archive managed provider evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: managed-staging-failover-certification
+          path: artifacts/managed-certification/
+          if-no-files-found: warn

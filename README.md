@@ -209,3 +209,10 @@ Native changesets remain authoritative. A separately deployed [Git smart-HTTP ga
 ## Performance and operations
 
 DevHub includes a [native real-object lifecycle benchmark, telemetry, fault drills, reconciliation and dashboards](docs/performance-resilience.md). Measurements require a deployed test topology; no production-scale performance result is implied by the benchmark source.
+
+### Distributed deployment and release gates
+
+[Multi-instance topology, PostgreSQL fencing, disaster recovery, isolation
+fault drills and reconciliation procedures](docs/distributed-production.md).
+The reference CI drills are isolated; production HA failover and a fully
+measured distributed workload remain release blockers, not completed claims.

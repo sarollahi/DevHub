@@ -232,6 +232,7 @@ model QueueJob {
   scheduledAt    DateTime     @default(now())
   startedAt      DateTime?
   leaseUntil     DateTime?
+  leaseToken     String?      @db.Uuid
   finishedAt     DateTime?
   createdAt      DateTime     @default(now())
   pull           PullRequest  @relation(fields: [pullId], references: [id], onDelete: Cascade)
@@ -585,6 +586,7 @@ model SourceQueryIndexJob {
   attempts     Int             @default(0)
   nextAttemptAt DateTime       @default(now())
   leaseUntil   DateTime?
+  leaseToken   String?         @db.Uuid
   lastError    String?
   indexedAt    DateTime?
   createdAt    DateTime        @default(now())
@@ -652,6 +654,8 @@ model BlobTransfer {
   stagingKey   String             @unique
   uploadId     String?
   state        BlobTransferState  @default(ACTIVE)
+  rawInputBytes BigInt? 
+  encodedPutBytes BigInt?
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
   repository   Repository         @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
@@ -711,6 +715,11 @@ model ValidationTask {
   leaseToken    String?          @db.Uuid
   leaseUntil    DateTime?
   runnerId      String?
+  measuredCpuNanos BigInt?
+  sampledMemoryPeakBytes BigInt?
+  containerNetworkRxBytes BigInt?
+  containerNetworkTxBytes BigInt?
+  resourceMeasurementStatus String? @db.VarChar(24)
   exitCode      Int?
   summary       String?
   logDigest     String?          @db.Char(64)
@@ -1133,6 +1142,7 @@ model SourceSearchDocument {
   attempts Int @default(0)
   nextAttemptAt DateTime @default(now())
   leaseUntil DateTime?
+  leaseToken String? @db.Uuid
   lastError String?
   indexedAt DateTime?
   object SourceObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
@@ -1241,4 +1251,47 @@ model SourceDerivedBlameFile {
   checksum     String? @db.Char(64)
   @@id([changesetId, version, position])
   @@index([repositoryId, version, path, generation(sort: Desc)])
+}
+
+// Exclusive, renewable gateway session; never stores authoritative Git refs.
+model GitGatewayLease {
+  repositoryId String   @id @db.Uuid
+  token        String   @db.Uuid
+  expiresAt    DateTime
+  updatedAt    DateTime @default(now())
+  @@index([expiresAt])
+}
+
+// Shared tenant-wide API admission buckets: one atomic counter across replicas
+// and repositories, never per-process Redis memory.
+model TenantRateBucket {
+  tenantId    String   @db.Uuid
+  windowStart DateTime
+  count       Int      @default(0)
+  @@id([tenantId, windowStart])
+  @@index([windowStart])
+}
+
+// Measured bytes observed at the Git gateway boundary. Not an estimate of
+// S3, CDN, cache or provider-billed traffic.
+model GitTrafficUsage {
+  repositoryId String   @db.Uuid
+  day          DateTime @db.Date
+  ingressBytes BigInt   @default(0)
+  egressBytes  BigInt   @default(0)
+  updatedAt    DateTime @updatedAt
+  @@id([repositoryId, day])
+  @@index([day])
+}
+
+// Persistent per-lane tenant turn ordering. Worker crashes do not strand slots:
+// active counts are computed from live, expiring job leases on the canonical
+// lane table while this row is locked for admission.
+model TenantLaneTurn {
+  lane          String   @db.VarChar(24)
+  tenantId      String   @db.Uuid
+  lastClaimedAt DateTime?
+  claimCount    BigInt   @default(0)
+  @@id([lane, tenantId])
+  @@index([lane, lastClaimedAt])
 }

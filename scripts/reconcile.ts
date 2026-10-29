@@ -49,6 +49,43 @@ try {
       state: "RUNNING", leaseUntil: { lt: new Date() },
     } });
     report("expired_source_index_leases", stalledIndex, "warning");
+    const missingRefTargets = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*)::bigint AS count FROM "SourceReference" r
+      LEFT JOIN "SourceChangeset" c ON c.id=r."changesetId"
+      WHERE r."deletedAt" IS NULL AND c.id IS NULL`;
+    report("missing_referenced_changesets", Number(missingRefTargets[0]?.count ?? 0n));
+    const missingOperationObjects = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*)::bigint AS count FROM "SourceFileOperation" op
+      LEFT JOIN "SourceObject" o ON o.id=op."objectId"
+      WHERE op."objectId" IS NOT NULL AND o.id IS NULL`;
+    report("missing_operation_objects", Number(missingOperationObjects[0]?.count ?? 0n));
+    const brokenIntegrations = await db.changeIntegration.count({ where: {
+      state: "INTEGRATED", OR: [{ resultChangesetId: null }, { completedAt: null }],
+    } });
+    report("incomplete_integrated_journal", brokenIntegrations);
+    const invalidValidationEvidence = await db.validationTask.count({ where: {
+      state: "PASSED", signature: null, reusedFromId: null,
+    } });
+    report("unsigned_successful_validation_tasks", invalidValidationEvidence, "warning");
+    const incompleteQueryIndex = await db.sourceQueryIndexJob.count({ where: {
+      state: "SUCCEEDED", generation: null,
+    } });
+    report("successful_index_missing_generation", incompleteQueryIndex);
+    const expiredPreflight = await db.queueJob.count({ where: {
+      state: "RUNNING", leaseUntil: { lt: new Date() },
+    } });
+    report("expired_preflight_leases", expiredPreflight, "warning");
+    const undeliveredJobs = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*)::bigint AS count FROM "OutboxEvent" e
+      JOIN "QueueJob" j ON e.payload->>'jobId'=j.id::text
+      WHERE e."aggregateType"='PullRequest' AND e.state='PUBLISHED'
+        AND (j.state='QUEUED' OR (j.state='RUNNING' AND j."leaseUntil"<now()))
+        AND e."publishedAt"<now()-interval '5 minutes'`;
+    report("published_outbox_with_unfinished_job", Number(undeliveredJobs[0]?.count ?? 0n), "warning");
+    const expiredGateway = await db.gitGatewayLease.count({ where: {
+      expiresAt: { lt: new Date() },
+    } });
+    report("expired_git_gateway_leases", expiredGateway, "warning");
     if (verifyExternal) {
       const external = await db.storedBlob.findMany({ where: { state: "READY" }, take: sample,
         orderBy: { createdAt: "desc" } });

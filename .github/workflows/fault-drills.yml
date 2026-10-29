@@ -42,8 +42,179 @@ jobs:
         run: npm run ops:fault-drill -- --service=db --seconds=2
       - name: Regional TCP partition and cache restart
         run: node --test tests/resilience-partition.test.mjs
+      - name: Real DB, Redis and object-store network partitions
+        run: |
+          mkdir -p artifacts/distributed-faults
+          node scripts/network-partition.mjs --service=db --seconds=3 --output=artifacts/distributed-faults/db.json
+          node scripts/network-partition.mjs --service=redis --seconds=3 --output=artifacts/distributed-faults/redis.json
+          node scripts/network-partition.mjs --service=minio --seconds=3 --output=artifacts/distributed-faults/minio.json
       - name: Final invariant checks
         run: npm run ops:reconcile -- --sample=100
+      - name: Upload measured isolation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributed-network-isolation
+          path: artifacts/distributed-faults/
+          if-no-files-found: warn
       - name: Show dependency states
         if: always()
         run: docker compose ps
+
+  physical-failover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      DEVHUB_FAULT_DRILL: isolated-local-only
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stream PostgreSQL WAL to a second process and promote with old writer fenced
+        run: bash scripts/pg-failover-drill.sh
+      - name: Archive real PostgreSQL promotion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-physical-failover
+          path: artifacts/distributed-faults/
+          if-no-files-found: warn
+
+  independent-restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEVHUB_FAULT_DRILL: isolated-local-only
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
+      OBJECT_STORE_BUCKET: devhub-objects
+      OBJECT_STORE_REGION: us-east-1
+      OBJECT_STORE_ACCESS_KEY: devhub-local
+      OBJECT_STORE_SECRET_KEY: devhub-local-password-change-in-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Start real PostgreSQL and S3-compatible storage
+        run: docker compose up -d --wait db minio
+      - name: Initialize source bucket
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c \
+            'until mc alias set old http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing old/devhub-objects'
+      - name: Apply migrations
+        run: npm run db:generate && npm run db:deploy
+      - name: Publish actual external S3 object and authoritative branch
+        run: npx tsx scripts/restore-fixture.ts
+      - name: Independently restore DB dump and complete S3 object inventory
+        run: bash scripts/backup-restore-drill.sh
+      - name: Archive full inventory and restoration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: independent-database-object-restore
+          path: artifacts/distributed-faults/
+          if-no-files-found: warn
+      - name: Container state
+        if: always()
+        run: docker compose ps
+
+  archived-wal-pitr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEVHUB_FAULT_DRILL: isolated-local-only
+      OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
+      OBJECT_STORE_BUCKET: devhub-objects
+      OBJECT_STORE_REGION: us-east-1
+      OBJECT_STORE_ACCESS_KEY: devhub-local
+      OBJECT_STORE_SECRET_KEY: devhub-local-password-change-in-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Generate database client
+        run: npm run db:generate
+      - name: Start isolated S3 source
+        run: |
+          docker compose up -d --wait minio
+          docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c \
+            'until mc alias set old http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing old/devhub-objects'
+      - name: Restore actual physical backup and archived WAL to a target LSN
+        run: bash scripts/pg-wal-pitr-drill.sh
+      - name: Upload WAL PITR and complete object inventory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archived-wal-pitr
+          path: artifacts/distributed-faults/
+          if-no-files-found: warn
+
+  multi-process-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DEVHUB_FAULT_DRILL: isolated-local-only
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      REDIS_URL: redis://localhost:6379
+      APP_SECRET: ci-only-long-random-testing-secret-123456789
+      OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
+      OBJECT_STORE_BUCKET: devhub-objects
+      OBJECT_STORE_REGION: us-east-1
+      OBJECT_STORE_ACCESS_KEY: devhub-local
+      OBJECT_STORE_SECRET_KEY: devhub-local-password-change-in-production
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Launch real dependencies
+        run: docker compose up -d --wait db redis minio
+      - name: Prepare schema and a real S3 bucket
+        run: |
+          npm run db:generate && npm run db:deploy
+          docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c \
+            'until mc alias set local http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing local/devhub-objects'
+      - name: Build production API
+        run: npm run build
+      - name: Three actual client processes, two API replicas and two independent index workers
+        run: |
+          set -Eeuo pipefail
+          npm run start -- -p 3101 > /tmp/devhub-api-a.log 2>&1 &
+          a=$!
+          npm run start -- -p 3102 > /tmp/devhub-api-b.log 2>&1 &
+          b=$!
+          npm run worker:source-index > /tmp/devhub-index-a.log 2>&1 &
+          c=$!
+          npm run worker:source-index > /tmp/devhub-index-b.log 2>&1 &
+          d=$!
+          trap 'kill "$a" "$b" "$c" "$d" 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3101/api/health > /dev/null &&
+               curl --fail --silent http://127.0.0.1:3102/api/health > /dev/null; then break; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:3101/api/health
+          curl --fail --silent http://127.0.0.1:3102/api/health
+          node scripts/certify-multi-process.mjs --clients=3 --changesets=96 --submissions=24 --concurrency=12 --timeout-seconds=600 --api=http://127.0.0.1:3101,http://127.0.0.1:3102 --output=artifacts/distributed-faults/multi-node
+          npm run ops:reconcile -- --sample=100
+      - name: Upload measured real-node evidence and failure logs
+        if: always()
+        run: |
+          mkdir -p artifacts/distributed-faults/multi-node
+          for name in api-a api-b index-a index-b; do
+            cp /tmp/devhub-$name.log artifacts/distributed-faults/multi-node/$name.log 2>/dev/null || true
+          done
+      - name: Archive measured client and API results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-multi-process-stress
+          path: artifacts/distributed-faults/multi-node/
+          if-no-files-found: warn

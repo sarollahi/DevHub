@@ -152,7 +152,7 @@ export async function uploadBlob(repositoryId: string, readable: Readable,
     await verifyBlob(record, backend, stagingKey);
     const deduplicated = await publishBlob(record, transferId, stagingKey, backend);
     await retain(repositoryId, objectId);
-    await db.blobTransfer.update({ where: { id: transferId }, data: { state: "FINISHED" } });
+    await db.blobTransfer.update({ where: { id: transferId }, data: { state: "FINISHED", rawInputBytes: BigInt(rawBytes), encodedPutBytes: BigInt(storedBytes) } });
     metric("uploaded", { rawBytes, storedBytes, deduplicated: String(deduplicated), latencyMs: Date.now() - started });
     return { id: objectId, rawBytes: String(rawBytes), storedBytes: String(storedBytes), deduplicated };
   } catch (error) {

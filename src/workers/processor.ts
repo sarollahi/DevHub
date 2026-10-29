@@ -1,4 +1,5 @@
 import { measured } from "../observability/telemetry";
+import { randomUUID } from "node:crypto";
 import { Worker, type Job } from "bullmq";
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
@@ -10,18 +11,32 @@ export async function processPreflight(message: ProcessMessage) {
   if (!item) throw new Error("Unknown durable job");
   if (item.state === "SUCCEEDED" || item.state === "CANCELLED") return;
   if (item.pullId !== message.pullId || item.pull.version !== message.version) throw new Error("Stale or inconsistent processing request");
+  const token = randomUUID();
   const lease = new Date(Date.now() + 120_000);
   const claimed = await db.queueJob.updateMany({ where: { id: item.id, OR: [
     { state: { in: ["QUEUED", "FAILED"] } },
     { state: "RUNNING", leaseUntil: { lt: new Date() } },
-  ] }, data: { state: "RUNNING", startedAt: new Date(), leaseUntil: lease, attempts: { increment: 1 }, lastError: null } });
+  ] }, data: { state: "RUNNING", startedAt: new Date(), leaseUntil: lease, leaseToken: token, attempts: { increment: 1 }, lastError: null } });
   if (claimed.count === 0) throw new Error("Processing lease currently held; will retry");
+  // Deterministic CI killpoint exercises the real, already committed worker
+  // lease. Never enabled in normal or production deployments.
+  if (process.env.DEVHUB_FAULT_DRILL === "isolated-local-only" &&
+      process.env.DEVHUB_TEST_HOLD_PREFLIGHT === "isolated-ci" &&
+      process.env.NODE_ENV !== "production") {
+    process.stdout.write("PREFLIGHT_LEASE_CLAIMED:" + item.id + "\n");
+    setInterval(() => {}, 1000);
+    await new Promise<void>(() => undefined);
+  }
   try {
     const assessment = assessChange(item.pull.changedFiles, item.pull.patch);
     await db.$transaction(async (tx) => {
+      const held = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM "QueueJob" WHERE id=${item.id}::uuid AND "leaseToken"=${token}::uuid
+          AND state='RUNNING' AND "leaseUntil">now() FOR UPDATE`;
+      if (!held.length) throw new Error("Preflight lease expired or was reclaimed");
       const pr = await tx.pullRequest.findUniqueOrThrow({ where: { id: item.pullId } });
       if (pr.version !== message.version || pr.state === "CLOSED" || pr.state === "MERGED") {
-        await tx.queueJob.update({ where: { id: item.id }, data: { state: "CANCELLED", leaseUntil: null, finishedAt: new Date() } });
+        await tx.queueJob.update({ where: { id: item.id }, data: { state: "CANCELLED", leaseUntil: null, leaseToken: null, finishedAt: new Date() } });
         return;
       }
       const duplicateCount = await tx.changeFingerprint.count({ where: {
@@ -39,33 +54,36 @@ export async function processPreflight(message: ProcessMessage) {
       await tx.pullRequest.update({ where: { id: pr.id }, data: {
         state: "REVIEW_REQUIRED", riskTier: assessment.riskTier, riskScore: assessment.riskScore,
       } });
-      await tx.queueJob.update({ where: { id: item.id }, data: { state: "SUCCEEDED", leaseUntil: null, finishedAt: new Date() } });
+      await tx.queueJob.update({ where: { id: item.id }, data: { state: "SUCCEEDED", leaseUntil: null, leaseToken: null, finishedAt: new Date() } });
       await tx.auditEvent.create({ data: { repositoryId: pr.repositoryId, actorType: "SYSTEM", actorId: "preflight-worker",
         action: "pull_request.preflight_completed", subjectId: pr.id,
         metadata: { riskScore: assessment.riskScore, riskTier: assessment.riskTier, exactDuplicates: duplicateCount } } });
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15000 });
   } catch (error) {
-    await db.queueJob.update({ where: { id: item.id }, data: { state: "QUEUED", leaseUntil: null,
-      lastError: error instanceof Error ? error.message.slice(0, 1000) : "unknown error" } });
+    const terminal = item.attempts + 1 >= item.maxAttempts;
+    // A reclaimed worker cannot clear the new owner's lease, write a failed
+    // check, or change PR state. Failures are fenced exactly like successes.
+    await db.$transaction(async tx => {
+      const changed = await tx.queueJob.updateMany({ where: {
+        id: item.id, state: "RUNNING", leaseToken: token, leaseUntil: { gt: new Date() },
+      }, data: {
+        state: terminal ? "FAILED" : "QUEUED", leaseToken: null, leaseUntil: null,
+        ...(terminal ? { finishedAt: new Date() } : {}),
+        lastError: error instanceof Error ? error.message.slice(0, 1000) : "unknown error",
+      } });
+      if (!changed.count || !terminal) return;
+      await tx.pullRequest.updateMany({ where: { id: item.pullId,
+        version: message.version, state: { notIn: ["MERGED", "CLOSED"] } }, data: { state: "FAILED" } });
+      await tx.checkRun.create({ data: { pullId: item.pullId, name: "metadata-validation",
+        state: "FAILURE", summary: "Preflight exhausted durable retries", endedAt: new Date() } });
+    });
     throw error;
   }
 }
 
 export function createPreflightWorker(connection = redisConnection(), concurrency = Math.min(64, Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 4)))) {
   return new Worker<ProcessMessage>(QUEUE_NAME, async (job: Job<ProcessMessage>) => {
-    try { await measured("worker.preflight", () => processPreflight(job.data)); }
-    catch (error) {
-      if (job.attemptsMade + 1 >= (job.opts.attempts || 1)) {
-        await db.$transaction(async (tx) => {
-          await tx.queueJob.update({ where: { id: job.data.jobId }, data: { state: "FAILED", leaseUntil: null,
-            finishedAt: new Date(), lastError: error instanceof Error ? error.message.slice(0, 1000) : "failed" } });
-          await tx.pullRequest.updateMany({ where: { id: job.data.pullId, state: { notIn: ["MERGED", "CLOSED"] } }, data: { state: "FAILED" } });
-          await tx.checkRun.create({ data: { pullId: job.data.pullId, name: "metadata-validation", state: "FAILURE",
-            summary: "Preflight failed after configured retries", endedAt: new Date() } });
-        });
-      }
-      throw error;
-    }
+    await measured("worker.preflight", () => processPreflight(job.data));
   }, { connection, concurrency });
 }
 

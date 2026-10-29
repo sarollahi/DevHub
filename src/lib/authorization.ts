@@ -133,15 +133,27 @@ export async function assertRepositoryPermission(
 
 export async function consumeRequestQuota(repositoryId: string, actor: SourceActor) {
   const repo = await db.repository.findUnique({ where: { id: repositoryId },
-    select: { organization: { select: { maxRequestsPerMinute: true } } } });
+    select: { ownerId: true, organizationId: true,
+      organization: { select: { maxRequestsPerMinute: true } } } });
   if (!repo) throw new SourceControlError(404, "NOT_FOUND", "Repository not found");
   const limit = Math.min(10000, Math.max(1, repo.organization?.maxRequestsPerMinute ?? 240));
-  const now = new Date();
-  const windowStart = new Date(Math.floor(now.getTime() / 60000) * 60000);
-  const bucket = await db.apiRateBucket.upsert({
-    where: { repositoryId_actorKey_windowStart: { repositoryId, actorKey: `${actor.type}:${actor.id}`, windowStart } },
-    create: { repositoryId, actorKey: `${actor.type}:${actor.id}`, windowStart, count: 1 },
-    update: { count: { increment: 1 } },
+  // One transaction enforces both per-actor and tenant aggregate caps. Use
+  // the primary DB clock, not potentially skewed API replica clocks.
+  await db.$transaction(async tx => {
+    const [{ windowStart }] = await tx.$queryRaw<Array<{ windowStart: Date }>>`
+      SELECT date_trunc('minute', now()) AS "windowStart"`;
+    const actorBucket = await tx.apiRateBucket.upsert({
+      where: { repositoryId_actorKey_windowStart: {
+        repositoryId, actorKey: `${actor.type}:${actor.id}`, windowStart } },
+      create: { repositoryId, actorKey: `${actor.type}:${actor.id}`, windowStart, count: 1 },
+      update: { count: { increment: 1 } },
+    });
+    const tenant = await tx.tenantRateBucket.upsert({
+      where: { tenantId_windowStart: { tenantId: repo.organizationId ?? repo.ownerId, windowStart } },
+      create: { tenantId: repo.organizationId ?? repo.ownerId, windowStart, count: 1 },
+      update: { count: { increment: 1 } },
+    });
+    if (actorBucket.count > limit || tenant.count > limit)
+      throw new SourceControlError(429, "RATE_LIMITED", "Tenant or actor request quota exceeded");
   });
-  if (bucket.count > limit) throw new SourceControlError(429, "RATE_LIMITED", "Tenant request quota exceeded");
 }

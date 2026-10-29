@@ -281,7 +281,7 @@ async function mutateWithinTransaction(tx: Prisma.TransactionClient, repositoryI
 // A Git receive-pack can update several independent native refs atomically.
 // A policy failure or version race rolls back the entire set and its audit log.
 export async function mutateReferencesBatch(repositoryId: string, actor: SourceActor,
-  requested: RefMutationRequest[]) {
+  requested: RefMutationRequest[], gitLeaseToken?: string) {
   if (!requested.length || requested.length > 32) {
     throw new SourceControlError(422, "INVALID_BATCH", "Git pushes may change 1 to 32 refs");
   }
@@ -298,6 +298,15 @@ export async function mutateReferencesBatch(repositoryId: string, actor: SourceA
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       return await db.$transaction(async tx => {
+        if (gitLeaseToken) {
+          // Lock the lease row throughout native ref CAS, preventing ownership
+          // replacement while a previously authorized Git hook commits.
+          const active = await tx.$queryRaw<Array<{ token: string }>>`
+            SELECT "token" FROM "GitGatewayLease"
+            WHERE "repositoryId"=${repositoryId}::uuid AND "token"=${gitLeaseToken}::uuid
+              AND "expiresAt">now() FOR UPDATE`;
+          if (!active.length) throw new SourceControlError(409, "GIT_LEASE_LOST", "Git lease expired before native ref update");
+        }
         const results = [];
         for (const input of inputs) {
           const key = { repositoryId_name_mutationId: {
