@@ -715,6 +715,11 @@ model ValidationTask {
   leaseToken    String?          @db.Uuid
   leaseUntil    DateTime?
   runnerId      String?
+  measuredCpuNanos BigInt?
+  sampledMemoryPeakBytes BigInt?
+  containerNetworkRxBytes BigInt?
+  containerNetworkTxBytes BigInt?
+  resourceMeasurementStatus String? @db.VarChar(24)
   exitCode      Int?
   summary       String?
   logDigest     String?          @db.Char(64)
