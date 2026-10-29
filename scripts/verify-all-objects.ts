@@ -94,7 +94,7 @@ try {
       scannedSnapshotNodes++;
       try {
         const bytes = Buffer.from(node.data);
-        const digest = createHash("sha256").update("DEVHUB-SNAPSHOT-V1\\0").update(bytes).digest("hex");
+        const digest = createHash("sha256").update("DEVHUB-SNAPSHOT-V1\0").update(bytes).digest("hex");
         if (digest !== node.id) throw Error("Snapshot node hash mismatch");
         const body = JSON.parse(bytes.toString("utf8")) as unknown;
         if (!Array.isArray(body) || body.length !== 3 || body[0] !== 1 ||
