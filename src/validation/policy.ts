@@ -4,7 +4,10 @@ import type { ValidationKind, ValidationTask } from "@prisma/client";
 export const KINDS = ["COMPILE", "TEST", "LINT", "SECURITY", "SECRETS", "DEPENDENCIES"] as const;
 export const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 export type Recipe = { kind: ValidationKind; image: string; command: string; timeoutSeconds: number };
-// Both registry-manifest digests and local Docker image IDs are immutable.\n// Local IDs allow a disposable CI runner to preload scanner databases without\n// publishing the generated image to an external registry.\nconst imagePattern = /^(?:[a-zA-Z0-9._/:-]+@sha256:|sha256:)[0-9a-f]{64}$/;
+// Both registry-manifest digests and local Docker image IDs are immutable.
+// Local IDs allow a disposable CI runner to preload scanner databases without
+// publishing the generated image to an external registry.
+const imagePattern = /^(?:[a-zA-Z0-9._/:-]+@sha256:|sha256:)[0-9a-f]{64}$/;
 export function recipes(env: NodeJS.ProcessEnv = process.env): Recipe[] {
   const image = (key: string) => {
     const value = env[key];
