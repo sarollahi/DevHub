@@ -201,6 +201,17 @@ try{
     }
   }
   if(life?.status==="PASSED"){
+    await run("real-native-query-suite",npm,["exec","--","tsx",
+      "scripts/qualification/query-suite.ts",
+      "--input="+join(destination,lifecycleFile),
+      "--output="+join(destination,"native-queries.json"),
+      "--samples="+(full?100:4)],{
+        timeout:full?1500:180,parse:async()=>{
+          const report=await readJSON("native-queries.json");
+          return {accepted:report.status==="PASSED"&&report.results?.length===6 &&
+            report.results.every(x=>x.completed===(full?100:4)),
+            queries:report.results};
+        }});
     await run("repository-resource-snapshot",npm,["exec","--","tsx",
       "scripts/qualification/resources.ts","--input="+join(destination,lifecycleFile),
       "--output="+join(destination,"resource-snapshot.json")],{
