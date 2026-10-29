@@ -19,6 +19,16 @@ if(process.env.DEVHUB_QUALIFICATION_ISOLATED!=="YES" ||
    process.env.NODE_ENV==="production" ||
    !process.env.COMPOSE_FILE?.endsWith("/ops/qualification/compose.yml") ||
    !flags.input || !flags.output)throw Error("Fault drills require explicit disposable Compose topology, input and output");
+// Prevent a local Compose outage from being credited against an unrelated
+// managed/remote database or object-store deployment.
+const dbHost=new URL(process.env.DATABASE_URL??"").hostname;
+const objectHost=new URL(process.env.OBJECT_STORE_ENDPOINT??"").hostname;
+const redisHost=new URL(process.env.REDIS_URL??"").hostname;
+const local=(host:string,names:string[])=>names.includes(host);
+if(!local(dbHost,["localhost","127.0.0.1","db"]) ||
+   !local(objectHost,["localhost","127.0.0.1","minio"]) ||
+   !local(redisHost,["localhost","127.0.0.1","redis"]))
+  throw Error("Fault drill service URLs must point to the disposable Compose topology");
 const input=JSON.parse(await readFile(flags.input,"utf8"));
 const repositoryId=input.repositoryId;
 if(!repositoryId)throw Error("Missing fixture repository");
