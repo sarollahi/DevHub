@@ -15,7 +15,7 @@ const arg = (name: string, fallback: string) =>
 const mode = arg("mode", "lexical");
 if (!["lexical", "provider", "model"].includes(mode)) throw new Error("Unsupported --mode");
 const output = arg("output", "reports/related-semantic-" + mode + ".json");
-const threshold = Number(arg("threshold", "0.82"));
+const threshold = Number(arg("threshold", "0.50"));
 const modelFile = arg("vectors", "reports/related-semantic-model-vectors.json");
 const prepared = mode==="model" ? JSON.parse(readFileSync(modelFile,"utf8")) as
   { provider:string;model:string;modelRevision?:string;vectors:number[][] } : null;
