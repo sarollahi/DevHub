@@ -69,7 +69,7 @@ docker stop "$primary" >/dev/null
 docker run --rm -v "$backup":/backup -v "$restore":/data postgres:16-alpine \
   sh -c 'cp -a /backup/. /data/ && chown -R postgres:postgres /data' >/dev/null
 {
-  printf '%s\\n' \
+  printf '%s\n' \
     "restore_command = 'cp /wal/%f %p'" \
     "recovery_target_lsn = '$target_lsn'" \
     "recovery_target_inclusive = on" \
