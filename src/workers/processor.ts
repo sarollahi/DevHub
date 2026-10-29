@@ -18,6 +18,15 @@ export async function processPreflight(message: ProcessMessage) {
     { state: "RUNNING", leaseUntil: { lt: new Date() } },
   ] }, data: { state: "RUNNING", startedAt: new Date(), leaseUntil: lease, leaseToken: token, attempts: { increment: 1 }, lastError: null } });
   if (claimed.count === 0) throw new Error("Processing lease currently held; will retry");
+  // Deterministic CI killpoint exercises the real, already committed worker
+  // lease. Never enabled in normal or production deployments.
+  if (process.env.DEVHUB_FAULT_DRILL === "isolated-local-only" &&
+      process.env.DEVHUB_TEST_HOLD_PREFLIGHT === "isolated-ci" &&
+      process.env.NODE_ENV !== "production") {
+    process.stdout.write("PREFLIGHT_LEASE_CLAIMED:" + item.id + "\n");
+    setInterval(() => {}, 1000);
+    await new Promise<void>(() => undefined);
+  }
   try {
     const assessment = assessChange(item.pull.changedFiles, item.pull.patch);
     await db.$transaction(async (tx) => {
