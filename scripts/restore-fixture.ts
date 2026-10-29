@@ -15,7 +15,7 @@ try {
     email: "restore-" + suffix + "@example.test" } });
   const repo = await db.repository.create({ data: { ownerId: user.id,
     slug: "restore-" + suffix, name: "Restore isolation fixture",
-    defaultBranch: "dev", requireHumanApproval: false } });
+    defaultBranch: "main", requireHumanApproval: false } });
   const session = await db.humanSession.create({ data: { userId: user.id,
     tokenHash: randomBytes(32).toString("hex"), expiresAt: new Date(Date.now() + 3_600_000) } });
   const actor = { type: "HUMAN" as const, id: user.id, sessionId: session.id };
