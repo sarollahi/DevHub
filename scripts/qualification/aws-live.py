@@ -241,27 +241,27 @@ def main():
         count = args.changesets
         remote = "/tmp/qualification/multi-writers/" + role
         work = (
-            "cd /opt/devhub\\n"
-            "set -a; source /etc/devhub-qualification.env; set +a\\n"
-            "mkdir -p " + remote + "\\n"
+            "cd /opt/devhub\n"
+            "set -a; source /etc/devhub-qualification.env; set +a\n"
+            "mkdir -p " + remote + "\n"
             "node --import tsx scripts/bench-lifecycle.ts "
             "--submissions=24 --changesets=" + str(count) +
             " --concurrency=24 --depth=16 --monorepo-paths=32 "
             "--ref-writers=12 --integration-jobs=4 --ci-jobs=0 "
             "--queries=12 --blobs=5 "
             "--output=" + remote + "/lifecycle.json "
-            "> " + remote + "/stdout.log 2> " + remote + "/stderr.log\\n"
-            "python3 - <<'PY'\\n"
-            "import json\\n"
-            "x=json.load(open('" + remote + "/lifecycle.json'))\\n"
-            "assert x['integrity']['persistedAfterIndependentPhase']==" + str(count + 1) + "\\n"
-            "assert x['phases']['concurrent_change_submissions']['completed']==24\\n"
+            "> " + remote + "/stdout.log 2> " + remote + "/stderr.log\n"
+            "python3 - <<'PY'\n"
+            "import json\n"
+            "x=json.load(open('" + remote + "/lifecycle.json'))\n"
+            "assert x['integrity']['persistedAfterIndependentPhase']==" + str(count + 1) + "\n"
+            "assert x['phases']['concurrent_change_submissions']['completed']==24\n"
             "print(json.dumps({'status':'PASS','runId':x['runId'],"
             "'persisted':x['integrity']['persistedAfterIndependentPhase'],"
-            "'p95Ms':x['phases']['concurrent_change_submissions']['p95Ms']}))\\n"
-            "PY\\n"
+            "'p95Ms':x['phases']['concurrent_change_submissions']['p95Ms']}))\n"
+            "PY\n"
             "aws s3 cp " + remote + "/ s3://" + outputs["EvidenceBucket"] +
-            "/real-writers/" + role + "/ --recursive --quiet\\n"
+            "/real-writers/" + role + "/ --recursive --quiet\n"
         )
         output = ssm(ids[i],work,"live-physical-writer-"+role,timeout=1500)
         row = [json.loads(x) for x in output.splitlines() if x.startswith("{")]
@@ -280,7 +280,7 @@ def main():
         not all(r["persisted"]==args.changesets+1 for r in writes)
     ):
         raise RuntimeError("Cross-host native writers did not independently persist and verify content")
-    (evidence/"physical-writers.json").write_text(json.dumps(writes,indent=2)+"\\n")
+    (evidence/"physical-writers.json").write_text(json.dumps(writes,indent=2)+"\n")
     print(json.dumps({"qualification":"MEASURED_MULTI_HOST_NATIVE_PUBLICATION",
         "writersOnSeparateKernels":len(writes),
         "persistedIndependentRevisions":len(writes)*args.changesets,
