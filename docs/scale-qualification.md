@@ -153,6 +153,86 @@ CAS retries, lease expiry and worker recovery time, per-layer client/node/
 regional cache counters, and native client verified hydration bytes. Null and
 missing fields are **not zero**.
 
+## Full-stack evidence added after the initial harness
+
+The full workflow now refuses to begin 10k/100k/1M-scale load until:
+
+1. A dedicated `self-hosted,linux,x64,devhub-performance` runner is available
+   in the protected `devhub-performance-isolated` environment.
+2. The observed topology manifest contains at least two **direct** API origins
+   in `apiOrigins`. `scripts/qualification/topology-probe.mjs` requests
+   authenticated `/api/ops/identity` at each origin and requires distinct
+   API instance identities **and distinct Linux kernel boot fingerprints**.
+   Two containers sharing one kernel do not qualify as two physical hosts.
+   This does not attest availability zones or other worker roles.
+3. Three independent *real* 10k-content benchmark runs have completed and
+   produced `artifacts/qualification/baseline/baseline.json`. These runs are
+   compared only with equal workload and topology hashes; a regression fails.
+4. Real PostgreSQL, Redis, S3-compatible storage, immutable runner images,
+   validation signing keys and an authenticated HTTPS API endpoint are supplied.
+
+```sh
+# In a dedicated isolated performance environment, with secrets set securely:
+export DEVHUB_QUALIFICATION_ISOLATED=YES
+export DEVHUB_QUALIFICATION_APPROVAL=RUN_FULL_SCALE
+export DEVHUB_QUALIFICATION_TOPOLOGY_FILE=/secure/observed-topology.json
+export OPS_METRICS_TOKEN='<secret of at least 32 bytes>'
+export DEVHUB_QUALIFICATION_API_URL='https://your-direct-qualified-api-gateway'
+
+node scripts/qualification/topology-probe.mjs \
+  --topology="$DEVHUB_QUALIFICATION_TOPOLOGY_FILE" \
+  --output=artifacts/qualification/observed-api.json
+npm run qualification:baseline -- \
+  --topology="$DEVHUB_QUALIFICATION_TOPOLOGY_FILE" \
+  --output=artifacts/qualification/baseline
+npm run qualification:full -- \
+  --baseline=artifacts/qualification/baseline/baseline.json \
+  --output=artifacts/qualification/full
+```
+
+The isolated full coordinator now invokes `linked-lifecycle.ts`: real
+S3-backed objects, immutable root and child revisions, production review
+workers, six real OCI validation kinds per integration stage, public-key
+verification of runner signatures, human-capability approval for the exact
+source/result revisions, an audited atomic integration/ref mutation, and
+authenticated HTTP readback of every integrated object with SHA-256 validation.
+It **fails** if signed tasks, approvals, exact ref generation, or client bytes
+are missing; no pipeline is manually marked PASSED. The approval uses a
+controlled authorized test human identity; it is not a decision made by a
+live human reviewer.
+
+Additional independent evidence:
+- `query-suite.ts` measures real tree/history/blame/ancestry/compare/diff
+  p50/p95/p99 on stored revisions, including the 100k and 1M checkpoints.
+- `resources.ts` gathers PostgreSQL/WAL data, actual stored transfer bytes,
+  signed-runner CPU/network/peak memory observations where present, model costs
+  and per-tenant attribution. Unknown resource measurements remain null.
+- `cache-regions.mjs` requires at least two real node-cache endpoints plus a
+  regional cache endpoint. It refuses to call a warm cache cold and verifies
+  every returned immutable object digest during both phases. The optional
+  `DEVHUB_QUALIFICATION_CACHE_TARGETS_FILE` identifies those endpoints.
+- `eval-related-semantic.ts --mode=provider` evaluates configured provider
+  embeddings on labeled examples and records actual recall, false positives,
+  model cost and latency. The fixed corpus is not equivalent to production
+  retrieval-quality certification.
+- `fault-recovery.ts` uses real Docker stop/restart and network disconnect/
+  reconnect against the disposable Compose dependencies, checking ref
+  generation and verified object bytes after recovery. It refuses to use the
+  local Compose drill to make claims about unrelated remote clusters.
+- `certify-multi-process.mjs` exercises independent real native client
+  processes and API readiness. Its HTTP probes are not HTTP business-request
+  latency; physical node independence is checked separately.
+
+**Certification boundary:** Full-scale runs have not been executed merely by
+committing these drivers. The manual workflow requires provisioned dedicated
+infrastructure and operator-approved credentials. A local container topology,
+nonqualifying synthetic cache test, queued validation, idle outage, or proposed
+million-revision command must never be presented as completed evidence.
+The aggregate remains `INCOMPLETE` until all required cases have real
+results. If a physical throughput limit, unique-key conflict or worker crash
+causes a failure, preserve its stderr/JSONL/checkpoint, repair the bottleneck,
+and rerun that same measured workload without replacing the failed artifact.
+
 ## Current validated bounds and blocking gaps
 
 The first smoke run on 29 Oct 2026 exercised 8 actual concurrent immutable
