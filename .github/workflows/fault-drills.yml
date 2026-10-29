@@ -60,3 +60,61 @@ jobs:
       - name: Show dependency states
         if: always()
         run: docker compose ps
+
+  physical-failover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      DEVHUB_FAULT_DRILL: isolated-local-only
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stream PostgreSQL WAL to a second process and promote with old writer fenced
+        run: bash scripts/pg-failover-drill.sh
+      - name: Archive real PostgreSQL promotion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-physical-failover
+          path: artifacts/distributed-faults/
+          if-no-files-found: warn
+
+  independent-restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEVHUB_FAULT_DRILL: isolated-local-only
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
+      OBJECT_STORE_BUCKET: devhub-objects
+      OBJECT_STORE_REGION: us-east-1
+      OBJECT_STORE_ACCESS_KEY: devhub-local
+      OBJECT_STORE_SECRET_KEY: devhub-local-password-change-in-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Start real PostgreSQL and S3-compatible storage
+        run: docker compose up -d --wait db minio
+      - name: Initialize source bucket
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c \
+            'until mc alias set old http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing old/devhub-objects'
+      - name: Apply migrations
+        run: npm run db:generate && npm run db:deploy
+      - name: Publish actual external S3 object and authoritative branch
+        run: npx tsx scripts/restore-fixture.ts
+      - name: Independently restore DB dump and complete S3 object inventory
+        run: bash scripts/backup-restore-drill.sh
+      - name: Archive full inventory and restoration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: independent-database-object-restore
+          path: artifacts/distributed-faults/
+          if-no-files-found: warn
+      - name: Container state
+        if: always()
+        run: docker compose ps
