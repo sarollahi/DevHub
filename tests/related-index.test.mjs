@@ -44,7 +44,7 @@ test("ANN buckets are versioned, isolated and multiprobe-indexed",()=>{
   const vector=Array.from({length:128},(_,i)=>Math.sin(i));
   const base=vectorBuckets(vector,"p:m");
   const probes=vectorBuckets(vector,"p:m",true);
-  assert.equal(base.length,4);assert.equal(probes.length,52);
+  assert.equal(base.length,8);assert.equal(probes.length,88);
   assert.ok(base.every(x=>probes.includes(x)));
   assert.notDeepEqual(base,vectorBuckets(vector,"other:m"));
   assert.deepEqual(vectorBuckets([NaN],"p:m"),[]);
