@@ -48,6 +48,32 @@ service metrics, configuration hashes and failures separately. Keep each suite o
 an isolated cluster with capacity quotas and locked-down object buckets. Never
 execute fault drills on a production endpoint.
 
+### Disposable multi-process reproduction (not multi-node certification)
+
+The repository includes `ops/qualification/compose.yml`,
+`ops/qualification/Dockerfile`, and an nginx gateway. With disposable
+credentials supplied through the environment, create two API processes,
+indexers, review workers, validation workers and integration workers:
+
+```sh
+export DEVHUB_QUALIFICATION_ISOLATED=YES
+export DEVHUB_QUALIFICATION_APP_SECRET="$(openssl rand -hex 32)"
+export DEVHUB_QUALIFICATION_STORAGE_USER="qual-local"
+export DEVHUB_QUALIFICATION_STORAGE_PASSWORD="$(openssl rand -hex 32)"
+docker compose -f ops/qualification/compose.yml build
+docker compose -f ops/qualification/compose.yml up -d \
+  --scale api=2 --scale index=2 --scale review=2 \
+  --scale validation=2 --scale integration=2
+# From the host, DB localhost:15432, Redis localhost:16379,
+# MinIO localhost:19000, HTTP ingress localhost:18080.
+```
+
+Configure immutable OCI validation images, corresponding signing keys and a
+real test fixture before claiming any validation success. This Compose model
+uses one Docker host, one PostgreSQL primary, one Redis and one MinIO; it
+cannot demonstrate independent physical failures, true regional caching or
+managed-primary failover. The image is for disposable qualification only.
+
 ## What is measured and what is not
 
 | Required workload | Driver | Qualification treatment |
