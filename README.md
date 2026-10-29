@@ -216,3 +216,7 @@ DevHub includes a [native real-object lifecycle benchmark, telemetry, fault dril
 fault drills and reconciliation procedures](docs/distributed-production.md).
 The reference CI drills are isolated; production HA failover and a fully
 measured distributed workload remain release blockers, not completed claims.
+
+## Native scalability qualification
+
+The evidence-first [qualification program](docs/scale-qualification.md) runs small real-content tests in CI and gates full-scale workloads behind an explicitly isolated manual environment. A passing smoke run does not certify the full end-to-end lifecycle.
