@@ -23,10 +23,10 @@ docker run -d --name "$primary" --network "$network" --network-alias pg-primary 
   -e POSTGRES_USER=devhub -e POSTGRES_DB=devhub -e POSTGRES_PASSWORD=devhub \
   postgres:16-alpine -c wal_level=replica -c max_wal_senders=10 -c max_replication_slots=10 >/dev/null
 for i in $(seq 1 45); do
-  if docker exec "$primary" pg_isready -U devhub -d devhub >/dev/null 2>&1; then break; fi
+  if docker exec "$primary" pg_isready -h 127.0.0.1 -U devhub -d devhub >/dev/null 2>&1; then break; fi
   sleep 1
 done
-docker exec "$primary" pg_isready -U devhub -d devhub >/dev/null
+docker exec "$primary" pg_isready -h 127.0.0.1 -U devhub -d devhub >/dev/null
 echo "primary ready"
 docker exec "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
   -c "CREATE ROLE replica WITH LOGIN REPLICATION PASSWORD 'replica-ci-only';"
