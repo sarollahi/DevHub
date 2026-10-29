@@ -42,8 +42,21 @@ jobs:
         run: npm run ops:fault-drill -- --service=db --seconds=2
       - name: Regional TCP partition and cache restart
         run: node --test tests/resilience-partition.test.mjs
+      - name: Real DB, Redis and object-store network partitions
+        run: |
+          mkdir -p artifacts/distributed-faults
+          node scripts/network-partition.mjs --service=db --seconds=3 --output=artifacts/distributed-faults/db.json
+          node scripts/network-partition.mjs --service=redis --seconds=3 --output=artifacts/distributed-faults/redis.json
+          node scripts/network-partition.mjs --service=minio --seconds=3 --output=artifacts/distributed-faults/minio.json
       - name: Final invariant checks
         run: npm run ops:reconcile -- --sample=100
+      - name: Upload measured isolation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributed-network-isolation
+          path: artifacts/distributed-faults/
+          if-no-files-found: warn
       - name: Show dependency states
         if: always()
         run: docker compose ps

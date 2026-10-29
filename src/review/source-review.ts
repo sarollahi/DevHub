@@ -131,7 +131,7 @@ export async function processReview(changesetId: string, lease: Date, attempt: n
     const elapsed = Date.now() - started;
     await db.$transaction(async tx => {
       const updated = await tx.sourceReview.updateMany({ where: {
-        changesetId, state: "RUNNING", attempts: attempt, leaseUntil: lease,
+        changesetId, state: "RUNNING", attempts: attempt, leaseUntil: { equals: lease, gt: new Date() },
       }, data: {
         state: "COMPLETED", leaseUntil: null, error: null, completedAt: new Date(),
         fingerprint: assessed.fingerprint, paths: assessed.paths,
@@ -162,7 +162,7 @@ export async function processReview(changesetId: string, lease: Date, attempt: n
   } catch (error) {
     const message = (error instanceof Error ? error.message : "Unknown review failure").slice(0, 800);
     await db.sourceReview.updateMany({ where: {
-      changesetId, state: "RUNNING", attempts: attempt, leaseUntil: lease,
+      changesetId, state: "RUNNING", attempts: attempt, leaseUntil: { equals: lease, gt: new Date() },
     }, data: {
       state: attempt >= maxAttempts ? "FAILED" : "QUEUED",
       leaseUntil: null, error: message,

@@ -11,7 +11,7 @@ export async function durableMetrics(): Promise<string> {
   if (inflight) return inflight;
   inflight = (async () => {
     const [outbox, firstOutbox, index, firstIndex, validations, firstValidation,
-      integrations, firstIntegration, publishing, staleValidations, bytes] = await Promise.all([
+      integrations, firstIntegration, publishing, staleValidations, bytes, expiredGitLeases, expiredPreflightLeases] = await Promise.all([
       db.outboxEvent.count({ where: { state: "PENDING" } }),
       db.outboxEvent.findFirst({ where: { state: "PENDING" }, orderBy: { createdAt: "asc" }, select: { createdAt: true } }),
       db.sourceQueryIndexJob.count({ where: { state: "QUEUED" } }),
@@ -23,6 +23,8 @@ export async function durableMetrics(): Promise<string> {
       db.storedBlob.count({ where: { state: "PUBLISHING" } }),
       db.validationTask.count({ where: { state: "RUNNING", leaseUntil: { lt: new Date() } } }),
       db.repository.aggregate({ _sum: { storedBytes: true } }),
+      db.gitGatewayLease.count({ where: { expiresAt: { lt: new Date() } } }),
+      db.queueJob.count({ where: { state: "RUNNING", leaseUntil: { lt: new Date() } } }),
     ]);
     const result = [
       gauge("devhub_outbox_pending", outbox),
@@ -36,6 +38,8 @@ export async function durableMetrics(): Promise<string> {
       gauge("devhub_integration_oldest_queue_age_seconds", lag(firstIntegration?.createdAt)),
       gauge("devhub_object_publications_pending", publishing),
       gauge("devhub_tenant_storage_bytes_total", Number(bytes._sum.storedBytes ?? 0n)),
+      gauge("devhub_git_gateway_expired_leases", expiredGitLeases),
+      gauge("devhub_preflight_expired_leases", expiredPreflightLeases),
     ].join("\n") + "\n";
     latest = { at: Date.now(), content: result };
     return result;

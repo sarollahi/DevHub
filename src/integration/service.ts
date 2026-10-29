@@ -114,7 +114,7 @@ async function setState(job: Integration, token: string, state: string, patch: {
 } = {}, action?: string) {
   await db.$transaction(async tx => {
     const changed = await tx.changeIntegration.updateMany({ where: {
-      id: job.id, leaseToken: token, state: "PREPARING",
+      id: job.id, leaseToken: token, state: "PREPARING", leaseUntil: { gt: new Date() },
     }, data: { ...patch, state, leaseToken: null, leaseUntil: null } });
     if (changed.count !== 1) throw new SourceControlError(409, "LEASE_LOST", "Integration worker lease changed");
     if (action) await tx.auditEvent.create({ data: { repositoryId: job.repositoryId,
@@ -244,7 +244,7 @@ async function publish(job: Integration, token: string, actor: SourceActor,
     }
     await guardApprovals(tx, job, resultId, nowProtected);
     const claimed = await tx.changeIntegration.updateMany({ where: {
-      id: job.id, leaseToken: token, state: "PREPARING",
+      id: job.id, leaseToken: token, state: "PREPARING", leaseUntil: { gt: new Date() },
     }, data: { state: "INTEGRATED", targetChangesetId: observed.changesetId,
       targetGeneration: observed.generation, resultChangesetId: resultId,
       leaseToken: null, leaseUntil: null, completedAt: new Date() } });
