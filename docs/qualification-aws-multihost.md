@@ -61,9 +61,9 @@ The test verifies actual Linux kernel boot fingerprints from all machines,
 then authenticates against the two real remote API processes. It requires
 three distinct kernels, two distinct API identities, different AZs, and
 health/readiness with zero observed errors during independent, real
-source-control publication workloads. Output contains persisted changeset
-counts, driver phase latency distributions, API probe samples and errors,
-host attestations, and raw driver logs. Artifacts are downloaded from a private
+source-control publication workloads. Output contains independently persisted per-host changeset counts, per-host
+publication p95, driver phase latency distributions, API probe samples/errors,
+host attestations, and raw logs from all participating hosts. Artifacts are downloaded from a private
 encrypted S3 bucket and uploaded to the workflow, **even on failure where
 available**.
 
