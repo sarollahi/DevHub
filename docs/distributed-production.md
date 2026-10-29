@@ -25,8 +25,9 @@ test on the actual topology. CI fault drills are isolated infrastructure checks.
 - Run two or more Git gateway instances with **separate, private** on-node
   `GIT_INTEROP_ROOT` (0700). Do not share the Git directory over NFS.
   All Git refs/commits in that directory are disposable native projections.
-  A PostgreSQL lease serializes sessions per repository across gateways;
-  a pre-receive hook is issued a lease token; native ref batch CAS checks
+  A PostgreSQL lease serializes **write sessions** per repository across
+  gateways, while separate replicas may serve reads concurrently. A
+  pre-receive hook is issued a lease token; native ref batch CAS checks
   and locks the token within the same DB transaction. An expired/stolen
   session must fail and the user must retry. Git transfer bytes are observed,
   not a second write authority.
