@@ -30,7 +30,7 @@ export function recipes(env: NodeJS.ProcessEnv = process.env): Recipe[] {
     { kind: "LINT", image: node, command: install + " && npm run lint", timeoutSeconds: 450 },
     { kind: "SECURITY", image: scanner, command: scan + "trivy fs --offline-scan --skip-db-update --skip-java-db-update --skip-check-update --scanners misconfig --exit-code 1 /source", timeoutSeconds: 360 },
     { kind: "SECRETS", image: secrets, command: "gitleaks dir --no-banner --redact --exit-code 1 /source", timeoutSeconds: 240 },
-    { kind: "DEPENDENCIES", image: scanner, command: "trivy fs --offline-scan --skip-db-update --skip-java-db-update --skip-check-update --scanners vuln --exit-code 1 /source", timeoutSeconds: 360 },
+    { kind: "DEPENDENCIES", image: scanner, command: scan + "trivy fs --offline-scan --skip-db-update --skip-java-db-update --skip-check-update --scanners vuln --exit-code 1 /source", timeoutSeconds: 360 },
   ];
 }
 export function configurationDigest(input: Recipe[]): string {
