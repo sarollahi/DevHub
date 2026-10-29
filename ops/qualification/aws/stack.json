@@ -1,6 +1,6 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "Disposable 3-host DevHub qualification lab, no inbound internet, cross-AZ APIs, auto-shutdown within 150 minutes",
+  "Description": "Disposable 3-host DevHub qualification lab, no inbound internet, cross-AZ APIs, auto-shutdown within 150 minutes; S3 result bucket expires contents after 1 day",
   "Parameters": {
     "RunId": {
       "Type": "String",
@@ -182,6 +182,38 @@
           {
             "Key": "Purpose",
             "Value": "disposable-devhub-qualification"
+          }
+        ],
+        "Policies": [
+          {
+            "PolicyName": "write-only-run-evidence",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${EvidenceBucket.Arn}/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "EvidenceBucket",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
           }
         ]
       }
@@ -372,6 +404,44 @@
           }
         ]
       }
+    },
+    "EvidenceBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "Id": "expire-qualification-evidence",
+              "Status": "Enabled",
+              "ExpirationInDays": 1,
+              "AbortIncompleteMultipartUpload": {
+                "DaysAfterInitiation": 1
+              }
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "disposable-devhub-qualification"
+          }
+        ]
+      }
     }
   },
   "Outputs": {
@@ -441,6 +511,11 @@
     "VpcId": {
       "Value": {
         "Ref": "Network"
+      }
+    },
+    "EvidenceBucket": {
+      "Value": {
+        "Ref": "EvidenceBucket"
       }
     }
   }
