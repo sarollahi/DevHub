@@ -1264,3 +1264,15 @@ model TenantRateBucket {
   @@id([tenantId, windowStart])
   @@index([windowStart])
 }
+
+// Measured bytes observed at the Git gateway boundary. Not an estimate of
+// S3, CDN, cache or provider-billed traffic.
+model GitTrafficUsage {
+  repositoryId String   @db.Uuid
+  day          DateTime @db.Date
+  ingressBytes BigInt   @default(0)
+  egressBytes  BigInt   @default(0)
+  updatedAt    DateTime @updatedAt
+  @@id([repositoryId, day])
+  @@index([day])
+}

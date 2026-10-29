@@ -93,7 +93,7 @@ async function serveGitRpc(req: IncomingMessage, res: ServerResponse, dir: strin
       DEVHUB_GIT_ACTOR_CREDENTIAL: identity.credentialId,
       DEVHUB_GIT_PUSH_GATE: service === "git-receive-pack" ? "enabled" : "disabled" },
   });
-  let stderr = "", transferred = 0;
+  let stderr = "", transferred = 0, sent = 0;
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (data: string) => { stderr = (stderr + data).slice(-8192); });
   const deadline = setTimeout(() => child.kill("SIGKILL"), advertise ? 60000 : 900000);
@@ -113,6 +113,7 @@ async function serveGitRpc(req: IncomingMessage, res: ServerResponse, dir: strin
       });
       req.pipe(child.stdin);
     }
+    child.stdout.on("data", (chunk: Buffer) => { sent += chunk.length; });
     child.stdout.pipe(res, { end: false });
     const result = await new Promise<number>((yes, no) => {
       child.on("error", no);
@@ -124,7 +125,20 @@ async function serveGitRpc(req: IncomingMessage, res: ServerResponse, dir: strin
       if (!res.headersSent) throw new Error("Git RPC rejected: " + stderr.slice(-500));
     }
     res.end();
-  } finally { clearTimeout(deadline); }
+  } finally {
+    clearTimeout(deadline);
+    // Persist only measured transport bytes; audit accounting is best-effort,
+    // not part of authorization or the native ref publication transaction.
+    if (transferred || sent) {
+      const day = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
+      await db.gitTrafficUsage.upsert({
+        where: { repositoryId_day: { repositoryId, day } },
+        create: { repositoryId, day, ingressBytes: BigInt(transferred), egressBytes: BigInt(sent) },
+        update: { ingressBytes: { increment: BigInt(transferred) }, egressBytes: { increment: BigInt(sent) } },
+      }).catch(error => console.error("Git usage accounting deferred",
+        error instanceof Error ? error.message : "unknown"));
+    }
+  }
 }
 
 export function createGitGateway() {
