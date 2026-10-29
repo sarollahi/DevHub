@@ -121,6 +121,30 @@ deviations. With missing, incompatible or failed baseline data, the result is
 from stable deployments, repeated under identical load generator capacity,
 and complemented with environment-specific safety/integrity acceptance gates.
 
+Generate a baseline from three completed, unique, matching smoke or full
+publication summaries (each run uses identical workload parameters and a
+verified comparable topology). The baseline is only for **native publication**,
+not end-to-end certification:
+
+```sh
+node scripts/qualification/baseline.mjs --output=artifacts/qualification/baseline.json \
+  artifacts/qualification/run1/summary.json \
+  artifacts/qualification/run2/summary.json \
+  artifacts/qualification/run3/summary.json
+npm run qualification:smoke -- --baseline=artifacts/qualification/baseline.json \
+  --output=artifacts/qualification/check
+```
+
+The audit also exposed a reproduced first-claim race in PostgreSQL tenant
+scheduling: concurrent workers were occasionally raising a unique-constraint
+error on `TenantLaneTurn(lane, tenantId)`, even though all 28 review jobs
+eventually completed. This is now handled by atomic
+`INSERT ... ON CONFLICT DO NOTHING` before the existing row-lock gate.
+A parallel first-time-claim regression test was added. Recovered worker
+exceptions are preserved and now fail the qualification smoke rather than
+being silently counted as clean success. Retest artifacts determine whether
+this fix has eliminated the errors; no improvement is assumed without them.
+
 Collect as independent artifacts: physical DB read/write/WAL metrics, storage
 GET/PUT/bytes/dedupe, driver and every worker/node CPU/RSS/disk, Redis queues
 and retries, source query suboperation histogram, review retrieval recall,
