@@ -10,6 +10,11 @@ on:
       - ".github/workflows/related-review-benchmark.yml"
       - "package.json"
   workflow_dispatch:
+    inputs:
+      semantic_provider:
+        description: "Evaluate the configured external embedding provider on human-labeled engineering intent pairs"
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -50,10 +55,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p reports
-          if [ "${{ matrix.count }}" = "1000" ]; then workers=32; else workers=0; fi
+          if [ "${{ matrix.count }}" = "1000" ]; then workers=1000; else workers=0; fi
           npx tsx scripts/bench-related-review-db.ts \
             --count=${{ matrix.count }} --workers=$workers --concurrency=4 \
             --output=reports/review-db-${{ matrix.count }}.json
+      - name: Labeled semantic retrieval baseline (not an external model)
+        if: matrix.count == 1000
+        run: npm run bench:related-semantic -- --mode=lexical --output=reports/related-semantic-lexical.json
       - name: Publish actual measurements, including on failure
         uses: actions/upload-artifact@v4
         if: always()
@@ -62,3 +70,31 @@ jobs:
           path: reports/
           if-no-files-found: warn
           retention-days: 30
+
+  provider-semantic-evaluation:
+    name: Optional external provider semantic accuracy (labeled)
+    if: github.event_name == 'workflow_dispatch' && inputs.semantic_provider == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEVHUB_EMBEDDING_ENDPOINT: ${{ secrets.DEVHUB_EMBEDDING_ENDPOINT }}
+      DEVHUB_EMBEDDING_MODEL: ${{ vars.DEVHUB_EMBEDDING_MODEL }}
+      DEVHUB_EMBEDDING_API_KEY: ${{ secrets.DEVHUB_EMBEDDING_API_KEY }}
+      DEVHUB_EMBEDDING_PROVIDER: openai-compatible
+      DEVHUB_EMBEDDING_USD_PER_MILLION_TOKENS: ${{ vars.DEVHUB_EMBEDDING_USD_PER_MILLION_TOKENS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22.18", cache: npm }
+      - run: npm ci --no-audit --no-fund
+      - name: Evaluate actual provider precision, recall and candidate coverage
+        run: |
+          test -n "$DEVHUB_EMBEDDING_ENDPOINT"
+          test -n "$DEVHUB_EMBEDDING_MODEL"
+          npm run bench:related-semantic -- --mode=provider --output=reports/related-semantic-provider.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: related-semantic-real-provider
+          path: reports/
+          if-no-files-found: warn
