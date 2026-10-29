@@ -245,6 +245,24 @@ try{
               tenants:report.validation,providerCost:report.review,storage:report.storage,
               targets:report.targets};
           }});
+      if(process.env.DEVHUB_QUALIFICATION_CACHE_TARGETS_FILE){
+        const cache=await run("real-regional-caches",process.execPath,[
+          "scripts/qualification/cache-regions.mjs",
+          "--input="+join(destination,"linked-lifecycle.json"),
+          "--output="+join(destination,"regional-cache.json")],{
+            timeout:1800,parse:async()=>{
+              const report=await readJSON("regional-cache.json");
+              return {accepted:report.results?.length>=3 && report.results.every(x=>
+                x.phases?.length===2 && x.phases.every(y=>y.integrityFailures===0)),
+                instances:report.results?.map(x=>({name:x.name,tier:x.tier,phases:x.phases}))};
+            }});
+        if(cache?.status==="PASSED"){
+          for(const name of ["cache-cold","cache-warm"])
+            results.push({name:"regional-"+name,case:name,status:"PASSED",
+              evidence:{source:"regional-cache.json"}});
+          await writeSummary();
+        }
+      }
       if(process.env.DEVHUB_QUALIFICATION_FAULT_ENABLED==="YES")
         await run("isolated-recovery-drills",npm,["exec","--","tsx",
           "scripts/qualification/fault-recovery.ts",
