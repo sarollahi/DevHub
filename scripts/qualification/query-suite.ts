@@ -25,6 +25,14 @@ if(checkpoint){
   const saved=JSON.parse(await readFile(checkpoint,"utf8"));
   if(saved.seedPath!==input || !saved.head)throw Error("Checkpoint mismatches input seed");
   revision=saved.head;root=revision;path="scale/active.txt";
+}else if(data.input?.changesetCount && data.integrity?.persistedAfterIndependentPhase){
+  const ref=await db.sourceReference.findUniqueOrThrow({where:{
+    repositoryId_name:{repositoryId,name:"branches/perf"}}});
+  revision=ref.changesetId;
+  const parent=await db.sourceChangesetParent.findFirst({
+    where:{changesetId:revision,position:0},select:{parentId:true}});
+  root=parent?.parentId??revision;
+  path="base.txt";
 }else{
   if(data.status!=="PASSED")throw Error("Linked lifecycle did not finish");
   revision=data.linked?.resultId;
