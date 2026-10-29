@@ -216,7 +216,8 @@ try {
     clientBytes+=content.length;
   }
   step("verified-client-sync",{refsObserved:refs.records.length,
-    revision:resultId,filesVerified:tree.entries.length,bytesVerified:clientBytes});
+    revision:resultId,filesVerified:tree.entries.length,bytesVerified:clientBytes,
+    objects:tree.entries.map((item:{path:string;objectId:string})=>({path:item.path,id:item.objectId}))});
   await persist("PASSED",{linked:{
     repositoryId:repoId,sourceId:change.id,integrationId:integration.id,
     resultId,referenceGeneration:ref.generation,
