@@ -19,7 +19,7 @@ export function recipes(env: NodeJS.ProcessEnv = process.env): Recipe[] {
   const secrets = image("VALIDATION_SECRETS_IMAGE");
   // All executable recipes are controlled by the service. Repository scripts are untrusted
   // and are executed only by the disposable container runner, never by the API process.
-  const install = "cp -a /source/. /work/ && cd /work && npm ci --offline --ignore-scripts --no-audit --no-fund";
+  const install = "cp -R /source/. /work/ && cd /work && npm ci --offline --ignore-scripts --no-audit --no-fund";
   return [
     { kind: "COMPILE", image: node, command: install + " && npm run build", timeoutSeconds: 900 },
     { kind: "TEST", image: node, command: install + " && npm test", timeoutSeconds: 900 },
