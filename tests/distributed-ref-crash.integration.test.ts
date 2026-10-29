@@ -52,7 +52,7 @@ test("API SIGKILL before PostgreSQL ref-transaction commit rolls back ref, outbo
   await db.$executeRawUnsafe(`CREATE TRIGGER "${trigger}" BEFORE INSERT ON "SourceRefMutation"
     FOR EACH ROW EXECUTE FUNCTION "${func}"()`);
   const child = spawn(process.execPath, ["--import","tsx","scripts/ref-crash-child.ts",
-    repo.id,user.id,session.id,next.id,String(original.generation),mutationId],
+    repo.id,user.id,session.id,next.id,String(original.ref.generation),mutationId],
     { cwd: process.cwd(), stdio: ["ignore","pipe","pipe"], env: process.env });
   try {
     // pg_stat_activity confirms the genuine PostgreSQL sleep fault was reached.
@@ -75,21 +75,20 @@ test("API SIGKILL before PostgreSQL ref-transaction commit rolls back ref, outbo
       where: { repositoryId_name: { repositoryId: repo.id, name: "dev" } },
     });
     assert.equal(unchanged.changesetId, base.id);
-    assert.equal(unchanged.generation, original.generation);
+    assert.equal(unchanged.generation, original.ref.generation);
     assert.equal(await db.sourceRefMutation.count({ where: {
       repositoryId: repo.id, name: "dev", mutationId,
     } }), 0);
     assert.equal(await db.outboxEvent.count({ where: {
-      aggregateType: "SourceReference", kind: "SOURCE_REFERENCE_MUTATED",
-      payload: { path: ["mutationId"], equals: mutationId },
+      aggregateType: "SourceReference", aggregateId: repo.id, kind: "source.ref.update",
     } }), 0);
     await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${trigger}" ON "SourceRefMutation"`);
     await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${func}"()`);
     const retry = await mutateReference(repo.id, actor, {
       name: "dev", kind: "BRANCH", operation: "UPDATE",
-      expectedGeneration: original.generation, changesetId: next.id, mutationId,
+      expectedGeneration: original.ref.generation, changesetId: next.id, mutationId,
     });
-    assert.equal(retry.changesetId, next.id);
+    assert.equal(retry.ref.changesetId, next.id);
     assert.equal(await db.sourceRefMutation.count({ where: {
       repositoryId: repo.id, name: "dev", mutationId,
     } }), 1);
