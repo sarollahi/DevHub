@@ -139,9 +139,9 @@ async function capture(task:Claimed,source:string,artifacts:string,isCancelled:(
   const name=containerName(task.id,task.leaseToken);
   const args=["run","--rm","--pull=never","--name",name,"--network=none","--read-only",
     "--cap-drop=ALL","--security-opt=no-new-privileges","--pids-limit=128",
-    "--memory=1024m","--cpus=1.5","--user=65534:65534","--init",
+    "--memory=3072m","--cpus=1.5","--user=65534:65534","--init",
     "--tmpfs","/work:rw,exec,nosuid,nodev,size=640m",
-    "--tmpfs","/tmp:rw,nosuid,nodev,size=512m",
+    "--tmpfs","/tmp:rw,nosuid,nodev,size=2048m",
     "--mount","type=bind,src="+source+",dst=/source,readonly",
     "--mount","type=bind,src="+artifacts+",dst=/artifacts",
     "--env","HOME=/tmp","--env","npm_config_cache=/tmp/npm-cache",
