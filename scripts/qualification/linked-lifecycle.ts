@@ -115,6 +115,11 @@ try {
   const change=await createCanonicalChangeset(repoId,actor,{
     apiVersion:2,parents:[root.id],description:"Qualify real immutable source change",
     operations:[{kind:"MODIFY",path:"src/feature.js",objectId:nextBlob.id}]});
+  // Creating a branch in an approval-protected repository is itself a
+  // privileged ref operation. Authorize the immutable root through the real
+  // human approval service before the first reference transaction.
+  await approveChangeset(repoId,root.id,human);
+  step("baseline-human-approval",{rootId:root.id});
   const initial=await mutateReference(repoId,actor,{
     operation:"CREATE",name:"branches/qualification",changesetId:root.id,
     expectedGeneration:null,mutationId:"qual-init-"+suffix});
