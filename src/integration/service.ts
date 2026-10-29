@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { db } from "../lib/prisma";
+import { fairCandidates, fairClaim } from "../workers/tenant-scheduler";
 import { assertRepositoryPermission } from "../lib/authorization";
 import { SourceControlError, type SourceActor } from "../source-control/contracts";
 import { createCanonicalChangeset, readCanonicalSnapshotForValidation } from "../source-control/canonical";
@@ -390,44 +391,56 @@ export async function executeIntegration(jobId: string, lease: string) {
   }
 }
 export async function processNextIntegration(): Promise<boolean> {
-  const now = new Date();
-  const next = await db.changeIntegration.findFirst({ where: { OR: [
-    { state: { in: ["QUEUED", "WAITING_CHECKS", "WAITING_APPROVAL", "RETRY"] }, nextAttemptAt: { lte: now } },
-    { state: "PREPARING", leaseUntil: { lt: now } },
-  ] }, orderBy: [{ nextAttemptAt: "asc" }, { id: "asc" }] });
-  if (!next) return false;
-  const token = randomUUID();
-  const claimed = await db.changeIntegration.updateMany({ where: { id: next.id, state: next.state,
-    leaseToken: next.leaseToken, ...(next.state === "PREPARING" ?
-      { leaseUntil: { lt: now } } : { nextAttemptAt: { lte: now } }) },
-    data: { state: "PREPARING", leaseToken: token, leaseUntil: seconds(600) } });
-  if (!claimed.count) return true;
-  try { await executeIntegration(next.id, token); }
-  catch (error) {
-    const code = error instanceof SourceControlError ? error.code : "INTERNAL_ERROR";
-    const retry = code === "TARGET_MOVED" || code === "REFERENCE_CONFLICT";
-    const wait = transient.has(code) && !retry;
-    const state = retry && next.attempts + 1 < next.maxAttempts ? "RETRY" :
-      wait ? "WAITING_CHECKS" : "FAILED";
-    await db.$transaction(async tx => {
-      const moved = await tx.changeIntegration.updateMany({ where: {
-        id: next.id, state: "PREPARING", leaseToken: token, leaseUntil: { gt: new Date() },
-      }, data: { state, leaseToken: null, leaseUntil: null,
-        attempts: { increment: retry ? 1 : 0 },
-        nextAttemptAt: seconds(retry ? Math.min(60, 2 ** (next.attempts + 1)) : 30),
-        lastError: (error instanceof Error ? error.message : String(error)).slice(0, 1000),
-        ...(state === "FAILED" ? { completedAt: new Date() } : {}),
-      } });
-      if (moved.count) await tx.auditEvent.create({ data: {
-        repositoryId: next.repositoryId, actorType: "SYSTEM", actorId: "integration-worker",
-        action: "integration." + state.toLowerCase(), subjectId: next.id,
-        metadata: { code, attempt: next.attempts + (retry ? 1 : 0) },
-      } });
+  const candidates = await fairCandidates("integration");
+  for (const candidate of candidates) {
+    const selected = await fairClaim("integration", candidate.tenantId, async tx => {
+      const next = await tx.changeIntegration.findUnique({ where: { id: candidate.id } });
+      if (!next) return null;
+      const now = new Date();
+      const eligible = next.state === "PREPARING" ? !!next.leaseUntil && next.leaseUntil < now :
+        ["QUEUED", "WAITING_CHECKS", "WAITING_APPROVAL", "RETRY"].includes(next.state) &&
+          next.nextAttemptAt <= now;
+      if (!eligible) return null;
+      const token = randomUUID();
+      const claimed = await tx.changeIntegration.updateMany({
+        where: { id: next.id, state: next.state, leaseToken: next.leaseToken,
+          ...(next.state === "PREPARING" ? { leaseUntil: { lt: now } } : {
+            nextAttemptAt: { lte: now } }) },
+        data: { state: "PREPARING", leaseToken: token, leaseUntil: seconds(600) },
+      });
+      return claimed.count ? { next, token } : null;
     });
-    if (state === "FAILED") console.error("Integration failed:", next.id, error);
+    if (!selected) continue;
+    const { next, token } = selected;
+    try { await executeIntegration(next.id, token); }
+    catch (error) {
+      const code = error instanceof SourceControlError ? error.code : "INTERNAL_ERROR";
+      const retry = code === "TARGET_MOVED" || code === "REFERENCE_CONFLICT";
+      const wait = transient.has(code) && !retry;
+      const state = retry && next.attempts + 1 < next.maxAttempts ? "RETRY" :
+        wait ? "WAITING_CHECKS" : "FAILED";
+      await db.$transaction(async tx => {
+        const moved = await tx.changeIntegration.updateMany({ where: {
+          id: next.id, state: "PREPARING", leaseToken: token, leaseUntil: { gt: new Date() },
+        }, data: { state, leaseToken: null, leaseUntil: null,
+          attempts: { increment: retry ? 1 : 0 },
+          nextAttemptAt: seconds(retry ? Math.min(60, 2 ** (next.attempts + 1)) : 30),
+          lastError: (error instanceof Error ? error.message : String(error)).slice(0, 1000),
+          ...(state === "FAILED" ? { completedAt: new Date() } : {}),
+        } });
+        if (moved.count) await tx.auditEvent.create({ data: {
+          repositoryId: next.repositoryId, actorType: "SYSTEM", actorId: "integration-worker",
+          action: "integration." + state.toLowerCase(), subjectId: next.id,
+          metadata: { code, attempt: next.attempts + (retry ? 1 : 0) },
+        } });
+      });
+      if (state === "FAILED") console.error("Integration failed:", next.id, error);
+    }
+    return true;
   }
-  return true;
+  return false;
 }
+
 export async function reauthorizeIntegration(repositoryId: string, integrationId: string, actor: SourceActor) {
   const job = await db.changeIntegration.findFirst({ where: { id: integrationId, repositoryId } });
   if (!job) throw new SourceControlError(404, "NOT_FOUND", "Integration not found");
