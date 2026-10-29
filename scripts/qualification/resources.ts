@@ -31,8 +31,7 @@ const snapshot=async()=>{
     db.sourceReview.findMany({where:{repositoryId},select:{
       costMicros:true,latencyMs:true,startedAt:true,completedAt:true,provider:true}}),
     db.blobTransfer.findMany({where:{repositoryId},select:{
-      state:true,rawInputBytes:true,encodedPutBytes:true,
-      encodedGetBytes:true,rawOutputBytes:true}}),
+      state:true,rawInputBytes:true,encodedPutBytes:true}}),
     db.sourceChangeset.count({where:{repositoryId}}),
     db.$queryRaw<Array<Record<string,unknown>>>`
       SELECT numbackends, xact_commit, xact_rollback,
@@ -64,8 +63,8 @@ const snapshot=async()=>{
     storage:{transfers:objectTransfers.length,states:objectTransfers.map(t=>t.state),
       rawIngressBytes:amount(objectTransfers.map(x=>x.rawInputBytes)),
       encodedIngressBytes:amount(objectTransfers.map(x=>x.encodedPutBytes)),
-      rawEgressBytes:amount(objectTransfers.map(x=>x.rawOutputBytes)),
-      encodedEgressBytes:amount(objectTransfers.map(x=>x.encodedGetBytes))},
+      rawEgressBytes:null,
+      encodedEgressBytes:null},
     postgres:{database:postgres.map(row=>Object.fromEntries(Object.entries(row).map(([k,v])=>[
       k,typeof v==="bigint"?v.toString():v]))),
       wal:wal.map(row=>Object.fromEntries(Object.entries(row).map(([k,v])=>[
