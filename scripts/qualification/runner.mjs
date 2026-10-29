@@ -200,6 +200,65 @@ try{
       await writeSummary();
     }
   }
+  if(life?.status==="PASSED"){
+    await run("repository-resource-snapshot",npm,["exec","--","tsx",
+      "scripts/qualification/resources.ts","--input="+join(destination,lifecycleFile),
+      "--output="+join(destination,"resource-snapshot.json")],{
+      timeout:120,parse:async()=>{
+        const report=await readJSON("resource-snapshot.json");
+        return {accepted:report.repository?.id===life.evidence.repositoryId,
+          postgres:report.postgres,storage:report.storage,
+          tenantCost:report.validation,measuredTargets:report.targets};
+      }});
+  }
+  if(full){
+    const base=process.env.DEVHUB_QUALIFICATION_API_URL;
+    if(!base)throw Error("Full certification requires real authenticated API origin");
+    const link=await run("linked-signed-lifecycle",npm,["exec","--","tsx",
+      "scripts/qualification/linked-lifecycle.ts",
+      "--api="+base,"--timeout-seconds=3600",
+      "--output="+join(destination,"linked-lifecycle.json")],{
+        timeout:3700,parse:async()=>{
+          const report=await readJSON("linked-lifecycle.json");
+          const stages=report.stages?.map(x=>x.stage)??[];
+          const required=["object-storage","publication","signed-validation",
+            "human-policy-approval","integration-completed","verified-client-sync"];
+          return {accepted:report.status==="PASSED" && required.every(x=>stages.includes(x)),
+            repositoryId:report.repositoryId,
+            stages,linked:report.linked};
+        }});
+    if(link?.status==="PASSED"){
+      for(const stage of ["object-storage","validation-executed","approval",
+        "integration-completed","atomic-ref","client-sync","review-completed"]){
+        results.push({name:"linked-"+stage,stage,status:"PASSED",case:null,
+          evidence:{source:"linked-lifecycle.json",
+            repositoryId:link.evidence.repositoryId}});
+      }
+      await writeSummary();
+      await run("linked-resource-snapshot",npm,["exec","--","tsx",
+        "scripts/qualification/resources.ts",
+        "--input="+join(destination,"linked-lifecycle.json"),
+        "--output="+join(destination,"linked-resources.json")],{
+          timeout:120,parse:async()=>{
+            const report=await readJSON("linked-resources.json");
+            return {accepted:report.repository.id===link.evidence.repositoryId,
+              tenants:report.validation,providerCost:report.review,storage:report.storage,
+              targets:report.targets};
+          }});
+      if(process.env.DEVHUB_QUALIFICATION_FAULT_ENABLED==="YES")
+        await run("isolated-recovery-drills",npm,["exec","--","tsx",
+          "scripts/qualification/fault-recovery.ts",
+          "--input="+join(destination,"linked-lifecycle.json"),
+          "--output="+join(destination,"fault-recovery.json")],{
+            timeout:1500,caseName:"restart-recovery",parse:async()=>{
+              const report=await readJSON("fault-recovery.json");
+              return {accepted:report.results?.length===6 &&
+                report.results.every(x=>x.success===true),
+                results:report.results?.map(x=>({name:x.name,service:x.service,
+                  elapsedMs:x.elapsedMs,integrity:x.integrity,verifiedObjects:x.verifiedObjects}))};
+            }});
+    }
+  }
   if(full){
     // Real S3/MinIO streaming; never substitute inline canonical BLOB bytes.
     await executeNpm("physical-object-store","storage:stress",[],{
@@ -226,6 +285,21 @@ try{
         data.refGeneration===2, CAS:data.refCas,
         caveat:"Real competing ref CAS; integration admission, not completed merge"};
     }});
+  if(full){
+    await executeNpm("semantic-provider-quality","bench:related-semantic",[
+      "--mode=provider","--output="+join(destination,"semantic-provider.json")],{
+      timeout:1800,parse:async()=>{
+        const report=await readJSON("semantic-provider.json");
+        return {accepted:!!report.provider && report.mode==="provider" &&
+          Number.isFinite(report.precision) && Number.isFinite(report.recall) &&
+          Number.isFinite(report.candidateRecall),
+          provider:report.provider,model:report.model,
+          precision:report.precision,recall:report.recall,
+          candidateRecall:report.candidateRecall,
+          labelledExamples:report.samples,
+          measuredProviderCostUSD:report.providerCostUsd};
+      }});
+  }
   await executeNpm("cache-local-control","cache:benchmark",[],{
     timeout:300,parse:async()=>({nonqualifying:true,reason:"localhost synthetic origin; not a native regional cache"})});
   if(full){
