@@ -67,7 +67,7 @@ docker exec "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
 partition_start_ms="$(date +%s%3N)"
 docker network disconnect -f "$network" "$standby"
 docker exec -d "$primary" sh -c \
-  "psql -U devhub -d devhub -v ON_ERROR_STOP=1 -c \"INSERT INTO public.failover_sentinel VALUES (99,'commit-after-standby-ack');\" > /tmp/devhub-ci-sync.out 2>&1; echo \\\$? > /tmp/devhub-ci-sync.exit"
+  'psql -U devhub -d devhub -v ON_ERROR_STOP=1 -c "INSERT INTO public.failover_sentinel VALUES (99,chr(65));" > /tmp/devhub-ci-sync.out 2>&1; echo $? > /tmp/devhub-ci-sync.exit'
 sleep 3
 if docker exec "$primary" test -f /tmp/devhub-ci-sync.exit; then
   echo "Synchronous commit acknowledged while standby network unavailable" >&2; exit 1
