@@ -42,9 +42,14 @@ GitHub Actions uses short-lived OIDC credentials via
 
 ## Provision / measure / destroy
 
-Choose **Actions → Provision and qualify disposable AWS multi-host lab →
-Run workflow**, branch `feature/end-to-end-scale-qualification`. Supply the
-explicit confirmation `PROVISION_ISOLATED_AWS_AND_ACCEPT_COST`. The default
+GitHub only exposes `workflow_dispatch` after the workflow file exists on the
+repository's **default `develop` branch**. Until the qualification workflow
+is merged to `develop`, it is implementation-only and **cannot be manually
+dispatched** from this PR branch. Merge the reviewed, manual-only workflow
+entry point separately if the larger qualification PR must remain draft.
+Then choose **Actions → Provision and qualify disposable AWS multi-host lab →
+Run workflow**, select the desired branch, and supply the explicit confirmation
+`PROVISION_ISOLATED_AWS_AND_ACCEPT_COST`. The default
 provisions three m7i.large instances with encrypted, delete-on-termination
 80-GiB gp3 volumes. Sizes and workload are bounded by workflow choices. The
 driver, API A and API B get **distinct EC2 instance IDs**; APIs are placed in
