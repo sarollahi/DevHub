@@ -66,6 +66,7 @@ standby_seen="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
   "SELECT payload FROM public.failover_sentinel WHERE id=1")"
 [[ "$standby_seen" == "durable-before-promotion" ]] || { echo "Replica did not apply acknowledged sentinel"; exit 1; }
 # HARD FENCE: the old writer is physically stopped before promotion.
+failover_started_ms="$(date +%s%3N)"
 docker stop "$primary" >/dev/null
 [[ "$(docker inspect -f '{{.State.Running}}' "$primary")" == "false" ]] ||
   { echo "Old primary was not fenced" >&2; exit 1; }
@@ -85,14 +86,14 @@ docker exec "$standby" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
 after_count="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
   'SELECT COUNT(*) FROM public.failover_sentinel')"
 [[ "$after_count" == 2 ]] || { echo "Promoted standby is not writable"; exit 1; }
-node --input-type=module - "$before" "$(( $(date +%s) - started ))" <<'NODE'
+node --input-type=module - "$before" "$(( $(date +%s) - started ))" "$(( $(date +%s%3N) - failover_started_ms ))" <<'NODE'
 import { writeFileSync } from "node:fs";
-const [, , primaryLSN, elapsedSeconds] = process.argv;
+const [, , primaryLSN, elapsedSeconds, fencedPromotionMs] = process.argv;
 const evidence = { drill: "pg16_physical_replica_fenced_promotion", status: "PASS",
   oldPrimaryStoppedBeforePromotion: true, standbyStreamingBeforeFault: true,
   synchronousCommitMode: "remote_apply", lastPrimaryLSN: primaryLSN,
   acknowledgedSentinelSurvived: true, promotedWritable: true,
-  elapsedSeconds: Number(elapsedSeconds),
+  elapsedSeconds: Number(elapsedSeconds), fencedPromotionMs: Number(fencedPromotionMs),
   limitation: "Isolated local primary/standby; not cloud-managed failover or multi-region RTO" };
 writeFileSync("artifacts/distributed-faults/postgresql-failover.json", JSON.stringify(evidence, null, 2));
 console.log(JSON.stringify(evidence, null, 2));
