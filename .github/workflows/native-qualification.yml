@@ -87,6 +87,11 @@ jobs:
       VALIDATION_SIGNING_PRIVATE_KEY: ${{ secrets.DEVHUB_PERF_VALIDATION_SIGNING_PRIVATE_KEY }}
       VALIDATION_SIGNING_PUBLIC_KEY: ${{ vars.DEVHUB_PERF_VALIDATION_SIGNING_PUBLIC_KEY }}
       NEXT_TELEMETRY_DISABLED: "1"
+      DEVHUB_QUALIFICATION_API_URL: ${{ vars.DEVHUB_PERF_API_URL }}
+      DEVHUB_QUALIFICATION_FAULT_ENABLED: ${{ vars.DEVHUB_PERF_ENABLE_COMPOSE_FAULTS }}
+      COMPOSE_FILE: ${{ github.workspace }}/ops/qualification/compose.yml
+      OPS_METRICS_TOKEN: ${{ secrets.DEVHUB_PERF_METRICS_TOKEN }}
+      DEVHUB_CACHE_TEST_TOKEN: ${{ secrets.DEVHUB_PERF_CACHE_TEST_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -100,9 +105,25 @@ jobs:
           test -n "$OBJECT_STORE_ENDPOINT" && test -n "$TOPOLOGY"
           printf '%s\n' "$TOPOLOGY" > qualification-topology.json
           chmod 600 qualification-topology.json
+          test -n "$DEVHUB_QUALIFICATION_API_URL"
+      - name: Configure observed per-instance measurement targets
+        env:
+          METRICS_TARGETS: ${{ vars.DEVHUB_PERF_METRICS_TARGETS }}
+          CACHE_TARGETS: ${{ vars.DEVHUB_PERF_CACHE_TARGETS }}
+        run: |
+          if [ -n "$METRICS_TARGETS" ]; then
+            printf '%s\n' "$METRICS_TARGETS" > perf-metrics-targets.json
+            echo "DEVHUB_QUALIFICATION_METRIC_TARGETS_FILE=$PWD/perf-metrics-targets.json" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$CACHE_TARGETS" ]; then
+            printf '%s\n' "$CACHE_TARGETS" > perf-cache-targets.json
+            echo "DEVHUB_QUALIFICATION_CACHE_TARGETS_FILE=$PWD/perf-cache-targets.json" >> "$GITHUB_ENV"
+          fi
       - run: npm run db:generate && npm run db:deploy
-      - name: Execute all implemented real-content cases, preserve failures
-        run: npm run qualification:full -- --output=artifacts/qualification/full
+      - name: Establish three independent 10k real-content baselines
+        run: npm run qualification:baseline -- --runs=3 --topology=qualification-topology.json --output=artifacts/qualification/baseline
+      - name: Execute full linked/source-control qualification and compare measured baseline
+        run: npm run qualification:full -- --baseline=artifacts/qualification/baseline/baseline.json --output=artifacts/qualification/full
       - name: Archive complete raw evidence regardless of failures
         if: always()
         uses: actions/upload-artifact@v4
