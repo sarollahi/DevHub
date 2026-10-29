@@ -9,7 +9,7 @@ try {
     select: { id: true, ownerId: true, organizationId: true, storedBytes: true } });
   const rows = [];
   for (const repo of repositories) {
-    const [changesets, validations, integrations, jobs, objectGrants, gitTraffic] = await Promise.all([
+    const [changesets, validations, integrations, jobs, objectGrants, gitTraffic, uploads] = await Promise.all([
       db.sourceChangeset.count({ where: { repositoryId: repo.id } }),
       db.validationPipeline.count({ where: { repositoryId: repo.id } }),
       db.changeIntegration.count({ where: { repositoryId: repo.id } }),
@@ -18,6 +18,8 @@ try {
       db.sourceObjectGrant.count({ where: { repositoryId: repo.id } }),
       db.gitTrafficUsage.aggregate({ where: { repositoryId: repo.id },
         _sum: { ingressBytes: true, egressBytes: true } }),
+      db.blobTransfer.aggregate({ where: { repositoryId: repo.id, state: "FINISHED" },
+        _sum: { rawInputBytes: true, encodedPutBytes: true }, _count: { id: true } }),
     ]);
     const runnerWallSeconds = jobs.reduce((sum, j) =>
       sum + Math.max(0, (j.finishedAt!.getTime() - j.startedAt!.getTime()) / 1000), 0);
@@ -25,12 +27,15 @@ try {
       storedBytes: repo.storedBytes.toString(), objectGrants, changesets, validations,
       integrations, gitIngressBytes: (gitTraffic._sum.ingressBytes ?? 0n).toString(),
        gitEgressBytes: (gitTraffic._sum.egressBytes ?? 0n).toString(),
+       uploadedRawBytes: (uploads._sum.rawInputBytes ?? 0n).toString(),
+       s3StagingPutBytes: (uploads._sum.encodedPutBytes ?? 0n).toString(),
+       completedUploads: uploads._count.id,
        runnerWallSeconds: Math.round(runnerWallSeconds * 100) / 100,
       accountingBasis: "recorded server-side operations; no cost estimate or CPU attribution" });
   }
   console.log(JSON.stringify({ generatedAt: new Date().toISOString(), repositoryLimit: max,
     repositories: rows, limitations: ["Shared objects may be granted in multiple repositories",
-      "Git ingress/egress only; excludes API, S3, regional cache, CDN and retransmission-provider charges",
+      "Measured Git transport and S3 staging PUT payloads only; excludes API downloads, S3 verification GET/copy, regional cache, CDN and wire retransmissions",
        "No measured per-tenant CPU or total network-provider cost",
       "Runner wall time is not billable vCPU time"] }, null, 2));
 } finally { await db.$disconnect(); }
