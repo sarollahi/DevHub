@@ -63,7 +63,7 @@ try{
     for(let i=0;i<samples;i++){
       const tick=performance.now();
       try {
-        const value=await runAuthorizedQuery(actor,repositoryId,action);
+        const value=await runAuthorizedQuery(actor,repositoryId,async()=>action());
         if(value===null || value===undefined)throw Error("No query response");
         timings.push(performance.now()-tick);
       }catch(error){
