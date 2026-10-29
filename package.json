@@ -46,7 +46,8 @@
     "bench:snapshot-scale": "tsx scripts/bench-snapshot-scale.ts",
     "snapshot:backfill": "tsx scripts/backfill-snapshots.ts",
     "bench:related-review": "node --experimental-strip-types scripts/bench-related-review.mjs",
-    "bench:related-db": "tsx scripts/bench-related-review-db.ts"
+    "bench:related-db": "tsx scripts/bench-related-review-db.ts",
+    "bench:related-semantic": "tsx scripts/eval-related-semantic.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",
