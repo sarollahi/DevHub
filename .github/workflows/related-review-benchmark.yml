@@ -4,6 +4,9 @@ on:
     branches: ["feature/repository-wide-review-indexes"]
     paths:
       - "scripts/bench-related-review-db.ts"
+      - "scripts/eval-related-semantic.ts"
+      - "scripts/prepare-related-embeddings.py"
+      - "tests/fixtures/related-semantic.json"
       - "src/review/**"
       - "src/source-control/canonical.ts"
       - "prisma/**"
@@ -67,6 +70,31 @@ jobs:
         if: always()
         with:
           name: related-review-postgres-${{ matrix.count }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
+
+  model-semantic-evaluation:
+    name: Actual ONNX sentence embedding precision / recall
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22.18", cache: npm }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: npm ci --no-audit --no-fund
+      - name: Install reproducible CPU ONNX embedding runtime
+        run: python -m pip install --disable-pip-version-check fastembed==0.9.1
+      - name: Generate embeddings from a published sentence embedding model
+        run: python scripts/prepare-related-embeddings.py
+      - name: Measure actual ANN and cosine precision/recall on labeled text
+        run: npm run bench:related-semantic -- --mode=model --vectors=reports/related-semantic-model-vectors.json --output=reports/related-semantic-model.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: related-semantic-real-model
           path: reports/
           if-no-files-found: warn
           retention-days: 30
