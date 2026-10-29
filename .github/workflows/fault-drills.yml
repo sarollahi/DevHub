@@ -152,3 +152,69 @@ jobs:
           name: archived-wal-pitr
           path: artifacts/distributed-faults/
           if-no-files-found: warn
+
+  multi-process-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DEVHUB_FAULT_DRILL: isolated-local-only
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      REDIS_URL: redis://localhost:6379
+      APP_SECRET: ci-only-long-random-testing-secret-123456789
+      OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
+      OBJECT_STORE_BUCKET: devhub-objects
+      OBJECT_STORE_REGION: us-east-1
+      OBJECT_STORE_ACCESS_KEY: devhub-local
+      OBJECT_STORE_SECRET_KEY: devhub-local-password-change-in-production
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Launch real dependencies
+        run: docker compose up -d --wait db redis minio
+      - name: Prepare schema and a real S3 bucket
+        run: |
+          npm run db:generate && npm run db:deploy
+          docker run --rm --network host --entrypoint /bin/sh cgr.dev/chainguard/minio-client:latest-dev -c \
+            'until mc alias set local http://127.0.0.1:9000 devhub-local devhub-local-password-change-in-production; do sleep 2; done; mc mb --ignore-existing local/devhub-objects'
+      - name: Build production API
+        run: npm run build
+      - name: Three actual client processes, two API replicas and two independent index workers
+        run: |
+          set -Eeuo pipefail
+          npm run start -- -p 3101 > /tmp/devhub-api-a.log 2>&1 &
+          a=$!
+          npm run start -- -p 3102 > /tmp/devhub-api-b.log 2>&1 &
+          b=$!
+          npm run worker:source-index > /tmp/devhub-index-a.log 2>&1 &
+          c=$!
+          npm run worker:source-index > /tmp/devhub-index-b.log 2>&1 &
+          d=$!
+          trap 'kill "$a" "$b" "$c" "$d" 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3101/api/health > /dev/null &&
+               curl --fail --silent http://127.0.0.1:3102/api/health > /dev/null; then break; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:3101/api/health
+          curl --fail --silent http://127.0.0.1:3102/api/health
+          node scripts/certify-multi-process.mjs --clients=3 --changesets=96 --submissions=24 --concurrency=12 --timeout-seconds=600 --api=http://127.0.0.1:3101,http://127.0.0.1:3102 --output=artifacts/distributed-faults/multi-node
+          npm run ops:reconcile -- --sample=100
+      - name: Upload measured real-node evidence and failure logs
+        if: always()
+        run: |
+          mkdir -p artifacts/distributed-faults/multi-node
+          for name in api-a api-b index-a index-b; do
+            cp /tmp/devhub-$name.log artifacts/distributed-faults/multi-node/$name.log 2>/dev/null || true
+          done
+      - name: Archive measured client and API results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-multi-process-stress
+          path: artifacts/distributed-faults/multi-node/
+          if-no-files-found: warn
