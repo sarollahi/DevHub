@@ -102,9 +102,5 @@
   {
     "label": "session-telemetry",
     "text": "Record login failure metrics for security monitoring dashboards"
-  },
-  {
-    "label": "Provider/model accuracy is measured only on the fixed authored examples, not production distributions.",
-    "text": "Costs are operator-priced and may omit provider billing outside this run."
   }
 ]
