@@ -1,4 +1,5 @@
 import { measured } from "../observability/telemetry";
+import { randomUUID } from "node:crypto";
 import { processDerivedBatch } from "../source-control/derived-index";
 import { db } from "../lib/prisma";
 import { indexSearchBatch, enqueueSearchObjects } from "./search-indexer";
@@ -11,12 +12,13 @@ export async function ensureIndexJob(repositoryId: string, changesetId: string) 
 
 export async function indexChangeset(changesetId: string): Promise<boolean> {
   const now = new Date();
+  const leaseToken = randomUUID();
   const claimed = await db.sourceQueryIndexJob.updateMany({
     where: { changesetId, nextAttemptAt: { lte: now }, OR: [
       { state: "QUEUED" }, { state: "RUNNING", leaseUntil: { lt: now } },
     ] },
     data: { state: "RUNNING", attempts: { increment: 1 },
-      leaseUntil: new Date(now.getTime() + 90_000), lastError: null },
+      leaseUntil: new Date(now.getTime() + 90_000), leaseToken, lastError: null },
   });
   if (!claimed.count) return false;
   try {
@@ -33,8 +35,9 @@ export async function indexChangeset(changesetId: string): Promise<boolean> {
           data: missing.map(id => ({ changesetId: id, repositoryId: source.repositoryId })), skipDuplicates: true,
         });
       }
-      await db.sourceQueryIndexJob.update({ where: { changesetId }, data: {
-        state: "QUEUED", leaseUntil: null, nextAttemptAt: new Date(Date.now() + 1_000),
+      await db.sourceQueryIndexJob.updateMany({ where: { changesetId, state: "RUNNING",
+        leaseToken, leaseUntil: { gt: new Date() } }, data: {
+        state: "QUEUED", leaseUntil: null, leaseToken: null, nextAttemptAt: new Date(Date.now() + 1_000),
       } });
       return false;
     }
@@ -47,18 +50,22 @@ export async function indexChangeset(changesetId: string): Promise<boolean> {
     ]);
     await enqueueSearchObjects(source.operations.map(op => op.objectId).filter((id): id is string => !!id));
     await db.$transaction(async tx => {
+      const finished = await tx.sourceQueryIndexJob.updateMany({
+        where: { changesetId, state: "RUNNING", leaseToken, leaseUntil: { gt: new Date() } },
+        data: { state: "SUCCEEDED", generation, indexedAt: new Date(),
+          leaseUntil: null, leaseToken: null, lastError: null },
+      });
+      if (!finished.count) return;
       if (touches.length) await tx.sourceQueryPathTouch.createMany({ data: touches, skipDuplicates: true });
-      await tx.sourceQueryIndexJob.update({ where: { changesetId }, data: {
-        state: "SUCCEEDED", generation, indexedAt: new Date(), leaseUntil: null, lastError: null,
-      } });
     });
     return true;
   } catch (error) {
     const failure = error instanceof Error ? error.message.slice(0, 1000) : "Unknown indexing failure";
     const current = await db.sourceQueryIndexJob.findUniqueOrThrow({ where: { changesetId } });
-    await db.sourceQueryIndexJob.update({ where: { changesetId }, data: {
+    await db.sourceQueryIndexJob.updateMany({ where: { changesetId,
+      state: "RUNNING", leaseToken, leaseUntil: { gt: new Date() } }, data: {
       state: current.attempts >= 10 ? "FAILED" : "QUEUED",
-      lastError: failure, leaseUntil: null,
+      lastError: failure, leaseUntil: null, leaseToken: null,
       nextAttemptAt: new Date(Date.now() + Math.min(30_000, 500 * 2 ** Math.min(current.attempts, 6))),
     } });
     throw error;

@@ -1,4 +1,5 @@
 import { db } from "../lib/prisma";
+import { randomUUID } from "node:crypto";
 import { verifiedBlobStream } from "../object-store/service";
 import { objectId as contentId } from "../source-control/storage";
 
@@ -24,10 +25,11 @@ export function indexableText(bytes: Uint8Array): { text: string | null; reason:
 
 export async function indexSearchObject(id: string): Promise<boolean> {
   const now = new Date();
+  const leaseToken = randomUUID();
   const lease = await db.sourceSearchDocument.updateMany({ where: {
     objectId: id, nextAttemptAt: { lte: now }, OR: [{ state: "QUEUED" }, { state: "RUNNING", leaseUntil: { lt: now } }],
   }, data: { state: "RUNNING", attempts: { increment: 1 },
-    leaseUntil: new Date(now.getTime() + 90_000), lastError: null } });
+    leaseUntil: new Date(now.getTime() + 90_000), leaseToken, lastError: null } });
   if (!lease.count) return false;
   try {
     const source = await db.sourceObject.findFirstOrThrow({ where: { id, kind: "BLOB" } });
@@ -49,15 +51,18 @@ export async function indexSearchObject(id: string): Promise<boolean> {
       }
       result = indexableText(Buffer.concat(fragments));
     }
-    await db.sourceSearchDocument.update({ where: { objectId: id }, data: {
+    const finished = await db.sourceSearchDocument.updateMany({ where: {
+      objectId: id, state: "RUNNING", leaseToken, leaseUntil: { gt: new Date() },
+    }, data: {
       state: "SUCCEEDED", textBody: result.text, excludedReason: result.reason,
-      indexedAt: new Date(), leaseUntil: null, lastError: null,
+      indexedAt: new Date(), leaseUntil: null, leaseToken: null, lastError: null,
     } });
-    return true;
+    return finished.count === 1;
   } catch (error) {
     const job = await db.sourceSearchDocument.findUniqueOrThrow({ where: { objectId: id } });
-    await db.sourceSearchDocument.update({ where: { objectId: id }, data: {
-      state: job.attempts >= 5 ? "FAILED" : "QUEUED", leaseUntil: null,
+    await db.sourceSearchDocument.updateMany({ where: { objectId: id, state: "RUNNING",
+      leaseToken, leaseUntil: { gt: new Date() } }, data: {
+      state: job.attempts >= 5 ? "FAILED" : "QUEUED", leaseUntil: null, leaseToken: null,
       lastError: error instanceof Error ? error.message.slice(0, 500) : "Indexing failed",
       nextAttemptAt: new Date(Date.now() + Math.min(30000, 800 * 2 ** Math.min(job.attempts, 5))),
     } });

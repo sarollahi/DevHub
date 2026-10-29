@@ -586,6 +586,7 @@ model SourceQueryIndexJob {
   attempts     Int             @default(0)
   nextAttemptAt DateTime       @default(now())
   leaseUntil   DateTime?
+  leaseToken   String?         @db.Uuid
   lastError    String?
   indexedAt    DateTime?
   createdAt    DateTime        @default(now())
@@ -1134,6 +1135,7 @@ model SourceSearchDocument {
   attempts Int @default(0)
   nextAttemptAt DateTime @default(now())
   leaseUntil DateTime?
+  leaseToken String? @db.Uuid
   lastError String?
   indexedAt DateTime?
   object SourceObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
