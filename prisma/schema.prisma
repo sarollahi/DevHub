@@ -654,6 +654,8 @@ model BlobTransfer {
   stagingKey   String             @unique
   uploadId     String?
   state        BlobTransferState  @default(ACTIVE)
+  rawInputBytes BigInt? 
+  encodedPutBytes BigInt?
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
   repository   Repository         @relation(fields: [repositoryId], references: [id], onDelete: Restrict)
