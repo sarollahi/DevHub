@@ -14,7 +14,7 @@ The target reconciler checks OPEN review requests against their current referenc
 
 ## Configuration and records
 
-DEVHUB_EMBEDDING_ENDPOINT, DEVHUB_EMBEDDING_MODEL, DEVHUB_EMBEDDING_API_KEY and DEVHUB_EMBEDDING_PROVIDER configure the standalone provider-neutral embedding interface. An openai-compatible HTTPS adapter is supplied. DEVHUB_EMBEDDING_USD_PER_MILLION_TOKENS supplies optional pricing; zero means unknown, not free. Existing review model settings remain supported, and sending source excerpts to the analysis model requires opt-in.
+DEVHUB_EMBEDDING_ENDPOINT, DEVHUB_EMBEDDING_MODEL, DEVHUB_EMBEDDING_API_KEY, DEVHUB_EMBEDDING_MIN_SIMILARITY (default 0.50), and DEVHUB_EMBEDDING_PROVIDER configure the standalone provider-neutral embedding interface. An openai-compatible HTTPS adapter is supplied. DEVHUB_EMBEDDING_USD_PER_MILLION_TOKENS supplies optional pricing; zero means unknown, not free. Existing review model settings remain supported, and sending source excerpts to the analysis model requires opt-in.
 
 Model-call rows record operation, model/provider, latency, cost, supported token totals, confidence where supplied, success and failure. Security-sensitive deterministic findings never take instruction from generated model output.
 
@@ -52,3 +52,7 @@ CI stores results under `related-review-postgres-1000`, `related-review-postgres
 4. Measured costs, latency and worker throughput from single-host CI cannot establish a regional production deployment SLO. Full-scale environment validation additionally requires workload realism, soak tests, network failures and representative source distributions.
 
 Approximate LSH cannot guarantee nearest-neighbor completeness; explicit cursor pagination and advisory-only findings prevent silently treating approximate suggestions as correctness or authorization decisions.
+
+## Version 2 semantic retrieval correction
+
+The first labeled ONNX MiniLM evaluation identified a real retrieval defect: the former 0.82 cosine cutoff rejected all 13 labeled paraphrase pairs, and the original sparse random projection was biased because its projection sign reused the parity bit determining the sampled coordinate for even-dimensional vectors. The updated implementation uses independent sign bits, 8 bands of 10 projection bits with one-bit multi-probe, a versioned LSH namespace, and an operator-configurable advisory similarity threshold (default 0.50). The threshold is not a universal semantic-quality guarantee: calibrate it independently for a production provider and a representative held-out dataset. Previous embeddings are queued for reindexing on deployment.
