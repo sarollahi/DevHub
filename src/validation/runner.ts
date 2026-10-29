@@ -8,6 +8,7 @@ import { tmpdir, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { Prisma, type ValidationTask } from "@prisma/client";
 import { db } from "../lib/prisma";
+import { fairCandidates, fairClaim } from "../workers/tenant-scheduler";
 import { validPath } from "../lib/review-logic";
 import { snapshotFor, verifiedBlobSource, type Entry } from "./snapshot";
 import { digest, signTask, verifyTask } from "./policy";
@@ -23,7 +24,6 @@ type Claimed = ValidationTask & {
   pipeline: { repositoryId:string; changesetId:string; targetChangesetId:string|null;
     snapshotDigest:string; dependencyDigest:string };
 };
-type Candidate = { id:string; ownerId:string };
 function containerName(taskId:string, token:string|null|undefined) {
   return "devhub-val-" + taskId.replaceAll("-","") + "-" + (token || "").replaceAll("-","");
 }
@@ -31,35 +31,42 @@ async function terminateContainer(name:string) {
   await exec("docker",["rm","-f",name],{timeout:10000}).catch(()=>undefined);
 }
 export async function claimTask():Promise<Claimed|null> {
-  return db.$transaction(async tx => {
-    const candidates = await tx.$queryRawUnsafe<Candidate[]>(
-      "SELECT t.id,r.\"ownerId\" FROM \"ValidationTask\" t "+
-      "JOIN \"ValidationPipeline\" p ON p.id=t.\"pipelineId\" "+
-      "JOIN \"Repository\" r ON r.id=p.\"repositoryId\" "+
-      "WHERE p.state <> 'CANCELLED' AND t.attempt<t.\"maxAttempts\" "+
-      "AND ((t.state='QUEUED' AND t.\"nextAttemptAt\"<=now()) OR "+
-      "(t.state='RUNNING' AND t.\"leaseUntil\"<now())) "+
-      "ORDER BY t.\"createdAt\" FOR UPDATE OF t SKIP LOCKED LIMIT 24");
-    for(const candidate of candidates) {
-      const locked = await tx.$queryRawUnsafe<Array<{id:string}>>(
-        'SELECT id FROM "User" WHERE id=$1::uuid FOR UPDATE SKIP LOCKED',candidate.ownerId);
-      if(!locked.length) continue;
-      const active = await tx.validationTask.count({where:{state:"RUNNING",leaseUntil:{gt:new Date()},
-        pipeline:{repository:{ownerId:candidate.ownerId}}}});
-      const allowed = Math.max(1,Math.min(16,Number(process.env.VALIDATION_TENANT_RUNNING||2)));
-      if(active >= allowed) continue;
-      const before = await tx.validationTask.findUniqueOrThrow({where:{id:candidate.id}});
-      const task = await tx.validationTask.update({where:{id:candidate.id},data:{
-        state:"RUNNING",leaseToken:randomUUID(),leaseUntil:new Date(Date.now()+leaseMs),
-        attempt:{increment:1},startedAt:new Date(),finishedAt:null,signature:null,
-        exitCode:null,summary:null,runnerId:hostname()+":"+process.pid
-      },include:{pipeline:{select:{repositoryId:true,changesetId:true,targetChangesetId:true,
-        snapshotDigest:true,dependencyDigest:true}}}});
-      await tx.validationPipeline.updateMany({where:{id:task.pipelineId,state:"QUEUED"},data:{state:"RUNNING"}});
-      return {...task,oldLeaseToken:before.leaseToken};
-    }
-    return null;
-  },{isolationLevel:Prisma.TransactionIsolationLevel.ReadCommitted,timeout:15000});
+  const candidates = await fairCandidates("validation");
+  for (const candidate of candidates) {
+    const claimed = await fairClaim("validation", candidate.tenantId, async tx => {
+      const before = await tx.validationTask.findUnique({
+        where: { id: candidate.id }, include: { pipeline: true },
+      });
+      if (!before || before.pipeline.state === "CANCELLED" ||
+          before.attempt >= before.maxAttempts) return null;
+      const now = new Date();
+      const eligible = (before.state === "QUEUED" && before.nextAttemptAt <= now) ||
+        (before.state === "RUNNING" && !!before.leaseUntil && before.leaseUntil < now);
+      if (!eligible) return null;
+      const token = randomUUID();
+      const selected = await tx.validationTask.updateMany({ where: {
+        id: before.id, state: before.state, attempt: before.attempt,
+        ...(before.state === "RUNNING" ? { leaseUntil: { lt: now } } :
+          { nextAttemptAt: { lte: now } }),
+      }, data: {
+        state: "RUNNING", leaseToken: token, leaseUntil: new Date(Date.now()+leaseMs),
+        attempt: { increment: 1 }, startedAt: new Date(), finishedAt: null,
+        signature: null, exitCode: null, summary: null, runnerId: hostname()+":"+process.pid,
+      } });
+      if (!selected.count) return null;
+      const task = await tx.validationTask.findUniqueOrThrow({ where: { id: before.id },
+        include: { pipeline: { select: {
+          repositoryId: true, changesetId: true, targetChangesetId: true,
+          snapshotDigest: true, dependencyDigest: true,
+        } } },
+      });
+      await tx.validationPipeline.updateMany({ where: { id: task.pipelineId, state: "QUEUED" },
+        data: { state: "RUNNING" } });
+      return { ...task, oldLeaseToken: before.leaseToken };
+    });
+    if (claimed) return claimed;
+  }
+  return null;
 }
 async function materialize(root:string,entries:Entry[],repoId:string) {
   const links:Array<{path:string;bytes:Buffer}>=[];
