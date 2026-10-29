@@ -220,3 +220,7 @@ measured distributed workload remain release blockers, not completed claims.
 ## Native scalability qualification
 
 The evidence-first [qualification program](docs/scale-qualification.md) runs small real-content tests in CI and gates full-scale workloads behind an explicitly isolated manual environment. A passing smoke run does not certify the full end-to-end lifecycle.
+
+### Reproducible multi-host qualification
+
+A manually authorized, disposable AWS two-AZ lab provisions three real EC2 hosts using short-lived GitHub OIDC credentials, attests their physical identity, executes measured native-source workloads, archives raw evidence, and deletes the stack. Setup, scope and cost/teardown guards: [AWS multi-host qualification](docs/qualification-aws-multihost.md). This does not claim production-equivalent certification until all full-scale stages have measured evidence.
