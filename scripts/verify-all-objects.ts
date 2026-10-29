@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { db } from "../src/lib/prisma";
 import { verifyBlob } from "../src/object-store/service";
@@ -79,19 +80,64 @@ try {
     cursor = rows.at(-1)!.id;
     if (rows.length < pageSize) break;
   } while (true);
-  const snapshotNodes = await db.sourceSnapshotNode.findMany({
-    select: { id: true }, take: 1,
-  });
-  // Snapshot nodes form a separate content-addressed data structure, checked
-  // structurally by snapshot-index tests; object inventory covers SourceObject.
+  let scannedSnapshotNodes = 0;
+  let nodeCursor: string | undefined;
+  do {
+    const nodes = await db.sourceSnapshotNode.findMany({
+      ...(nodeCursor ? { cursor: { id: nodeCursor }, skip: 1 } : {}),
+      take: pageSize, orderBy: { id: "asc" }, select: { id: true, data: true },
+    });
+    if (!nodes.length) break;
+    const childIds = new Set<string>();
+    const valueIds = new Set<string>();
+    for (const node of nodes) {
+      scannedSnapshotNodes++;
+      try {
+        const bytes = Buffer.from(node.data);
+        const digest = createHash("sha256").update("DEVHUB-SNAPSHOT-V1\\0").update(bytes).digest("hex");
+        if (digest !== node.id) throw Error("Snapshot node hash mismatch");
+        const body = JSON.parse(bytes.toString("utf8")) as unknown;
+        if (!Array.isArray(body) || body.length !== 3 || body[0] !== 1 ||
+            JSON.stringify(body) !== bytes.toString("utf8")) throw Error("Non-canonical snapshot node");
+        const value = body[1];
+        if (value !== null) {
+          if (!Array.isArray(value) || !/^[a-f0-9]{64}$/.test(String(value[0])) ||
+              !["100644","100755","120000"].includes(String(value[1])))
+            throw Error("Malformed snapshot value");
+          valueIds.add(value[0] as string);
+        }
+        if (!Array.isArray(body[2]) || body[2].length > 16) throw Error("Invalid snapshot edges");
+        let previous = "";
+        for (const edge of body[2]) {
+          if (!Array.isArray(edge) || edge.length !== 3 ||
+              typeof edge[0] !== "string" || !/^[a-f0-9]+$/.test(edge[0]) ||
+              edge[0] <= previous || !/^[a-f0-9]{64}$/.test(String(edge[1])) ||
+              !Number.isSafeInteger(edge[2]) || edge[2] < 1)
+            throw Error("Corrupt snapshot child edge");
+          previous = edge[0];
+          childIds.add(edge[1] as string);
+        }
+      } catch (error) { record("snapshot_node_corrupt", node.id, error); }
+    }
+    const [children, values] = await Promise.all([
+      db.sourceSnapshotNode.findMany({ where: { id: { in: [...childIds] } }, select: { id: true } }),
+      db.sourceObject.findMany({ where: { id: { in: [...valueIds] } }, select: { id: true } }),
+    ]);
+    const childSet = new Set(children.map(x => x.id));
+    const valueSet = new Set(values.map(x => x.id));
+    for (const id of childIds) if (!childSet.has(id)) record("missing_snapshot_child", id);
+    for (const id of valueIds) if (!valueSet.has(id)) record("missing_snapshot_value", id);
+    nodeCursor = nodes.at(-1)!.id;
+    if (nodes.length < pageSize) break;
+  } while (true);
   const result = {
     kind: "full_source_object_inventory", startedAt: new Date(started).toISOString(),
     completedAt: new Date().toISOString(), durationMs: Date.now() - started,
     inspectedObjects: scanned, inlineObjects: inline, streamedExternalObjects: external,
-    verifiedRawBytes: bytes.toString(), snapshotNodeRowsPresent: snapshotNodes.length > 0,
+    verifiedRawBytes: bytes.toString(), verifiedSnapshotNodes: scannedSnapshotNodes,
     referentialChecks: integrity.map(v => ({ check: v.name, count: v.total.toString() })),
     failures, status: failures.length ? "FAILED" : "PASS",
-    limitation: "Requires a stable backup/write barrier to assert a point-in-time inventory; checks every SourceObject, not future object availability",
+    limitation: "Requires a stable backup/write barrier to assert a point-in-time inventory; checks every SourceObject and immutable snapshot node, not future object availability",
   };
   if (output) await writeFile(output, JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
