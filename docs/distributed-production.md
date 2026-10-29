@@ -228,3 +228,111 @@ Schedule `npm run ops:compact-admission -- --keep-hours=48` on a single
 maintenance runner at least daily. The operation only removes expired
 window counters and is safe across live API replicas; do not remove active
 windows. Monitor table growth and database disk utilization.
+
+
+## Production certification controls added
+
+### Physical WAL point-in-time restore (CI)
+
+`DEVHUB_FAULT_DRILL=isolated-local-only bash scripts/pg-wal-pitr-drill.sh`
+creates a real PostgreSQL 16 primary, immutable base-backup volume, separately
+archived WAL volume, and a new restore volume/process. It migrates the full
+DevHub schema **after** the physical backup and publishes a canonical
+S3-backed object with a real reference. It records a WAL target after
+a committed sentinel, then commits a second sentinel and forces WAL archival.
+The recovered instance must contain the first sentinel, exclude the second,
+accept writes, and pass the exhaustive native/S3/snapshot-node object
+inventory. The archived CI artifact records the target LSN and actual results.
+
+This tests a real PostgreSQL WAL recovery target and authoritative data
+restoration, **not** an AWS/Azure/GCP-managed PITR. External S3 data is
+retained by the test and cryptographically read; the logical restore drill
+independently copies S3 bytes to a second bucket. Matching real production
+versioned-object retention remains a separate provider drill.
+
+### Live synchronous replication partition and promotion (CI)
+
+`scripts/pg-failover-drill.sh` disconnects the active physical standby from
+its Docker network while the primary remains writable at the TCP layer.
+A timed synchronous transaction must **not** return success without a
+replica acknowledgement or persist after cancellation. The restored network
+requires the standby to replay WAL; a follow-up acknowledged write must
+appear on the standby before the original primary is stopped and fenced.
+Only then does the script promote the replica and commit a new write.
+This is a real network partition of two PostgreSQL instances, not managed
+cluster failover or independent cloud failure domains.
+
+### Independently running API, workers and native clients (CI)
+
+`npm run bench:multi-process -- --clients=3 --changesets=96 --submissions=24
+--concurrency=12 --api=http://127.0.0.1:3101,http://127.0.0.1:3102`
+launches separate Node client processes. The fault workflow additionally
+starts two compiled Next.js API replicas and two autonomous index workers
+against a shared real PostgreSQL, Redis and MinIO topology. Each client
+creates a distinct tenant and genuine object, changeset, ref-CAS, query and
+integration workloads; HTTP readiness is probed continuously and recorded
+with p50/p95/p99. Per-driver p95/p99 remain separate: averaging them into
+a global percentile would be mathematically invalid.
+
+This is reproducible multi-**process** stress on a single CI host. It does
+not establish independent-zone/multi-region capacity, business-API latency,
+live runner execution throughput, or cloud-provider network saturation.
+Run the same harness at 1,000 concurrent submissions and 10,000 or more
+actual changesets on deployed hardware, archive resource and latency
+profiles and monitor tenant starvation for sustained periods before signing
+an enterprise-scale certificate.
+
+### Managed cloud failover is protected and deliberately manual
+
+`.github/workflows/managed-certification.yml` uses the protected
+`devhub-certification-staging` environment, an OIDC-assumed AWS role and
+`scripts/certify-managed-aurora.sh`. It accepts only dedicated staging
+clusters whose identifiers begin with `devhub-cert-`; the connection
+endpoint must name the same cluster. A human must explicitly submit
+`PERFORM_STAGING_FAILOVER` to run the AWS Aurora managed writer failover.
+The script measures first/second writer IDs, resumption latency, a previously
+acknowledged durable transaction and a new idempotent write.
+
+Configure the protected environment with
+`DEVHUB_CERT_AURORA_CLUSTER_ID` and `DEVHUB_CERT_AWS_REGION`
+environment variables and `DEVHUB_CERT_DATABASE_URL` and
+`DEVHUB_CERT_AWS_ROLE_ARN` protected secrets. Grant only the minimum
+staging failover/describe permissions; manually verify maintenance window
+and clean backups first. **A passing local Docker promotion does not
+automatically complete the managed-cloud gate.** Separately validate
+operator-visible partitions and cloud-managed failover RPO/RTO on that
+deployment. No such external provider exercise has been executed solely
+by adding the workflow.
+
+### Comprehensive tenant resource evidence contract
+
+`npm run ops:certify-resources -- --from=2026-10-29T00:00:00Z
+--until=2026-10-30T00:00:00Z --evidence=collector-export.json
+--output=artifacts/certification-usage.json` accepts exporter **measurements**,
+not fabricated figures. The input `version:1` includes a
+`capturedFrom` and `capturedUntil` interval and
+`tenantReports: [{tenantId, metrics:{ ... }}]`. Every metric is an
+object with decimal `value`, `unit`, HTTPS `source`,
+64-character `sourceDigestSha256`, `collector`,
+`capturedFrom`, and `capturedUntil`. For every tenant, it requires:
+
+- API ingress and egress bytes, Git ingress and egress bytes.
+- S3 PUT payload, GET payload and COPY bytes; cache-network bytes.
+- Worker and DB CPU nanoseconds, external egress bytes, and provider-billed
+  cost in micros.
+
+The auditor refuses missing tenant/metric records, uncovered time windows,
+unmeasured validation CPU, evidence with invalid provenance metadata, and
+provider totals below durable Git/S3/runner counters. Real multi-tenant
+collector exports and billing reconciliation are required before declaring
+**complete platform-wide attribution**. All metrics are separate units;
+a zero requires authenticated provider evidence covering the interval.
+This is a coverage and lower-bound invariant, not independent verification
+that a provider's invoice was measured correctly. A report derived purely
+from internal DB rows cannot satisfy the full evidence contract.
+
+**Remaining release-only gates:** actual protected managed-cloud and
+multi-region fault rehearsals, sustained deployment-scale API/worker
+load/latency and fairness, complete provider-exporter resource evidence,
+and reviewed RPO/RTO targets. These are not automatically certified by
+green isolated CI.
