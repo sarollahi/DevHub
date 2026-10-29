@@ -48,6 +48,7 @@ test("automatic AWS provisioning requires deliberate dispatch, IAM OIDC, and tea
 test("real host kernels, AZs, remote live APIs and writes are verified, not invented",()=>{
   for(const snippet of ["require_ssm(ids)","/proc/sys/kernel/random/boot_id",
     "ApiAZone", "ApiBZone", "api-instances.json", "certify-multi-process.mjs",
-    "totalPersistedChangesets","fullEndToEndCertification"])assert.ok(py.includes(snippet),snippet);
+    "totalPersistedChangesets","fullEndToEndCertification","ThreadPoolExecutor(max_workers=3)",
+    "remote_writer(i)","real-writers/","physical-writers.json"])assert.ok(py.includes(snippet),snippet);
   assert.match(py,/len\(\{h\["boot"\] for h in attestation\}\) != 3/);
 });
