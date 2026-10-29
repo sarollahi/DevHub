@@ -144,7 +144,7 @@ async function capture(task:Claimed,source:string,artifacts:string,isCancelled:(
     "--tmpfs","/tmp:rw,nosuid,nodev,size=96m",
     "--mount","type=bind,src="+source+",dst=/source,readonly",
     "--mount","type=bind,src="+artifacts+",dst=/artifacts",
-    "--env","HOME=/tmp","--env","npm_config_cache=/opt/npm-cache",
+    "--env","HOME=/tmp","--env","npm_config_cache=/tmp/npm-cache",
     "--entrypoint","/bin/sh",task.image,"-ec",task.command];
   const child=spawn("docker",args,{stdio:["ignore","pipe","pipe"],env:{
     PATH:process.env.PATH||"/usr/bin:/bin", NODE_ENV:process.env.NODE_ENV||"production",
