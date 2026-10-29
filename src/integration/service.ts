@@ -49,6 +49,9 @@ export async function enqueueIntegration(repositoryId: string, actor: SourceActo
   await assertRepositoryPermission(actor, repositoryId, "ref:update", { branch: body.targetRef });
   await assertRepositoryPermission(actor, repositoryId, "changeset:write", { allowStaging: true });
   return db.$transaction(async tx => {
+    // PostgreSQL row lock serializes quota checks across independent API
+    // replicas. Concurrent submissions cannot both consume the last slot.
+    await tx.$queryRaw`SELECT id FROM "Repository" WHERE id=${repositoryId}::uuid FOR UPDATE`;
     await assertRepositoryPermission(actor, repositoryId, "ref:update", { branch: body.targetRef }, tx);
     await assertRepositoryPermission(actor, repositoryId, "changeset:write", { allowStaging: true }, tx);
     const existing = await tx.changeIntegration.findUnique({ where: {

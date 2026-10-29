@@ -196,3 +196,10 @@ object store is **incomplete**. Avoid claiming full trace continuity.
   operational dashboards and on-call runbooks.
 
 Leave the PR draft and unmerged while any item is absent.
+
+### Quota bucket retention
+
+Schedule `npm run ops:compact-admission -- --keep-hours=48` on a single
+maintenance runner at least daily. The operation only removes expired
+window counters and is safe across live API replicas; do not remove active
+windows. Monitor table growth and database disk utilization.

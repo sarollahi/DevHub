@@ -137,11 +137,11 @@ export async function consumeRequestQuota(repositoryId: string, actor: SourceAct
       organization: { select: { maxRequestsPerMinute: true } } } });
   if (!repo) throw new SourceControlError(404, "NOT_FOUND", "Repository not found");
   const limit = Math.min(10000, Math.max(1, repo.organization?.maxRequestsPerMinute ?? 240));
-  const windowStart = new Date(Math.floor(Date.now() / 60000) * 60000);
-  // One transaction enforces both per-actor and tenant aggregate caps. Atomic
-  // PostgreSQL increments prevent every API/Git replica from spending the same
-  // remaining allowance concurrently; rejected attempts are rolled back.
+  // One transaction enforces both per-actor and tenant aggregate caps. Use
+  // the primary DB clock, not potentially skewed API replica clocks.
   await db.$transaction(async tx => {
+    const [{ windowStart }] = await tx.$queryRaw<Array<{ windowStart: Date }>>`
+      SELECT date_trunc('minute', now()) AS "windowStart"`;
     const actorBucket = await tx.apiRateBucket.upsert({
       where: { repositoryId_actorKey_windowStart: {
         repositoryId, actorKey: `${actor.type}:${actor.id}`, windowStart } },

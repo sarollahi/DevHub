@@ -20,6 +20,8 @@ export async function enqueueDeployment(repositoryId:string,actor:SourceActor,in
  getController(repositoryId,input.environment);
  const gate=await deploymentGate(repositoryId,input.integrationId,actor,true);
  return db.$transaction(async tx=>{
+   // Quota admission is serialized across all replicas, not process-local.
+   await tx.$queryRaw`SELECT id FROM "Repository" WHERE id=${repositoryId}::uuid FOR UPDATE`;
    await assertRepositoryPermission(actor,repositoryId,"admin",{},tx);
    const prior=await tx.deploymentExecution.findUnique({where:{
      repositoryId_environment_requestKey:{repositoryId,environment:input.environment,requestKey:input.requestKey},
