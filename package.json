@@ -45,7 +45,8 @@
     "ops:fault-drill": "node scripts/fault-drill.mjs",
     "bench:snapshot-scale": "tsx scripts/bench-snapshot-scale.ts",
     "snapshot:backfill": "tsx scripts/backfill-snapshots.ts",
-    "bench:related-review": "node --experimental-strip-types scripts/bench-related-review.mjs"
+    "bench:related-review": "node --experimental-strip-types scripts/bench-related-review.mjs",
+    "bench:related-db": "tsx scripts/bench-related-review-db.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",
