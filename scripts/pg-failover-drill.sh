@@ -55,7 +55,8 @@ done
 # Acknowledged sentinel cannot be lost under synchronous apply. This is
 # meaningful physical-replication evidence, unlike restarting one container.
 docker exec "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
-  -c "ALTER SYSTEM SET synchronous_standby_names = 'standby1';" >/dev/null
+  -c "ALTER SYSTEM SET synchronous_standby_names = 'standby1';" \
+  -c "ALTER SYSTEM SET synchronous_commit = 'remote_apply';" >/dev/null
 docker exec "$primary" psql -U devhub -d devhub -c "SELECT pg_reload_conf()" >/dev/null
 docker exec "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
   -c "CREATE TABLE public.failover_sentinel (id integer PRIMARY KEY, payload text NOT NULL);" \
@@ -120,17 +121,19 @@ docker exec "$standby" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
   -c "INSERT INTO public.failover_sentinel VALUES (2, 'writes-resumed');" >/dev/null
 # The partition test also committed row 99 after replica connectivity recovered.
 # Verify all three expected writes and their contents, not an obsolete total.
-after_rows="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
-  "SELECT id || ':' || payload FROM public.failover_sentinel ORDER BY id")"
-expected_rows="$(printf '%s\\n' \
-  '1:durable-before-promotion' \
-  '2:writes-resumed' \
-  '99:A')"
-[[ "$after_rows" == "$expected_rows" ]] || {
-  printf 'Promoted standby contents differ from acknowledged writes. Expected:\\n%s\\nActual:\\n%s\\n' \
-    "$expected_rows" "$after_rows" >&2
+verified_rows="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
+  "SELECT COUNT(*) = 3
+    AND COUNT(*) FILTER (WHERE id=1 AND payload='durable-before-promotion') = 1
+    AND COUNT(*) FILTER (WHERE id=2 AND payload='writes-resumed') = 1
+    AND COUNT(*) FILTER (WHERE id=99 AND payload='A') = 1
+    FROM public.failover_sentinel")"
+if [[ "$verified_rows" != "t" ]]; then
+  echo "Promoted standby did not retain every correctly acknowledged write:" >&2
+  docker exec "$standby" psql -U devhub -d devhub -c \
+    "SELECT id,payload FROM public.failover_sentinel ORDER BY id" >&2
   exit 1
-}
+fi
+
 PARTITION_WRITE_BLOCK_MS="$partition_block_ms" node --input-type=module - "$before" "$(( $(date +%s) - started ))" "$(( $(date +%s%3N) - failover_started_ms ))" <<'NODE'
 import { writeFileSync } from "node:fs";
 const [, , primaryLSN, elapsedSeconds, fencedPromotionMs] = process.argv;
