@@ -4,7 +4,7 @@ import type { ValidationKind, ValidationTask } from "@prisma/client";
 export const KINDS = ["COMPILE", "TEST", "LINT", "SECURITY", "SECRETS", "DEPENDENCIES"] as const;
 export const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 export type Recipe = { kind: ValidationKind; image: string; command: string; timeoutSeconds: number };
-const imagePattern = new RegExp("^[a-zA-Z0-9._/:-]+@sha256:[0-9a-f]{64}$");
+// Both registry-manifest digests and local Docker image IDs are immutable.\n// Local IDs allow a disposable CI runner to preload scanner databases without\n// publishing the generated image to an external registry.\nconst imagePattern = /^(?:[a-zA-Z0-9._/:-]+@sha256:|sha256:)[0-9a-f]{64}$/;
 export function recipes(env: NodeJS.ProcessEnv = process.env): Recipe[] {
   const image = (key: string) => {
     const value = env[key];
@@ -21,9 +21,9 @@ export function recipes(env: NodeJS.ProcessEnv = process.env): Recipe[] {
     { kind: "COMPILE", image: node, command: install + " && npm run build", timeoutSeconds: 900 },
     { kind: "TEST", image: node, command: install + " && npm test", timeoutSeconds: 900 },
     { kind: "LINT", image: node, command: install + " && npm run lint", timeoutSeconds: 450 },
-    { kind: "SECURITY", image: scanner, command: "trivy fs --offline-scan --scanners misconfig --exit-code 1 /source", timeoutSeconds: 360 },
+    { kind: "SECURITY", image: scanner, command: "trivy fs --offline-scan --skip-db-update --skip-java-db-update --skip-check-update --scanners misconfig --exit-code 1 /source", timeoutSeconds: 360 },
     { kind: "SECRETS", image: secrets, command: "gitleaks dir --no-banner --redact --exit-code 1 /source", timeoutSeconds: 240 },
-    { kind: "DEPENDENCIES", image: scanner, command: "trivy fs --offline-scan --scanners vuln --exit-code 1 /source", timeoutSeconds: 360 },
+    { kind: "DEPENDENCIES", image: scanner, command: "trivy fs --offline-scan --skip-db-update --skip-java-db-update --skip-check-update --scanners vuln --exit-code 1 /source", timeoutSeconds: 360 },
   ];
 }
 export function configurationDigest(input: Recipe[]): string {
