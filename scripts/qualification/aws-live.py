@@ -215,7 +215,7 @@ def main():
         "--clients=3 --changesets=" + str(args.changesets) +
         " --submissions=24 --concurrency=24 --timeout-seconds=1500 "
         "--api=" + origin_list + " "
-        "--output=/tmp/qualification/evidence\n"
+        "--output=/tmp/qualification/evidence > /tmp/qualification/evidence/driver.stdout.log 2> /tmp/qualification/evidence/driver.stderr.log\n"
         "python3 - <<'PY'\n"
         "import json\n"
         "x=json.load(open('/tmp/qualification/evidence/summary.json'))\n"
