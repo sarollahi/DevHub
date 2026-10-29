@@ -49,16 +49,17 @@ export async function indexChangeset(changesetId: string): Promise<boolean> {
         : []),
     ]);
     await enqueueSearchObjects(source.operations.map(op => op.objectId).filter((id): id is string => !!id));
-    await db.$transaction(async tx => {
+    const published = await db.$transaction(async tx => {
       const finished = await tx.sourceQueryIndexJob.updateMany({
         where: { changesetId, state: "RUNNING", leaseToken, leaseUntil: { gt: new Date() } },
         data: { state: "SUCCEEDED", generation, indexedAt: new Date(),
           leaseUntil: null, leaseToken: null, lastError: null },
       });
-      if (!finished.count) return;
+      if (!finished.count) return false;
       if (touches.length) await tx.sourceQueryPathTouch.createMany({ data: touches, skipDuplicates: true });
+      return true;
     });
-    return true;
+    return published;
   } catch (error) {
     const failure = error instanceof Error ? error.message.slice(0, 1000) : "Unknown indexing failure";
     const current = await db.sourceQueryIndexJob.findUniqueOrThrow({ where: { changesetId } });

@@ -75,7 +75,7 @@ export async function dispatchReferenceBatch(queue: Queue): Promise<number> {
 }
 
 // Redis jobs are volatile transport hints. If a durable job remains QUEUED
-// after an outbox publish, replay it under a fresh transport ID. This is safe
+// after an outbox publish, or RUNNING after lease loss, replay it. This is safe
 // across dispatchers: source-of-truth is QueueJob, not BullMQ completion state.
 export async function reclaimUndeliveredPreflight(limit = 50): Promise<number> {
   const rows = await db.$queryRaw<Array<{ id: string }>>`
@@ -83,7 +83,7 @@ export async function reclaimUndeliveredPreflight(limit = 50): Promise<number> {
       SELECT e.id FROM "OutboxEvent" e
       JOIN "QueueJob" j ON e.payload->>'jobId' = j.id::text
       WHERE e."aggregateType"='PullRequest' AND e.state='PUBLISHED'
-        AND j.state='QUEUED'
+        AND (j.state='QUEUED' OR (j.state='RUNNING' AND j."leaseUntil"<now()))
         AND e."publishedAt" < now() - interval '5 minutes'
       ORDER BY e."publishedAt" ASC
       FOR UPDATE OF e SKIP LOCKED LIMIT ${Math.min(200, Math.max(1, limit))}

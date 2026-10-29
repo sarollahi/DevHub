@@ -79,8 +79,9 @@ try {
       SELECT COUNT(*)::bigint AS count FROM "OutboxEvent" e
       JOIN "QueueJob" j ON e.payload->>'jobId'=j.id::text
       WHERE e."aggregateType"='PullRequest' AND e.state='PUBLISHED'
-        AND j.state='QUEUED' AND e."publishedAt"<now()-interval '5 minutes'`;
-    report("published_outbox_with_queued_job", Number(undeliveredJobs[0]?.count ?? 0n), "warning");
+        AND (j.state='QUEUED' OR (j.state='RUNNING' AND j."leaseUntil"<now()))
+        AND e."publishedAt"<now()-interval '5 minutes'`;
+    report("published_outbox_with_unfinished_job", Number(undeliveredJobs[0]?.count ?? 0n), "warning");
     const expiredGateway = await db.gitGatewayLease.count({ where: {
       expiresAt: { lt: new Date() },
     } });

@@ -408,7 +408,7 @@ export async function processNextIntegration(): Promise<boolean> {
       wait ? "WAITING_CHECKS" : "FAILED";
     await db.$transaction(async tx => {
       const moved = await tx.changeIntegration.updateMany({ where: {
-        id: next.id, state: "PREPARING", leaseToken: token,
+        id: next.id, state: "PREPARING", leaseToken: token, leaseUntil: { gt: new Date() },
       }, data: { state, leaseToken: null, leaseUntil: null,
         attempts: { increment: retry ? 1 : 0 },
         nextAttemptAt: seconds(retry ? Math.min(60, 2 ** (next.attempts + 1)) : 30),
