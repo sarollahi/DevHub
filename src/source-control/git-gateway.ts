@@ -7,21 +7,11 @@ import { db } from "../lib/prisma";
 import { assertRepositoryPermission, consumeRequestQuota } from "../lib/authorization";
 import { SourceControlError, type SourceActor } from "./contracts";
 import { gitCacheDirectory, gitCommand, syncGitProjection } from "./git-interoperability";
+import { withGitLease } from "./git-lease";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const transport = /^\/git\/([0-9a-f-]{36})\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
 const maxRequestBytes = Number(process.env.GIT_INTEROP_MAX_PUSH_BYTES || 2147483648);
-const locks = new Map<string, Promise<void>>();
-
-function exclusive<T>(id: string, work: () => Promise<T>): Promise<T> {
-  const previous = locks.get(id) ?? Promise.resolve();
-  const active = previous.catch(() => undefined).then(work);
-  const tail = active.then(() => undefined, () => undefined);
-  locks.set(id, tail);
-  void tail.then(() => { if (locks.get(id) === tail) locks.delete(id); });
-  return active;
-}
-
 function credentialFromRequest(req: IncomingMessage): string | null {
   const header = req.headers.authorization;
   if (!header || header.length > 4096) return null;
@@ -91,14 +81,15 @@ async function installHooks(dir: string) {
 
 async function serveGitRpc(req: IncomingMessage, res: ServerResponse, dir: string,
   service: "git-upload-pack" | "git-receive-pack", advertise: boolean,
-  identity: { actor: SourceActor; credentialId: string }, repositoryId: string) {
+  identity: { actor: SourceActor; credentialId: string }, repositoryId: string, leaseToken: string) {
   const max = service === "git-upload-pack" ? 4 * 1024 * 1024 : maxRequestBytes;
   const child = spawn("git", [service.replace(/^git-/, ""), "--stateless-rpc",
     ...(advertise ? ["--advertise-refs"] : []), dir], {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_NO_REPLACE_OBJECTS: "1",
       GIT_TERMINAL_PROMPT: "0",
-      DEVHUB_GIT_REPOSITORY_ID: repositoryId, DEVHUB_GIT_ACTOR_USER: identity.actor.id,
+      DEVHUB_GIT_REPOSITORY_ID: repositoryId, DEVHUB_GIT_LEASE_TOKEN: leaseToken,
+      DEVHUB_GIT_ACTOR_USER: identity.actor.id,
       DEVHUB_GIT_ACTOR_CREDENTIAL: identity.credentialId,
       DEVHUB_GIT_PUSH_GATE: service === "git-receive-pack" ? "enabled" : "disabled" },
   });
@@ -163,15 +154,15 @@ export function createGitGateway() {
         throw new SourceControlError(403, "TLS_REQUIRED", "Git authentication requires HTTPS");
       }
       const identity = await authenticate(req, repositoryId, writing);
-      await exclusive(repositoryId, async () => {
+      await withGitLease(repositoryId, async (leaseToken) => {
         const dir = await gitCacheDirectory(repositoryId);
         await installHooks(dir);
         await syncGitProjection(repositoryId, identity.actor, dir);
         res.setHeader("Content-Type", `application/x-${service}-${isDiscovery ? "advertisement" : "result"}`);
         res.setHeader("Cache-Control", "no-cache, no-store, max-age=0");
         res.setHeader("Pragma", "no-cache");
-        await serveGitRpc(req, res, dir, service, isDiscovery, identity, repositoryId);
-      });
+        await serveGitRpc(req, res, dir, service, isDiscovery, identity, repositoryId, leaseToken);
+      }, () => req.destroy(new Error("Git gateway lease lost")));
     } catch (error) {
       console.error("Git interoperability gateway", error);
       replyError(res, error);

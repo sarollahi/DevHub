@@ -232,6 +232,7 @@ model QueueJob {
   scheduledAt    DateTime     @default(now())
   startedAt      DateTime?
   leaseUntil     DateTime?
+  leaseToken     String?      @db.Uuid
   finishedAt     DateTime?
   createdAt      DateTime     @default(now())
   pull           PullRequest  @relation(fields: [pullId], references: [id], onDelete: Cascade)
@@ -1241,4 +1242,13 @@ model SourceDerivedBlameFile {
   checksum     String? @db.Char(64)
   @@id([changesetId, version, position])
   @@index([repositoryId, version, path, generation(sort: Desc)])
+}
+
+// Exclusive, renewable gateway session; never stores authoritative Git refs.
+model GitGatewayLease {
+  repositoryId String   @id @db.Uuid
+  token        String   @db.Uuid
+  expiresAt    DateTime
+  updatedAt    DateTime @default(now())
+  @@index([expiresAt])
 }
