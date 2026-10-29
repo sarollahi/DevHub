@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/prisma";
 import { sourceFailure, requireRepositoryAccess } from "@/source-control/http";
 import { SourceControlError } from "@/source-control/contracts";
-import { classifyCandidate, REVIEW_INDEX_VERSION, type SignalKind } from "@/review/index-algorithms";
+import { classifyCandidate, configuredSemanticThreshold, REVIEW_INDEX_VERSION, type SignalKind } from "@/review/index-algorithms";
 import type { NativeAssessment, Region } from "@/review/analysis";
 export const runtime="nodejs";
 const idPattern=/^[a-f0-9]{64}$/;
@@ -57,7 +57,7 @@ export async function GET(request:NextRequest,{params}:{params:Promise<{id:strin
         changesetId:candidate.changesetId,fingerprint:candidate.fingerprint,
         equivalenceHash:candidate.equivalenceHash,regions:asRegions(candidate.regions),
         embedding:vector(candidate.embedding),signals:matched.get(candidate.changesetId)??new Set(),
-      },vector(record.embedding));
+      },vector(record.embedding),configuredSemanticThreshold());
       return relation?[{...relation,title:candidate.changeset.message,riskTier:candidate.riskTier,
         riskScore:candidate.riskScore}]:[];
     }).sort((a,b)=>b.score-a.score||a.changesetId.localeCompare(b.changesetId));
