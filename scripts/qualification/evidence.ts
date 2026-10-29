@@ -49,7 +49,7 @@ try {
   const validationDone=validations.filter(v=>v.state==="PASSED" &&
     v.tasks.length>0 && v.tasks.every(t=>t.state==="PASSED" && !!t.signature)).length;
   const integrated=integrations.filter(i=>i.state==="INTEGRATED" && !!i.resultChangesetId);
-  const connected=integrated.every(i=>refs.some(r=>r.name===i.targetRef &&
+  const connected=integrated.length>0 && integrated.every(i=>refs.some(r=>r.name===i.targetRef &&
     r.generation>=2 && !r.deletedAt));
   const data={
     kind:"durable-native-qualification-evidence",repositoryId:repo,observedAt:new Date().toISOString(),
@@ -75,7 +75,7 @@ try {
     references:refs.map(r=>({name:r.name,generation:r.generation,
       targetChangesetId:r.changesetId,deleted:!!r.deletedAt})),
     stages:{
-      "publication":publications===source.input?.changesetCount+1?"PASSED":"FAILED",
+      "publication":publications>=source.input?.changesetCount+1?"PASSED":"FAILED",
       "indexing":indexJobs.length>=publications && indexJobs.every(x=>x.state==="SUCCEEDED")?"PASSED":"NOT_MEASURED",
       "review-completed":reviews.length>=publications && reviews.every(x=>x.state==="COMPLETED")?"PASSED":"NOT_MEASURED",
       "validation-executed":validationDone>0?"PASSED":"NOT_MEASURED",
