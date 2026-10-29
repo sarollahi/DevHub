@@ -19,7 +19,7 @@
     "validation:runner": "tsx src/validation/worker.ts",
     "dispatcher": "tsx src/workers/dispatcher.ts",
     "stress:ingest": "tsx scripts/burst.ts",
-    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test": "node --import tsx --test tests/*.test.mjs",
     "test:integration": "tsx --test tests/*.integration.test.ts",
     "storage:maintain": "tsx scripts/object-maintain.ts",
     "storage:stress": "tsx scripts/storage-stress.ts",
@@ -44,7 +44,10 @@
     "ops:cache-exporter": "node scripts/cache-exporter.mjs",
     "ops:fault-drill": "node scripts/fault-drill.mjs",
     "bench:snapshot-scale": "tsx scripts/bench-snapshot-scale.ts",
-    "snapshot:backfill": "tsx scripts/backfill-snapshots.ts"
+    "snapshot:backfill": "tsx scripts/backfill-snapshots.ts",
+    "bench:related-review": "node --experimental-strip-types scripts/bench-related-review.mjs",
+    "bench:related-db": "tsx scripts/bench-related-review-db.ts",
+    "bench:related-semantic": "tsx scripts/eval-related-semantic.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0",

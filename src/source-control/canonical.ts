@@ -424,3 +424,46 @@ export async function listCanonicalEvents(repositoryId: string, limit = 30, acto
   return db.sourceChangesetEvent.findMany({ where: { repositoryId },
     orderBy: [{ createdAt: "desc" }, { id: "asc" }], take: Math.min(100, Math.max(1, limit)) });
 }
+
+/**
+ * Review-only, lease-bound, path-selective snapshot reads. Normal reviews no
+ * longer materialize repository-sized snapshots. The optional third revision
+ * is permitted only when it is the current target of an OPEN review request.
+ */
+export async function getCanonicalReviewEntries(repositoryId:string,changesetId:string,
+  reviewedChangesetId:string,lease:Date,paths:string[]) {
+  if(paths.length>10000||paths.some(p=>!validPath(p)))throw new SourceControlError(422,"INVALID_PATHS","Invalid review paths");
+  const review=await db.sourceReview.findFirst({where:{
+    repositoryId,changesetId:reviewedChangesetId,state:"RUNNING",leaseUntil:lease,
+  },select:{changesetId:true}});
+  if(!review)throw new SourceControlError(403,"REVIEW_LEASE_REQUIRED","Active exact review lease required");
+  const reviewed=await db.sourceChangeset.findFirst({where:{repositoryId,id:reviewedChangesetId},
+    select:{parents:{where:{position:0},select:{parentId:true}}}});
+  if(!reviewed)throw new SourceControlError(404,"NOT_FOUND","Reviewed revision not found");
+  if(changesetId!==reviewedChangesetId&&changesetId!==reviewed.parents[0]?.parentId) {
+    const requests=await db.sourceReviewRequest.findMany({where:{
+      repositoryId,changesetId:reviewedChangesetId,status:"OPEN",
+    },select:{targetRef:true}});
+    if(!requests.length)throw new SourceControlError(403,"REVIEW_SCOPE_DENIED","Revision outside review scope");
+    const refs=await db.sourceReference.findMany({where:{
+      repositoryId,name:{in:requests.map(r=>r.targetRef)},deletedAt:null,changesetId,
+    },select:{changesetId:true},take:1});
+    if(!refs.length)throw new SourceControlError(403,"REVIEW_SCOPE_DENIED","Target is no longer current");
+  }
+  const change=await db.sourceChangeset.findFirst({where:{repositoryId,id:changesetId},
+    select:{treeId:true}});
+  if(!change)throw new SourceControlError(404,"NOT_FOUND","Revision not in repository");
+  return db.$transaction(async tx=>{
+    const root=await publishedSnapshotRoot(tx,repositoryId,changesetId);
+    if(root){
+      const tree=new SnapshotTree(tx);
+      const entries=await Promise.all([...new Set(paths)].map(async path=>{
+        const entry=await tree.get(root.rootId,path);
+        return entry?{path,...entry}:null;
+      }));
+      return {entries:entries.filter((v):v is NonNullable<typeof v>=>v!==null)};
+    }
+    const wanted=new Set(paths);
+    return {entries:(await legacySnapshotRead(tx,repositoryId,changesetId)).filter(e=>wanted.has(e.path))};
+  },{timeout:120000});
+}

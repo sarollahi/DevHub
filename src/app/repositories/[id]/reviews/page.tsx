@@ -1,18 +1,19 @@
 import Link from "next/link";
 import { db } from "@/lib/prisma";
 import RepositoryNavigation from "@/components/repository-navigation";
-import { repositoryWorkspace, repoHref, boundedNumber } from "@/lib/repository-workspace";
+import { repositoryWorkspace, repoHref } from "@/lib/repository-workspace";
 
 export const dynamic="force-dynamic";
 export default async function RepositoryReviews({params,searchParams}:{
-  params:Promise<{id:string}>;searchParams:Promise<{page?:string}>;
+  params:Promise<{id:string}>;searchParams:Promise<{cursor?:string}>;
 }){
   const {id}=await params;
   const {repository}=await repositoryWorkspace(id);
   const q=await searchParams;
-  const page=boundedNumber(q.page,1,200);
+  const cursor=q.cursor&&/^[a-f0-9]{64}$/.test(q.cursor)?q.cursor:null;
   const records=await db.sourceReview.findMany({where:{repositoryId:id},
-    orderBy:[{createdAt:"desc"},{changesetId:"desc"}],skip:(page-1)*50,take:51,
+    orderBy:[{riskScore:"desc"},{createdAt:"desc"},{changesetId:"desc"}],
+    ...(cursor?{cursor:{changesetId:cursor},skip:1}:{}),take:51,
     include:{changeset:{select:{message:true,authorId:true,createdAt:true,approvals:{select:{decision:true}}}}}});
   const groups=new Map<string,typeof records>();
   for(const record of records.slice(0,50)){
@@ -34,9 +35,9 @@ export default async function RepositoryReviews({params,searchParams}:{
           <td>{item.exactDuplicateOf?"Duplicate":item.state}</td>
           <td>{item.changeset.approvals.some(a=>a.decision==="APPROVED")?"Human approved":"Awaiting decision"}</td>
         </tr>)}</tbody></table></div></div>) : <p className="repo-empty">No native reviews have been recorded for this repository.</p>}
-      <div className="repo-pagination">{page>1&&<Link href={repoHref(id,"reviews",{page:page-1})}>Previous</Link>}
-        {records.length>50&&<Link href={repoHref(id,"reviews",{page:page+1})}>Next</Link>}
-        <span>Page {page}</span></div>
+      <div className="repo-pagination">{cursor&&<Link href={repoHref(id,"reviews")}>First page</Link>}
+        {records.length>50&&<Link href={repoHref(id,"reviews",{cursor:records[49].changesetId})}>Next 50</Link>}
+        <span>Prioritized by deterministic risk</span></div>
     </section>
   </RepositoryNavigation>;
 }

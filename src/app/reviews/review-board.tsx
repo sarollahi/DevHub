@@ -7,11 +7,14 @@ import { RiskBadge } from "@/components/status";
 type Item = {
   id: string; repositoryId: string; title: string; author: string; repository: string; createdAt: string;
   state: string; riskTier: string | null; riskScore: number | null; groupKey: string | null;
-  paths: string[]; duplicateOf: string | null; relatedCount: number; approved: boolean;
+  paths: string[]; duplicateOf: string | null; relatedCount: number; candidateCount: number; relatedTruncated: boolean; approved: boolean;
   summary: string | null; latencyMs: number | null; confidence: number | null;
 };
-const priority = (item: Item) => (item.riskScore ?? 0) * 2 + item.relatedCount * 10 +
-  (item.state === "FAILED" ? 100 : 0) + (item.approved ? -150 : 0);
+// Only deterministic risk, verified exact duplicates and failure state affect priority.
+// Advisory semantic neighbors and model confidence never elevate a change above security work.
+const priority = (item: Item) => (item.riskScore ?? 0) * 3 +
+  (item.state === "FAILED" ? 120 : 0) +
+  (item.duplicateOf ? 35 : 0) + (item.approved ? -500 : 0);
 function Badge({ state }: { state: string }) {
   return <span className={"review-pill " + state.toLowerCase().replaceAll("_", "-")}>{state.replaceAll("_"," ").toLowerCase()}</span>;
 }
@@ -68,6 +71,7 @@ export default function ReviewBoard({ items }: { items: Item[] }) {
           <div className="review-row-tags"><RiskBadge tier={item.riskTier}/><Badge state={item.state}/>
             {item.duplicateOf && <span className="review-pill duplicate">Exact duplicate</span>}
             {!item.duplicateOf && item.relatedCount > 0 && <span className="review-pill related">{item.relatedCount} related</span>}
+            {item.relatedTruncated && <span className="review-pill related">More index matches</span>}
             {item.approved && <span className="review-pill approved">Approved</span>}</div>
         </Link>;
       })}</section>)}</div> :

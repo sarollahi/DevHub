@@ -1,0 +1,106 @@
+[
+  {
+    "label": "session-expiry",
+    "text": "Expire logged-in sessions when their server-side revocation timestamp is reached"
+  },
+  {
+    "label": "session-expiry",
+    "text": "Reject an existing session token after its associated login has been revoked"
+  },
+  {
+    "label": "sql-injection",
+    "text": "Bind untrusted search parameters in a prepared SQL statement"
+  },
+  {
+    "label": "sql-injection",
+    "text": "Replace interpolated user values with parameterized database queries"
+  },
+  {
+    "label": "request-idempotency",
+    "text": "Deduplicate repeated change publication requests using an idempotency key"
+  },
+  {
+    "label": "request-idempotency",
+    "text": "Return the original write receipt when a client retries the same request ID"
+  },
+  {
+    "label": "cache-eviction",
+    "text": "Enforce a disk quota with safe least-recently-used object eviction"
+  },
+  {
+    "label": "cache-eviction",
+    "text": "Remove old cached blobs without deleting entries referenced by live leases"
+  },
+  {
+    "label": "rate-limits",
+    "text": "Enforce per-tenant request budgets before accepting API traffic"
+  },
+  {
+    "label": "rate-limits",
+    "text": "Throttle clients exceeding a rolling API request allowance"
+  },
+  {
+    "label": "branch-approval",
+    "text": "Require a human approval before updating a protected branch"
+  },
+  {
+    "label": "branch-approval",
+    "text": "Reject protected branch integration unless an authorized reviewer has approved"
+  },
+  {
+    "label": "secret-scanning",
+    "text": "Detect private signing keys accidentally committed to source control"
+  },
+  {
+    "label": "secret-scanning",
+    "text": "Flag committed credential material for security review before integration"
+  },
+  {
+    "label": "schema-rollback",
+    "text": "Provide a backwards-compatible database schema migration rollback path"
+  },
+  {
+    "label": "schema-rollback",
+    "text": "Make SQL schema upgrades reversible without losing live application data"
+  },
+  {
+    "label": "index-freshness",
+    "text": "Expose the last indexed revision so search users know when results are stale"
+  },
+  {
+    "label": "index-freshness",
+    "text": "Report source-search index lag relative to the repository branch head"
+  },
+  {
+    "label": "signatures",
+    "text": "Verify cryptographic signatures on uploaded release artifacts"
+  },
+  {
+    "label": "signatures",
+    "text": "Reject release binaries with invalid author signing signatures"
+  },
+  {
+    "label": "merge-conflicts",
+    "text": "Detect concurrent edits to overlapping line intervals before integration"
+  },
+  {
+    "label": "merge-conflicts",
+    "text": "Surface collisions between proposed changes to the same file region"
+  },
+  {
+    "label": "audit-retention",
+    "text": "Retain immutable security audit events for the compliance retention period"
+  },
+  {
+    "label": "audit-retention",
+    "text": "Prevent an operator from removing audit entries before their retention deadline"
+  },
+  {
+    "label": "session-telemetry",
+    "text": "Count failed authentication attempts without expiring active sessions"
+  },
+  {
+    "label": "session-telemetry",
+    "text": "Record login failure metrics for security monitoring dashboards"
+  }
+]

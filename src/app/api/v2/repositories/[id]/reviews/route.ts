@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/prisma";
 import { requireRepositoryAccess, sourceFailure, readBoundedJson } from "@/source-control/http";
 import { SourceControlError } from "@/source-control/contracts";
@@ -11,18 +12,29 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     await requireRepositoryAccess(request, id, "changesets:read");
     const limit = Math.max(1, Math.min(100, Number(request.nextUrl.searchParams.get("limit")) || 40));
     const cursor = request.nextUrl.searchParams.get("cursor");
-    const [records, counts, aggregate] = await Promise.all([
-      db.sourceReview.findMany({
-        where: { repositoryId: id },
-        take: limit + 1,
-        ...(cursor && /^[a-f0-9]{64}$/.test(cursor) ? { cursor: { changesetId: cursor }, skip: 1 } : {}),
-        orderBy: [{ createdAt: "desc" }, { changesetId: "desc" }],
-        include: { changeset: { select: { message: true, authorId: true, createdAt: true } } },
-      }),
-      db.sourceReview.groupBy({ by: ["state"], where: { repositoryId: id }, _count: { _all: true } }),
-      db.sourceReview.aggregate({ where: { repositoryId: id, state: "COMPLETED" },
-        _avg: { latencyMs: true, confidence: true }, _sum: { costMicros: true },
-      }),
+    const risk=request.nextUrl.searchParams.get("risk");
+    const state=request.nextUrl.searchParams.get("state");
+    const search=request.nextUrl.searchParams.get("q")?.trim().slice(0,100)??"";
+    const group=request.nextUrl.searchParams.get("group")?.trim();
+    const decision=request.nextUrl.searchParams.get("decision");
+    const where:Prisma.SourceReviewWhereInput={repositoryId:id,
+      ...(risk&&["LOW","MEDIUM","HIGH","CRITICAL"].includes(risk)?{riskTier:risk as "LOW"|"MEDIUM"|"HIGH"|"CRITICAL"}:{}),
+      ...(state&&["QUEUED","RUNNING","COMPLETED","FAILED"].includes(state)?{state:state as "QUEUED"|"RUNNING"|"COMPLETED"|"FAILED"}:{}),
+      ...(group&&/^[a-f0-9]{32,64}$/.test(group)?{groupKey:group}:{}),
+      ...(decision==="unapproved"?{changeset:{approvals:{none:{decision:"APPROVED"}}}}:{}),
+      ...(search?{OR:[{changeset:{message:{contains:search,mode:"insensitive"}}},
+        {intervals:{some:{path:{contains:search,mode:"insensitive"}}}}]}:{}),
+    };
+    const [records,counts,aggregate,modelCalls]=await Promise.all([
+      db.sourceReview.findMany({where,take:limit+1,
+        ...(cursor&&/^[a-f0-9]{64}$/.test(cursor)?{cursor:{changesetId:cursor},skip:1}:{}),
+        orderBy:[{riskScore:"desc"},{createdAt:"desc"},{changesetId:"desc"}],
+        include:{changeset:{select:{message:true,authorId:true,createdAt:true,approvals:{select:{decision:true}}}}}}),
+      db.sourceReview.groupBy({by:["state"],where:{repositoryId:id},_count:{_all:true}}),
+      db.sourceReview.aggregate({where:{repositoryId:id,state:"COMPLETED"},
+        _avg:{latencyMs:true,confidence:true},_sum:{costMicros:true}}),
+      db.sourceReviewModelCall.groupBy({by:["operation","succeeded"],where:{
+        review:{repositoryId:id}},_count:{_all:true},_sum:{costMicros:true}}),
     ]);
     return NextResponse.json({
       apiVersion: 2,
@@ -30,7 +42,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       nextCursor: records.length > limit ? records[limit - 1].changesetId : null,
       metrics: { states: counts.map(x => ({ state: x.state, count: x._count._all })),
         averageLatencyMs: aggregate._avg.latencyMs, averageConfidence: aggregate._avg.confidence,
-        pricedCostMicros: (aggregate._sum.costMicros ?? 0n).toString() },
+        pricedCostMicros: (aggregate._sum.costMicros ?? 0n).toString(),
+        modelCalls:modelCalls.map(x=>({operation:x.operation,succeeded:x.succeeded,
+          count:x._count._all,costMicros:(x._sum.costMicros??0n).toString()})) },
     });
   } catch (error) { return sourceFailure(error); }
 }
