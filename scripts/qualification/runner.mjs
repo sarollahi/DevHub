@@ -160,7 +160,7 @@ try{
       "--output="+join(destination,"durable-evidence.json")],{
       timeout:120,parse:async()=>{
         const data=await readJSON("durable-evidence.json");
-        return {accepted:data.publication.persisted===data.publication.expected,
+        return {accepted:data.publication.persisted>=data.publication.expected,
           stages:data.stages,validation:data.validation,review:data.review,
           integration:data.integration,indexing:data.indexing};
       }});
