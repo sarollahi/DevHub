@@ -32,7 +32,7 @@ The first successfully verified run is [GitHub Actions run 40834488175](https://
 
 Every size recovered all **5 of 5 deliberately labeled pairs**: distant exact duplicate, equivalent operation effect, overlapping changed-line conflict, independent same-file edit, and vector-bucket similarity. That is **100% recall only on these five constructed pairs**, not general semantic precision or recall.
 
-The initial full-pipeline worker measurement processed 32 independently published canonical revisions with zero failures and four concurrent review workers, averaging 81.99 completed reviews/second (review p95 70.86 ms) on the same CI class of host. The extended repeat uses 1,000 actual canonical reviews and reports queued-to-index freshness percentiles. These are CI host measurements, not a production-region capacity commitment.
+The sustained full-pipeline run [40834820843](https://github.com/sarollahi/DevHub/actions/runs/40834820843) published and processed **1,000 actual content-addressed changesets**, all of which completed with durable index rows and zero failures at **4 concurrent workers**. The measured worker throughput was **88.73 changes/second**, worker p95 latency **48.45 ms**, and time from queued record creation to completed persistent index was **20.79 seconds at p95**. The worker backlog was deliberately accumulated before processing began; index freshness includes that queue delay. These are CI-host measurements, not regional deployment commitments.
 
 ### Reproduction and scope
 
@@ -56,3 +56,11 @@ Approximate LSH cannot guarantee nearest-neighbor completeness; explicit cursor 
 ## Version 2 semantic retrieval correction
 
 The first labeled ONNX MiniLM evaluation identified a real retrieval defect: the former 0.82 cosine cutoff rejected all 13 labeled paraphrase pairs, and the original sparse random projection was biased because its projection sign reused the parity bit determining the sampled coordinate for even-dimensional vectors. The updated implementation uses independent sign bits, 8 bands of 10 projection bits with one-bit multi-probe, a versioned LSH namespace, and an operator-configurable advisory similarity threshold (default 0.50). The threshold is not a universal semantic-quality guarantee: calibrate it independently for a production provider and a representative held-out dataset. Previous embeddings are queued for reindexing on deployment.
+
+## Actual model evaluation and regression gate
+
+The first actual-model run used `fastembed==0.9.1` and `sentence-transformers/all-MiniLM-L6-v2` on 26 fixed, human-authored engineering-intent examples (13 labeled equivalent pairs plus 624 directed negative pairs). It exposed **0% recall at the prior 0.82 cutoff and 7.7% ANN candidate recall**. This was a genuine retrieval failure, not a passed synthetic benchmark. Evidence: [ONNX evaluation run 40835240668](https://github.com/sarollahi/DevHub/actions/runs/40835240668).
+
+After correcting the correlated LSH projection sign, expanding indexed bands and lowering the **advisory** cosine threshold to 0.50, replaying the identical real 384-dimensional MiniLM output yielded **14 true positives, 2 false positives, and 12 false negatives** (87.5% precision, 53.8% recall, 76.9% ANN candidate recall) on this small corpus. The automated real-model CI job now fails if precision drops below 75%, recall below 50%, or ANN candidate recall below 70% on that exact pinned fixture; it never uses this gate to approve or reject changesets. It is a regression guard, not a production-quality guarantee.
+
+Thresholds and model-specific performance must be assessed against larger, held-out repositories before deployment. High semantic recall remains a quality goal; 53.8% recall on these hard paraphrases is a known limitation, not success against a representative corpus. Similarity findings remain hints and never silently discard proposals.
