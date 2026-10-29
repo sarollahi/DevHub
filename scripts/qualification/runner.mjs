@@ -298,6 +298,28 @@ try{
     }
   }
   if(full){
+    const apiOrigins=process.env.DEVHUB_PERF_API_ORIGINS;
+    if(apiOrigins){
+      await executeNpm("independent-native-client-processes","bench:multi-process",[
+        "--clients=32","--changesets=320","--submissions=64",
+        "--concurrency=64","--timeout-seconds=7200",
+        "--api="+apiOrigins,
+        "--output="+join(destination,"independent-processes")],{
+          timeout:7300,env:{DEVHUB_ALLOW_EXTERNAL_PROBES:"yes"},
+          parse:async()=>{
+            const report=JSON.parse(await readFile(join(destination,
+              "independent-processes","summary.json"),"utf8"));
+            return {accepted:report.status==="PASS" &&
+              report.workload?.totalPersistedChangesets===10240 &&
+              report.topology?.clientProcesses===32,
+              source:"independent-processes/summary.json",
+              throughputPerSecond:report.publishedChangesetsPerSecond,
+              apiProbes:report.probes,
+              limitations:report.limitations};
+          }});
+    }
+  }
+  if(full){
     // Real S3/MinIO streaming; never substitute inline canonical BLOB bytes.
     await executeNpm("physical-object-store","storage:stress",[],{
       timeout:3600,stage:"object-storage",
