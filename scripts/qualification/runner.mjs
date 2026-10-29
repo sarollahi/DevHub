@@ -127,6 +127,9 @@ try{
     submissions:8,changesets:20,concurrency:8,depth:6,paths:40,
     writers:8,integrations:6,ci:0,queries:10,blobs:4
   };
+  const workloadHash=digestManifest({kind:"native-independent-publication",
+    submissions:size.submissions,changesets:size.changesets,concurrency:size.concurrency,
+    objects:size.blobs});
   const lifecycleFile="lifecycle.json";
   const lifecycleArgs=[
     "--submissions="+size.submissions,"--changesets="+size.changesets,
@@ -151,10 +154,23 @@ try{
         attempts:first?.attempted,completed:first?.completed,
         throughputPerSecond:first?.successfulPerSecond,
         p50Ms:first?.p50Ms,p95Ms:first?.p95Ms,p99Ms:first?.p99Ms,
+        topologyHash,workloadHash,
         independentCount:data.integrity?.persistedAfterIndependentPhase,
         note:"Native in-process service calls, not HTTP or final integration"};
     }});
   if(life?.status==="PASSED"){
+    let measuredBaseline={status:"UNBASELINED",reason:"No matching three-run baseline supplied"};
+    if(args.get("baseline")){
+      const baseline=JSON.parse(await readFile(resolve(args.get("baseline")),"utf8"));
+      measuredBaseline=compareMeasuredBaseline({topologyHash,workloadHash,
+        p95Ms:life.evidence.p95Ms,
+        throughputPerSecond:life.evidence.throughputPerSecond},baseline);
+    }
+    results.push({name:"publication-measured-baseline",
+      stage:"measured-baseline",
+      status:measuredBaseline.status==="REGRESSION"?"FAILED":measuredBaseline.status==="PASSED"?"PASSED":"NOT_MEASURED",
+      evidence:measuredBaseline});
+    await writeSummary();
     await run("run-real-index-and-review-workers",npm,["exec","--","tsx",
       "scripts/qualification/drain.ts",
       "--input="+join(destination,lifecycleFile),
