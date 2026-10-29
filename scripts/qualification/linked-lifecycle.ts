@@ -167,7 +167,16 @@ try {
           "Runner completed without authenticated signed evidence");
         signedExecutions++;
       }else if(saved.state==="QUEUED")retried++;
-      else throw Error("Real OCI validation failed "+saved.kind+" state="+saved.state);
+      else {
+        const output=await db.validationLogChunk.findMany({where:{taskId:task.id},
+          orderBy:{sequence:"asc"},select:{content:true}});
+        const tail=output.map(x=>x.content).join("").slice(-2500);
+        step("validation-failed",{kind:saved.kind,state:saved.state,
+          summary:saved.summary,exitCode:saved.exitCode,logTail:tail});
+        throw Error("Real OCI validation failed "+saved.kind+
+          " state="+saved.state+" exitCode="+saved.exitCode+
+          " summary="+saved.summary+" logs="+tail);
+      }
     }
     const updated=await db.changeIntegration.findUniqueOrThrow({where:{id:integration.id}});
     if(updated.state==="INTEGRATED")break;
