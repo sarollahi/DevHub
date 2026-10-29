@@ -75,6 +75,13 @@ jobs:
             --sha "$GITHUB_SHA" \
             --changesets "$CHANGES" \
             --evidence artifacts/qualification/aws
+      - name: Renew short-lived OIDC credentials before collection and teardown
+        if: always()
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DEVHUB_PERF_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.DEVHUB_PERF_AWS_REGION }}
+          role-session-name: devhub-cleanup-${{ github.run_id }}
       - name: Retrieve raw measurement evidence from this stack's private S3 bucket
         if: always()
         run: |
