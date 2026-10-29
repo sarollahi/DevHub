@@ -2,7 +2,13 @@ import { createHash } from "node:crypto";
 import type { NativeAssessment, Region, Operation, Entry } from "./analysis";
 import { cosineSimilarity, regionOverlap } from "./analysis";
 
-export const REVIEW_INDEX_VERSION = 1;
+export const REVIEW_INDEX_VERSION = 2;
+export const DEFAULT_SEMANTIC_SIMILARITY_THRESHOLD = 0.50;
+export function configuredSemanticThreshold(): number {
+  const threshold=Number(process.env.DEVHUB_EMBEDDING_MIN_SIMILARITY ?? DEFAULT_SEMANTIC_SIMILARITY_THRESHOLD);
+  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) throw new Error("Invalid embedding similarity threshold");
+  return threshold;
+}
 export const RELATED_PREVIEW_LIMIT = 48;
 export type SignalKind = "EXACT" | "EQUIVALENT" | "CONTENT" | "PATH" | "ISSUE" | "SUBSYSTEM" | "VECTOR";
 export type Signal = { kind: SignalKind; key: string };
@@ -35,13 +41,15 @@ export function contentFingerprint(operations: Operation[], after: Map<string, E
  */
 function bits(vector: number[], band: number): number {
   let out = 0;
-  for (let bit = 0; bit < 12; bit++) {
+  for (let bit = 0; bit < 10; bit++) {
     let seed = ((band + 1) * 0x9e3779b1 ^ (bit + 1) * 0x85ebca6b) >>> 0;
     let dot = 0;
-    for (let k = 0; k < 32; k++) {
+    for (let k = 0; k < 48; k++) {
       seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
       const idx = (seed >>> 0) % vector.length;
-      dot += (seed & 1 ? 1 : -1) * vector[idx];
+      // The sign must use independent seed bits: seed parity is correlated with
+      // seed % even_dimensions and creates a severe projection bias.
+      dot += ((seed >>> 16) & 1 ? 1 : -1) * vector[idx];
     }
     if (dot >= 0) out |= 1 << bit;
   }
@@ -52,10 +60,10 @@ export function vectorBuckets(vector: number[], namespace: string, probe = false
     vector.every(v => v === 0)) return [];
   const prefix = hash([REVIEW_INDEX_VERSION, namespace, vector.length]).slice(0, 16);
   const keys: string[] = [];
-  for (let band = 0; band < 4; band++) {
+  for (let band = 0; band < 8; band++) {
     const bucket = bits(vector, band);
     keys.push(prefix + ":" + band + ":" + hex(bucket));
-    if (probe) for (let bit = 0; bit < 12; bit++) keys.push(prefix + ":" + band + ":" + hex(bucket ^ (1 << bit)));
+    if (probe) for (let bit = 0; bit < 10; bit++) keys.push(prefix + ":" + band + ":" + hex(bucket ^ (1 << bit)));
   }
   return keys;
 }
@@ -80,14 +88,14 @@ export type Candidate = {
   regions: Region[]; embedding: number[]; signals: Set<SignalKind>;
 };
 export function classifyCandidate(assessment: NativeAssessment, equivalenceHash: string,
-  candidate: Candidate, currentEmbedding: number[] = []): Relation | null {
+  candidate: Candidate, currentEmbedding: number[] = [], threshold=DEFAULT_SEMANTIC_SIMILARITY_THRESHOLD): Relation | null {
   if (candidate.fingerprint === assessment.fingerprint) return {changesetId:candidate.changesetId,kind:"DUPLICATE",score:1};
   if (candidate.equivalenceHash === equivalenceHash) return {changesetId:candidate.changesetId,kind:"EQUIVALENT",score:.99};
   const overlap = regionOverlap(assessment.regions,candidate.regions);
   if (overlap === "REGION") return {changesetId:candidate.changesetId,kind:"REGION",score:.95};
   if (overlap === "FILE") return {changesetId:candidate.changesetId,kind:"FILE",score:.6};
   const similarity = candidate.signals.has("VECTOR") ? cosineSimilarity(currentEmbedding,candidate.embedding) : 0;
-  if (similarity >= .82) return {changesetId:candidate.changesetId,kind:"SIMILAR",score:similarity};
+  if (similarity >= threshold) return {changesetId:candidate.changesetId,kind:"SIMILAR",score:similarity};
   for (const [kind,score] of [["ISSUE",.55],["CONTENT",.5],["SUBSYSTEM",.25]] as const) {
     if (candidate.signals.has(kind)) return {changesetId:candidate.changesetId,kind,score};
   }
