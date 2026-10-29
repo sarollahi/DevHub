@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 export const requiredStages = Object.freeze([
   "object-storage", "publication", "indexing", "validation-executed",
   "review-completed", "approval", "integration-completed",
-  "atomic-ref", "client-sync",
+  "atomic-ref", "client-sync", "measured-baseline",
 ]);
 export const requiredScaleCases = Object.freeze([
   "burst-1000", "independent-10000", "history-100000", "history-1000000",
