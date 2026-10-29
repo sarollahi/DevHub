@@ -75,6 +75,9 @@ blocked_count="$(docker exec "$primary" psql -U devhub -d devhub -Atc \
   'SELECT COUNT(*) FROM public.failover_sentinel WHERE id=99')"
 [[ "$blocked_count" == 0 ]] || { echo "Unacknowledged partition write persisted"; exit 1; }
 docker network connect --alias pg-standby "$network" "$standby"
+# Force release of any half-open replication TCP socket after a hard network cut.
+# The volume is persistent and the restarted standby must replay verified WAL.
+docker restart "$standby" >/dev/null
 for i in $(seq 1 40); do
   joined="$(docker exec "$primary" psql -U devhub -d devhub -Atc \
     "SELECT COUNT(*) FROM pg_stat_replication WHERE application_name='standby1' AND state='streaming'" 2>/dev/null || echo 0)"
@@ -82,7 +85,7 @@ for i in $(seq 1 40); do
   sleep 1
 done
 [[ "$joined" == 1 ]] || { echo "Partition recovery did not resume replication"; exit 1; }
-docker exec "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
+docker exec -e PGOPTIONS="-c statement_timeout=5000" "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
   -c "INSERT INTO public.failover_sentinel VALUES (3,'after-rejoin');" >/dev/null
 [[ "$(docker exec "$standby" psql -U devhub -d devhub -Atc \
   'SELECT COUNT(*) FROM public.failover_sentinel WHERE id=3')" == 1 ]] ||
