@@ -18,7 +18,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 docker network create "$network" >/dev/null
 docker volume create "$volume" >/dev/null
-docker run -d --rm --name "$primary" --network "$network" --network-alias pg-primary \
+docker run -d --name "$primary" --network "$network" --network-alias pg-primary \
   -e POSTGRES_USER=devhub -e POSTGRES_DB=devhub -e POSTGRES_PASSWORD=devhub \
   postgres:16-alpine -c wal_level=replica -c max_wal_senders=10 -c max_replication_slots=10 >/dev/null
 for i in $(seq 1 45); do
@@ -66,7 +66,7 @@ standby_seen="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
 docker stop "$primary" >/dev/null
 [[ "$(docker inspect -f '{{.State.Running}}' "$primary")" == "false" ]] ||
   { echo "Old primary was not fenced" >&2; exit 1; }
-docker exec "$standby" sh -c 'pg_ctl -D /var/lib/postgresql/data promote' >/dev/null
+docker exec -u postgres "$standby" sh -c 'pg_ctl -D /var/lib/postgresql/data promote' >/dev/null
 for i in $(seq 1 30); do
   recovering="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
     'SELECT pg_is_in_recovery()' 2>/dev/null || echo t)"
