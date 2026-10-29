@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+artifacts
+reports
+node_modules
+.next
+coverage
+*.pem
+*.key
+*.p12
+*.pfx
+**/*.log
