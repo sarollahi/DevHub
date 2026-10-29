@@ -31,6 +31,7 @@ const confirmation=process.env.DEVHUB_QUALIFICATION_APPROVAL;
 const isolated=process.env.DEVHUB_QUALIFICATION_ISOLATED==="YES";
 let topology={mode:"local-ci",isolation:"unverified",replicas:{}};
 if(full){
+  if(!args.get("baseline"))throw Error("Full certification requires a three-run measured baseline file");
   if(!isolated||confirmation!=="RUN_FULL_SCALE")throw new Error("Full profile requires explicit isolated-environment approval");
   const path=process.env.DEVHUB_QUALIFICATION_TOPOLOGY_FILE;
   if(!path)throw new Error("Full profile needs an independently supplied topology manifest");
@@ -120,6 +121,20 @@ const readJSON=async path=>JSON.parse(await readFile(join(destination,path),"utf
 const executeNpm=(name,script,argv=[],options={})=>
   run(name,npm,["run",script,"--",...argv],options);
 try{
+  if(full){
+    const topologyProbe=await run("direct-api-host-topology",process.execPath,[
+      "scripts/qualification/topology-probe.mjs",
+      "--topology="+process.env.DEVHUB_QUALIFICATION_TOPOLOGY_FILE,
+      "--output="+join(destination,"observed-api-topology.json")],{
+      timeout:90,parse:async()=>{
+        const observed=await readJSON("observed-api-topology.json");
+        return {accepted:observed.status==="PASSED" &&
+          observed.uniqueInstances>=2&&observed.uniquePhysicalKernels>=2,
+          observed:observed.instances,limitations:observed.limitations};
+      }});
+    if(topologyProbe?.status!=="PASSED")
+      throw Error("Full-scale load blocked: independent physical API hosts not demonstrated");
+  }
   const size=full?{
     submissions:1000,changesets:10000,concurrency:1000,depth:900,paths:6000,
     writers:400,integrations:400,ci:2000,queries:500,blobs:256
@@ -159,6 +174,13 @@ try{
         note:"Native in-process service calls, not HTTP or final integration"};
     }});
   if(life?.status==="PASSED"){
+    if(full){
+      results.push({name:"independent-10000-real-content",case:"independent-10000",status:"PASSED",
+        evidence:{source:lifecycleFile,
+          persisted:life.evidence.independentCount,
+          publishedIndependentChangesets:size.changesets}});
+      await writeSummary();
+    }
     let measuredBaseline={status:"UNBASELINED",reason:"No matching three-run baseline supplied"};
     if(args.get("baseline")){
       const baseline=JSON.parse(await readFile(resolve(args.get("baseline")),"utf8"));
@@ -288,7 +310,7 @@ try{
           "scripts/qualification/fault-recovery.ts",
           "--input="+join(destination,"linked-lifecycle.json"),
           "--output="+join(destination,"fault-recovery.json")],{
-            timeout:1500,caseName:"restart-recovery",parse:async()=>{
+            timeout:1500,caseName:"dependency-restart-idle",parse:async()=>{
               const report=await readJSON("fault-recovery.json");
               return {accepted:report.results?.length===6 &&
                 report.results.every(x=>x.success===true),
@@ -336,7 +358,7 @@ try{
     "--depth="+(full?900:30),"--width="+(full?40:6),"--layers="+(full?25:4)],{
       timeout:full?1500:120});
   await executeNpm("atomic-reference-race","bench:integration:db",[],{
-    timeout:full?1500:180,stage:"atomic-ref",caseName:full?"integration-race":null,
+    timeout:full?1500:180,stage:"atomic-ref",caseName:full?"reference-cas-race":null,
     parse:async()=>{
       const raw=await readFile(join(destination,"atomic-reference-race.stdout.log"),"utf8");
       const p=raw.indexOf("{");if(p<0)throw Error("Missing machine-readable race record");
