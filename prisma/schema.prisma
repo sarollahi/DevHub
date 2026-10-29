@@ -1276,3 +1276,15 @@ model GitTrafficUsage {
   @@id([repositoryId, day])
   @@index([day])
 }
+
+// Persistent per-lane tenant turn ordering. Worker crashes do not strand slots:
+// active counts are computed from live, expiring job leases on the canonical
+// lane table while this row is locked for admission.
+model TenantLaneTurn {
+  lane          String   @db.VarChar(24)
+  tenantId      String   @db.Uuid
+  lastClaimedAt DateTime?
+  claimCount    BigInt   @default(0)
+  @@id([lane, tenantId])
+  @@index([lane, lastClaimedAt])
+}
