@@ -118,9 +118,19 @@ after="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
 [[ "$after" == "$standby_seen" ]] || { echo "Acknowledged transaction lost after promotion"; exit 1; }
 docker exec "$standby" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
   -c "INSERT INTO public.failover_sentinel VALUES (2, 'writes-resumed');" >/dev/null
-after_count="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
-  'SELECT COUNT(*) FROM public.failover_sentinel')"
-[[ "$after_count" == 2 ]] || { echo "Promoted standby is not writable"; exit 1; }
+# The partition test also committed row 99 after replica connectivity recovered.
+# Verify all three expected writes and their contents, not an obsolete total.
+after_rows="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
+  "SELECT id || ':' || payload FROM public.failover_sentinel ORDER BY id")"
+expected_rows="$(printf '%s\\n' \
+  '1:durable-before-promotion' \
+  '2:writes-resumed' \
+  '99:A')"
+[[ "$after_rows" == "$expected_rows" ]] || {
+  printf 'Promoted standby contents differ from acknowledged writes. Expected:\\n%s\\nActual:\\n%s\\n' \
+    "$expected_rows" "$after_rows" >&2
+  exit 1
+}
 PARTITION_WRITE_BLOCK_MS="$partition_block_ms" node --input-type=module - "$before" "$(( $(date +%s) - started ))" "$(( $(date +%s%3N) - failover_started_ms ))" <<'NODE'
 import { writeFileSync } from "node:fs";
 const [, , primaryLSN, elapsedSeconds, fencedPromotionMs] = process.argv;
