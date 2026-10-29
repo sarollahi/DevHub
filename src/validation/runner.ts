@@ -13,6 +13,7 @@ import { validPath } from "../lib/review-logic";
 import { snapshotFor, verifiedBlobSource, type Entry } from "./snapshot";
 import { digest, signTask, verifyTask } from "./policy";
 import { refreshPipeline } from "./service";
+import { readContainerUsage, mergeContainerUsage, type ContainerUsage } from "./container-usage";
 
 const exec = promisify(execFile);
 const leaseMs = 45_000;
@@ -164,6 +165,15 @@ async function capture(task:Claimed,source:string,artifacts:string,isCancelled:(
   child.stdout.on("data",(b:Buffer)=>{child.stdout.pause();output(b,"");void chain.finally(()=>child.stdout.resume());});
   child.stderr.on("data",(b:Buffer)=>{child.stderr.pause();output(b,"[stderr] ");void chain.finally(()=>child.stderr.resume());});
   let timeout=false,cancelled=false;
+  let usage: ContainerUsage | null = null, sampling = false;
+  const sampleUsage = () => {
+    if (sampling) return;
+    sampling = true;
+    void readContainerUsage(name).then(result => {
+      usage = mergeContainerUsage(usage, result);
+    }).finally(() => { sampling = false; });
+  };
+  const meter = setInterval(sampleUsage, 1000);
   const started=Date.now();
   const timer=setInterval(()=>{
     if(Date.now()-started>task.timeoutSeconds*1000)timeout=true;
@@ -176,8 +186,8 @@ async function capture(task:Claimed,source:string,artifacts:string,isCancelled:(
       child.once("error",error=>resolve({code:null,error}));
     });
     await chain;
-    return {...result,timeout,cancelled,logDigest:hash.digest("hex")};
-  } finally {clearInterval(timer);await terminateContainer(name);}
+    return {...result,timeout,cancelled,logDigest:hash.digest("hex"),usage};
+  } finally {clearInterval(timer);clearInterval(meter);await terminateContainer(name);}
 }
 export async function executeTask(task:Claimed) {
   if(task.oldLeaseToken)await terminateContainer(containerName(task.id,task.oldLeaseToken));
@@ -215,10 +225,11 @@ export async function executeTask(task:Claimed) {
             taskId:task.id,attempt:task.attempt,name:x.name,mediaType:x.mediaType,
             digest:x.digest,content:Uint8Array.from(x.content)
           }))});
-          await tx.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken},
+          await tx.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken,leaseUntil:{gt:new Date()}},
             data:{state:"PASSED",signature,exitCode:0,logDigest:reusable.logDigest,
               artifactDigest:reusable.artifactDigest,reusedFromId:reusable.id,
               summary:"Reused signed result and verified stored evidence for identical immutable inputs",
+               resourceMeasurementStatus:"REUSED",
               finishedAt:new Date(),leaseUntil:null,leaseToken:null}});
         });
         return;
@@ -230,7 +241,7 @@ export async function executeTask(task:Claimed) {
     await mkdir(source);await mkdir(artifacts,{mode:0o777});await chmod(artifacts,0o777);
     await materialize(source,snapshot.entries,task.pipeline.repositoryId);
     heartbeat=setInterval(()=>{
-      void db.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken},
+      void db.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken,leaseUntil:{gt:new Date()}},
         data:{leaseUntil:new Date(Date.now()+leaseMs)}})
         .then(x=>{if(!x.count)cancelled=true;}).catch(()=>{cancelled=true;});
     },10000);
@@ -249,14 +260,19 @@ export async function executeTask(task:Claimed) {
     const signed={...task,state,exitCode:result.code,logDigest:result.logDigest,
       artifactDigest,reusedFromId:null};
     const signature=signTask(signed);
-    await db.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken},
+    await db.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken,leaseUntil:{gt:new Date()}},
       data:{state,signature,exitCode:result.code,logDigest:result.logDigest,
+        measuredCpuNanos:result.usage?.cpuNanos??null,
+        sampledMemoryPeakBytes:result.usage?.sampledMemoryPeakBytes??null,
+        containerNetworkRxBytes:result.usage?.networkRxBytes??null,
+        containerNetworkTxBytes:result.usage?.networkTxBytes??null,
+        resourceMeasurementStatus:result.usage?"SAMPLED":"UNAVAILABLE",
         artifactDigest,finishedAt:new Date(),leaseUntil:null,leaseToken:null,
         summary:result.timeout?"Timed out":result.error?.message||
           (result.code===0?"Passed":"Exit code "+result.code)}});
   } catch(error) {
     const exhausted=task.attempt>=task.maxAttempts;
-    await db.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken},
+    await db.validationTask.updateMany({where:{id:task.id,state:"RUNNING",leaseToken:task.leaseToken,leaseUntil:{gt:new Date()}},
       data:{state:exhausted?"ERRORED":"QUEUED",leaseToken:null,leaseUntil:null,
         summary:error instanceof Error?error.message.slice(0,400):"Runner error",
         nextAttemptAt:new Date(Date.now()+Math.min(60000,1000*2**Math.min(8,task.attempt))),
