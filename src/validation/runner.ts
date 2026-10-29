@@ -165,12 +165,13 @@ async function capture(task:Claimed,source:string,artifacts:string,isCancelled:(
   child.stdout.on("data",(b:Buffer)=>{child.stdout.pause();output(b,"");void chain.finally(()=>child.stdout.resume());});
   child.stderr.on("data",(b:Buffer)=>{child.stderr.pause();output(b,"[stderr] ");void chain.finally(()=>child.stderr.resume());});
   let timeout=false,cancelled=false;
-  let usage: ContainerUsage | null = null, sampling = false;
+  const usageRef: { current: ContainerUsage | null } = { current: null };
+  let sampling = false;
   const sampleUsage = () => {
     if (sampling) return;
     sampling = true;
     void readContainerUsage(name).then(result => {
-      usage = mergeContainerUsage(usage, result);
+      usageRef.current = mergeContainerUsage(usageRef.current, result);
     }).finally(() => { sampling = false; });
   };
   const meter = setInterval(sampleUsage, 1000);
@@ -186,7 +187,7 @@ async function capture(task:Claimed,source:string,artifacts:string,isCancelled:(
       child.once("error",error=>resolve({code:null,error}));
     });
     await chain;
-    return {...result,timeout,cancelled,logDigest:hash.digest("hex"),usage};
+    return {...result,timeout,cancelled,logDigest:hash.digest("hex"),usage: usageRef.current};
   } finally {clearInterval(timer);clearInterval(meter);await terminateContainer(name);}
 }
 export async function executeTask(task:Claimed) {
