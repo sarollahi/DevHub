@@ -45,11 +45,19 @@ test on the actual topology. CI fault drills are isolated infrastructure checks.
 
 The database atomically increments per-actor, per-repository and tenant-wide
 minute buckets. Admission rejects over-limit requests with HTTP 429; it does
-not rely on replica-local counters. Integration/validation paths have their
-own finite quotas and worker concurrency limits. **Global weighted fair
-scheduling across every queue is not implemented**: FIFO/oldest-job order
-can starve small tenants under a sustained high-volume tenant; completion of
-the fairness scheduler and its mixed-tenant load test is a merge gate.
+not rely on replica-local counters. Integration, review, validation and path
+index workers now select **one oldest candidate per tenant**, sort tenants by
+persisted last-served turn, and atomically reserve admission under a
+PostgreSQL tenant-row lock. Active limits count unexpired canonical leases;
+a crashed process does not leave an immortal scheduling slot. A regression
+test exercises alternating tenant turns and expired-lease reclamation. Search
+content indexing is global by deduplicated object ID and has no tenant
+owner; it runs in the bounded shared maintenance lane. Redis outbox delivery
+is also a transport lane, not a weighted-fair tenant queue.
+
+This is a persistent best-effort oldest-turn scheduler. Formal
+deployment-scale statistical starvation bounds, multi-region worker
+fairness, and weighted cost-based allocation are not demonstrated.
 
 ### Process startup and configuration
 
@@ -150,15 +158,26 @@ uploaded as a workflow artifact, not made up in this document.
 | Cross-service partition | No completed writes while authoritative evidence unavailable |
 | Restore from PITR + S3 | Full referenced-object inventory, signed evidence, RPO and RTO |
 
-These scenarios are **not all demonstrated by the CI workflow**. In
-particular, primary failover, independent Git process concurrency,
-region-to-region partitions, API crash mid-transaction, and a full PITR
-restore require a dedicated multi-node test environment with external
-fault-injection controls, logs and signed run identifiers.
+CI now includes separate jobs that (a) create a physical PostgreSQL 16
+streaming standby, enable synchronous apply, stop/fence the primary, promote
+the standby, verify an acknowledged transaction and accept a new write;
+(b) restore a complete PostgreSQL logical dump and actual MinIO blob bytes
+into **separate services**, then verify the full object inventory on both;
+and (c) launch two independent Git gateway processes with competing pushes
+to the same native ref. A worker SIGKILL regression test accelerates the
+expired-lease window and checks exactly-once preflight publication. The
+network-isolation job separately disconnects live containers from peers,
+with PID and restored connectivity assertions.
+
+These tests do **not** demonstrate managed-primary failover with a stable
+client endpoint, database WAL/PITR point-in-time restoration, multi-region
+partitions, full application latency under failure, process termination
+during S3 publication or a real validation container, or production RPO/RTO.
+Capture this separate deployment-scale evidence before release.
 
 ## Reconciliation and observation
 
-Run `npm run ops:reconcile -- --sample=100 --verify-external` to check
+Run `npx tsx scripts/verify-all-objects.ts --output=inventory.json` on a quiesced\ncluster to stream and cryptographically verify **every** authoritative object\nand snapshot node, plus missing child/value/grant/ref links. Separately, run\n`npm run ops:reconcile -- --sample=100 --verify-external` to check
 cross-tenant refs, ancestry, missing operation object rows, grants,
 integrations, validation/index state, stale leases and outbox backlog.
 It verifies only **sampled** S3 blobs and inline objects; this is **not**
@@ -169,11 +188,16 @@ with the matching database snapshot. Never auto-regrant legacy missing
 object grants or silently repair an authoritative ref. Publication recovery
 is separately opt-in with `--recover-publications`.
 
-`npm run ops:usage` reports DB-accounted stored bytes, runner wall time
-(not CPU), and measured Git transport ingress/egress; API bandwidth, S3
-requests/bytes, cache traffic, actual per-tenant CPU and infrastructure
-billing attribution are not yet measured. These omissions are a
-production-accounting limitation, not zero usage.
+`npm run ops:usage` reports DB-accounted stored bytes, actual Git
+transport ingress/egress, compressed S3 staging PUT payload bytes and raw
+upload input bytes. Isolated validation tasks sample Docker Engine's real
+per-container cgroup CPU nanoseconds, memory peaks and network counters when
+available; unmeasured tasks are reported with null counters and explicit
+coverage. Runtime wall time is a separate measurement, **not** CPU time.
+These measurements are per repository and can be grouped by organization/
+owner tenant. They do not capture all API traffic, S3 verification GET and
+copy calls, cache/CDN egress, process CPU for shared non-container workers,
+or provider billing. Do not treat unavailable measurements as zero usage.
 
 Scrape `/api/ops/metrics` with a dedicated `OPS_METRICS_TOKEN`, track
 queue age, expiring leases, request/error histograms, cache breaker status
