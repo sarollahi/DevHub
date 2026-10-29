@@ -77,3 +77,21 @@ test("durable tenant turn alternates independent index work under cross-worker c
   });
   assert.ok(reclaim, "Expired work must be reclaimable across instances");
 });
+
+test("concurrent first-time tenant scheduling initializes a single durable turn without unique-key errors", {
+  timeout: 30_000,
+}, async t => {
+  const tenantId = randomUUID();
+  t.after(async () => {
+    await db.tenantLaneTurn.deleteMany({ where: { lane: "review", tenantId } });
+  });
+  // All processes enter fairClaim against the same initially absent PK.
+  // The old empty-update Prisma upsert raised P2002 intermittently.
+  const attempts = await Promise.allSettled(Array.from({ length: 24 }, () =>
+    fairClaim("review", tenantId, async () => true)));
+  assert.equal(attempts.filter(x => x.status === "rejected").length, 0,
+    "Concurrent first-time claims must not fail a unique key race");
+  const rows = await db.tenantLaneTurn.findMany({ where: { lane: "review", tenantId } });
+  assert.equal(rows.length, 1, "Tenant scheduler must have one canonical row");
+  assert.ok(rows[0].claimCount >= 0n);
+});
