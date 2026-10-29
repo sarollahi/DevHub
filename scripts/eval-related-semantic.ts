@@ -106,7 +106,13 @@ async function main() {
     environment:{commit:process.env.GITHUB_SHA??null,ci:process.env.GITHUB_ACTIONS==="true"},
   };
   await mkdir(output.split("/").slice(0,-1).join("/")||".",{recursive:true});
-  await writeFile(output,JSON.stringify(report,null,2)+"\n");
-  console.log(JSON.stringify(report));
+  const gates = mode==="model" ? { minimumPrecision:.75, minimumRecall:.50, minimumCandidateRecall:.70 } : null;
+  const gatedReport={...report,verificationGates:gates};
+  await writeFile(output,JSON.stringify(gatedReport,null,2)+"\n");
+  console.log(JSON.stringify(gatedReport));
+  if(gates && (precision<gates.minimumPrecision || recall<gates.minimumRecall ||
+    report.candidateRecall<gates.minimumCandidateRecall)){
+    throw new Error("Semantic model evaluation regressed against the fixed labeled corpus");
+  }
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
