@@ -60,6 +60,33 @@ docker exec "$primary" psql -U devhub -d devhub -c "SELECT pg_reload_conf()" >/d
 docker exec "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
   -c "CREATE TABLE public.failover_sentinel (id integer PRIMARY KEY, payload text NOT NULL);" \
   -c "INSERT INTO public.failover_sentinel VALUES (1, 'durable-before-promotion');" >/dev/null
+# A real asymmetric network partition while the old primary is alive:
+# synchronous ack must fail closed, and the uncommitted sentinel must not
+# reach either side. Then reconnect before choosing the new fenced writer.
+partition_start_ms="$(date +%s%3N)"
+docker network disconnect -f "$network" "$standby"
+if docker exec -e PGOPTIONS="-c statement_timeout=2500" "$primary" \
+  psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
+  -c "INSERT INTO public.failover_sentinel VALUES (99,'must-not-commit');" >/dev/null 2>&1; then
+  echo "UNSAFE: acknowledged a write without required synchronous standby" >&2; exit 1
+fi
+partition_block_ms="$(( $(date +%s%3N) - partition_start_ms ))"
+blocked_count="$(docker exec "$primary" psql -U devhub -d devhub -Atc \
+  'SELECT COUNT(*) FROM public.failover_sentinel WHERE id=99')"
+[[ "$blocked_count" == 0 ]] || { echo "Unacknowledged partition write persisted"; exit 1; }
+docker network connect --alias pg-standby "$network" "$standby"
+for i in $(seq 1 40); do
+  joined="$(docker exec "$primary" psql -U devhub -d devhub -Atc \
+    "SELECT COUNT(*) FROM pg_stat_replication WHERE application_name='standby1' AND state='streaming'" 2>/dev/null || echo 0)"
+  if [[ "$joined" == 1 ]]; then break; fi
+  sleep 1
+done
+[[ "$joined" == 1 ]] || { echo "Partition recovery did not resume replication"; exit 1; }
+docker exec "$primary" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
+  -c "INSERT INTO public.failover_sentinel VALUES (3,'after-rejoin');" >/dev/null
+[[ "$(docker exec "$standby" psql -U devhub -d devhub -Atc \
+  'SELECT COUNT(*) FROM public.failover_sentinel WHERE id=3')" == 1 ]] ||
+  { echo "Rejoined replica lost acknowledged committed write"; exit 1; }
 before="$(docker exec "$primary" psql -U devhub -d devhub -Atc \
   "SELECT pg_current_wal_lsn()")"
 standby_seen="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
@@ -86,13 +113,15 @@ docker exec "$standby" psql -U devhub -d devhub -v ON_ERROR_STOP=1 \
 after_count="$(docker exec "$standby" psql -U devhub -d devhub -Atc \
   'SELECT COUNT(*) FROM public.failover_sentinel')"
 [[ "$after_count" == 2 ]] || { echo "Promoted standby is not writable"; exit 1; }
-node --input-type=module - "$before" "$(( $(date +%s) - started ))" "$(( $(date +%s%3N) - failover_started_ms ))" <<'NODE'
+PARTITION_WRITE_BLOCK_MS="$partition_block_ms" node --input-type=module - "$before" "$(( $(date +%s) - started ))" "$(( $(date +%s%3N) - failover_started_ms ))" <<'NODE'
 import { writeFileSync } from "node:fs";
 const [, , primaryLSN, elapsedSeconds, fencedPromotionMs] = process.argv;
 const evidence = { drill: "pg16_physical_replica_fenced_promotion", status: "PASS",
   oldPrimaryStoppedBeforePromotion: true, standbyStreamingBeforeFault: true,
   synchronousCommitMode: "remote_apply", lastPrimaryLSN: primaryLSN,
   acknowledgedSentinelSurvived: true, promotedWritable: true,
+  verifiedRealNetworkPartition: true, unacknowledgedPartitionCommitRejected: true,
+  partitionBlockedWriteMs: Number(process.env.PARTITION_WRITE_BLOCK_MS || 0),
   elapsedSeconds: Number(elapsedSeconds), fencedPromotionMs: Number(fencedPromotionMs),
   limitation: "Isolated local primary/standby; not cloud-managed failover or multi-region RTO" };
 writeFileSync("artifacts/distributed-faults/postgresql-failover.json", JSON.stringify(evidence, null, 2));
