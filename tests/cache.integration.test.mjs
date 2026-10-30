@@ -22,6 +22,7 @@ async function start(root, socket, originUrl, options = {}) {
   const child = spawn(process.execPath, [entry], { env: { ...process.env,
     DEVHUB_CACHE_DIR: root, DEVHUB_CACHE_SOCKET: socket, DEVHUB_ORIGIN_URL: originUrl,
     DEVHUB_CACHE_DISK_BYTES: String(options.maxDiskBytes ?? 64 * 1024),
+    ...(options.debug ? { DEVHUB_CACHE_DEBUG: '1' } : {}),
     DEVHUB_CACHE_OBJECT_BYTES: String(options.maxObjectBytes ?? 1024),
     DEVHUB_REGIONAL_URL: options.regionalUrl || '', DEVHUB_REGIONAL_TOKEN: options.regionalToken || '',
   }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -59,46 +60,64 @@ test('shared daemon: real independent clients, coalescing, persistent cache, tam
     res.end(bytes);
   });
   const url = await listen(server);
-  let daemon;
-  t.after(async () => { if (daemon && daemon.child.exitCode === null) await stop(daemon); await new Promise(resolve => server.close(resolve)); await rm(dir, { recursive: true, force: true }); });
-  daemon = await start(root, socket, url, { maxDiskBytes: 2048, maxObjectBytes: 1024 });
+  let daemon, stage = 'initial';
+  t.after(async () => {
+    if (stage !== 'completed') {
+      t.diagnostic(`cache stage: ${stage}; daemon stderr: ${(daemon?.errors() ?? '').slice(-6000)}`);
+      try { t.diagnostic(`cache status: ${JSON.stringify(await status(socket))}`); } catch {}
+    }
+    if (daemon && daemon.child.exitCode === null) await stop(daemon);
+    await new Promise(resolve => server.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  });
+  daemon = await start(root, socket, url, { maxDiskBytes: 2048, maxObjectBytes: 1024, debug: true });
+  stage = 'concurrent clients';
   const workers = await Promise.all(Array.from({ length: 12 }, () => probe(socket, items[0].id)));
   assert.deepEqual(workers, Array(12).fill(items[0].data.toString()));
   assert.equal(requests, 1, 'one object download for concurrent independent clients');
   assert.ok((await status(socket)).coalesced > 0);
-  await stop(daemon); daemon = await start(root, socket, url, { maxDiskBytes: 2048, maxObjectBytes: 1024 });
+  stage = 'warm restart';
+  await stop(daemon); daemon = await start(root, socket, url, { maxDiskBytes: 2048, maxObjectBytes: 1024, debug: true });
   assert.equal((await getCachedObject({ socketPath: socket, repositoryId: repo, id: items[0].id })).data.toString(), 'alpha-worker-tree');
   assert.equal(requests, 1, 'warm cache survives daemon restart');
   const files = (await readdir(join(root, 'objects'), { withFileTypes: true })).filter(d => d.isDirectory());
   const objectFiles = (await Promise.all(files.map(d => readdir(join(root, 'objects', d.name))))).flat();
   const bin = objectFiles.find(f => f.endsWith('.bin'));
   const sh = files.find(d => objectFiles.includes(bin));
+  stage = 'tamper detection';
   await writeFile(join(root, 'objects', sh.name, bin), Buffer.from('forged-data'), { flag: 'w' });
   assert.equal((await getCachedObject({ socketPath: socket, repositoryId: repo, id: items[0].id })).data.toString(), 'alpha-worker-tree');
   assert.equal(requests, 2, 'tamper triggers fresh authoritative download');
   assert.ok((await status(socket)).integrityFailures > 0);
+  stage = 'workspace materialization';
   const destination = join(dir, 'workspace-file');
   await materializeCachedObject({ socketPath: socket, repositoryId: repo, id: items[1].id }, destination);
   assert.deepEqual(await readFile(destination), items[1].data);
   assert.equal((await status(socket)).entries, 2);
+  stage = 'bounded small item eviction';
   for (const x of items.slice(2)) await getCachedObject({ socketPath: socket, repositoryId: repo, id: x.id });
   assert.ok((await status(socket)).bytes <= 2048);
+  stage = 'missing-object denial';
   const missing = '0'.repeat(64);
   await assert.rejects(() => getCachedObject({ socketPath: socket, repositoryId: repo, id: missing }), CacheUnavailable);
   assert.ok((await status(socket)).upstreamRequests >= 4);
+  stage = 'tree caching';
   const treeBytes = Buffer.from('[]');
   const tree = { id: kindHash('TREE', treeBytes), kind: 'TREE', data: treeBytes };
   items.push(tree);
   const treeResult = await getCachedObject({ socketPath: socket, repositoryId: repo, id: tree.id });
   assert.equal(treeResult.kind, 'TREE');
   assert.deepEqual(treeResult.data, treeBytes);
+  stage = 'large-object eviction';
   for (const large of ['A', 'B', 'C']) { const item = blob(large.repeat(950)); items.push(item); await getCachedObject({ socketPath: socket, repositoryId: repo, id: item.id }); }
   assert.ok((await status(socket)).evictions > 0, 'disk budget forces real eviction');
+  stage = 'tampered upstream';
   corrupt = true;
   const wrong = blob('never trust upstream without checking');
   items.push(wrong);
   await assert.rejects(() => getCachedObject({ socketPath: socket, repositoryId: repo, id: wrong.id }), CacheUnavailable);
   assert.equal((await status(socket)).integrityFailures >= 2, true);
+  stage = 'completed';
 });
 
 test('regional hierarchy: cache misses only travel upstream once; regional outage falls back with bounded fan-out', { timeout: 30000 }, async t => {

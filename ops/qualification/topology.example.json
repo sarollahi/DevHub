@@ -1,0 +1,30 @@
+{
+  "isolated": true,
+  "environment": "dedicated-disposable-qualification",
+  "region": "staging-local",
+  "replicas": {
+    "api": 2,
+    "index": 2,
+    "review": 2,
+    "validation": 2,
+    "integration": 2,
+    "cache": 2
+  },
+  "database": {
+    "engine": "PostgreSQL",
+    "version": "16",
+    "primaryFailoverAvailable": false
+  },
+  "queues": { "engine": "Redis", "version": "7" },
+  "objectStorage": { "engine": "S3-compatible MinIO", "distributed": false },
+  "network": {
+    "scenario": "single-host-containers",
+    "independentFailureDomains": false
+  },
+  "limitations": [
+    "EXAMPLE ONLY; replace with an observed deployment manifest",
+    "Docker replicas on one host are not independent nodes or regions",
+    "PostgreSQL managed-primary failover is not demonstrated",
+    "CPU, memory, network bandwidth and object counts must be recorded per actual node"
+  ]
+}

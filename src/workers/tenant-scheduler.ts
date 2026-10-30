@@ -110,10 +110,13 @@ export async function fairClaim<T>(lane: Lane, tenantId: string,
   const configured = Number(process.env[envKey] ?? defaultCap);
   const maxRunning = Number.isSafeInteger(configured) ? Math.max(1,Math.min(64,configured)) : defaultCap;
   return db.$transaction(async tx => {
-    await tx.tenantLaneTurn.upsert({
-      where: { lane_tenantId: { lane, tenantId } },
-      create: { lane, tenantId }, update: {},
-    });
+    // Prisma's empty-update upsert can use a SELECT/INSERT sequence.
+    // Two replicas claiming the same previously unseen tenant can then race
+    // on the (lane, tenantId) PK. An atomic INSERT ... ON CONFLICT is safe.
+    await tx.$executeRaw`
+      INSERT INTO "TenantLaneTurn" (lane, "tenantId")
+      VALUES (${lane}, ${tenantId}::uuid)
+      ON CONFLICT (lane, "tenantId") DO NOTHING`;
     const locked = await tx.$queryRaw<Array<{ tenantId: string }>>`
       SELECT "tenantId" FROM "TenantLaneTurn" WHERE lane=${lane}
         AND "tenantId"=${tenantId}::uuid FOR UPDATE SKIP LOCKED`;

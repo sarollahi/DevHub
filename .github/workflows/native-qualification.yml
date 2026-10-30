@@ -1,0 +1,142 @@
+name: Native source-control qualification
+on:
+  push:
+    branches: ["feature/**"]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Small CI smoke or manual full isolated qualification"
+        type: choice
+        options: [smoke, full]
+        default: smoke
+      confirmation:
+        description: "For full: type RUN_FULL_SCALE"
+        required: false
+        type: string
+permissions:
+  contents: read
+
+jobs:
+  qualification-smoke:
+    if: github.event_name != 'workflow_dispatch' || inputs.profile == 'smoke'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: devhub
+          POSTGRES_PASSWORD: devhub
+          POSTGRES_DB: devhub
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U devhub -d devhub"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://devhub:devhub@localhost:5432/devhub?schema=public
+      REDIS_URL: redis://localhost:6379
+      APP_SECRET: isolated-smoke-only-secret-not-for-production-123
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22.18", cache: npm }
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run db:generate && npm run db:deploy
+      - run: node --test tests/qualification.test.mjs
+      - name: Compile AWS SSM orchestrator and verify multi-host safety invariants
+        run: |
+          python3 -m py_compile scripts/qualification/aws-live.py
+          node --test tests/qualification-infra.test.mjs
+      - name: Real-content smoke and persisted-state inspection
+        run: npm run qualification:smoke -- --output=artifacts/qualification/smoke
+      - name: Preserve even failed and partial evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-qualification-smoke-${{ github.run_id }}
+          path: artifacts/qualification/smoke/
+          if-no-files-found: warn
+          retention-days: 30
+
+  qualification-full:
+    if: github.event_name == 'workflow_dispatch' && inputs.profile == 'full' && inputs.confirmation == 'RUN_FULL_SCALE'
+    # Dedicated machines only; no production workload and no shared CI hosts.
+    runs-on: [self-hosted, linux, x64, devhub-performance]
+    environment: devhub-performance-isolated
+    timeout-minutes: 4320
+    env:
+      DEVHUB_QUALIFICATION_ISOLATED: "YES"
+      DEVHUB_QUALIFICATION_APPROVAL: RUN_FULL_SCALE
+      DEVHUB_QUALIFICATION_TOPOLOGY_FILE: ${{ github.workspace }}/qualification-topology.json
+      DATABASE_URL: ${{ secrets.DEVHUB_PERF_DATABASE_URL }}
+      REDIS_URL: ${{ secrets.DEVHUB_PERF_REDIS_URL }}
+      APP_SECRET: ${{ secrets.DEVHUB_PERF_APP_SECRET }}
+      OBJECT_STORE_ENDPOINT: ${{ vars.DEVHUB_PERF_OBJECT_STORE_ENDPOINT }}
+      OBJECT_STORE_BUCKET: ${{ vars.DEVHUB_PERF_OBJECT_STORE_BUCKET }}
+      OBJECT_STORE_REGION: ${{ vars.DEVHUB_PERF_OBJECT_STORE_REGION }}
+      OBJECT_STORE_ACCESS_KEY: ${{ secrets.DEVHUB_PERF_OBJECT_STORE_ACCESS_KEY }}
+      OBJECT_STORE_SECRET_KEY: ${{ secrets.DEVHUB_PERF_OBJECT_STORE_SECRET_KEY }}
+      VALIDATION_NODE_IMAGE: ${{ vars.DEVHUB_PERF_VALIDATION_NODE_IMAGE }}
+      VALIDATION_SCAN_IMAGE: ${{ vars.DEVHUB_PERF_VALIDATION_SCAN_IMAGE }}
+      VALIDATION_SECRETS_IMAGE: ${{ vars.DEVHUB_PERF_VALIDATION_SECRETS_IMAGE }}
+      VALIDATION_SIGNING_PRIVATE_KEY: ${{ secrets.DEVHUB_PERF_VALIDATION_SIGNING_PRIVATE_KEY }}
+      VALIDATION_SIGNING_PUBLIC_KEY: ${{ vars.DEVHUB_PERF_VALIDATION_SIGNING_PUBLIC_KEY }}
+      NEXT_TELEMETRY_DISABLED: "1"
+      DEVHUB_QUALIFICATION_API_URL: ${{ vars.DEVHUB_PERF_API_URL }}
+      DEVHUB_QUALIFICATION_FAULT_ENABLED: ${{ vars.DEVHUB_PERF_ENABLE_COMPOSE_FAULTS }}
+      COMPOSE_FILE: ${{ github.workspace }}/ops/qualification/compose.yml
+      OPS_METRICS_TOKEN: ${{ secrets.DEVHUB_PERF_METRICS_TOKEN }}
+      DEVHUB_CACHE_TEST_TOKEN: ${{ secrets.DEVHUB_PERF_CACHE_TEST_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22.18", cache: npm }
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Ensure isolated topology and secrets configured
+        env:
+          TOPOLOGY: ${{ vars.DEVHUB_PERF_TOPOLOGY_MANIFEST }}
+        run: |
+          test -n "$DATABASE_URL" && test -n "$REDIS_URL"
+          test -n "$OBJECT_STORE_ENDPOINT" && test -n "$TOPOLOGY"
+          printf '%s\n' "$TOPOLOGY" > qualification-topology.json
+          chmod 600 qualification-topology.json
+          test -n "$DEVHUB_QUALIFICATION_API_URL"
+      - name: Configure observed per-instance measurement targets
+        env:
+          METRICS_TARGETS: ${{ vars.DEVHUB_PERF_METRICS_TARGETS }}
+          CACHE_TARGETS: ${{ vars.DEVHUB_PERF_CACHE_TARGETS }}
+        run: |
+          if [ -n "$METRICS_TARGETS" ]; then
+            printf '%s\n' "$METRICS_TARGETS" > perf-metrics-targets.json
+            echo "DEVHUB_QUALIFICATION_METRIC_TARGETS_FILE=$PWD/perf-metrics-targets.json" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$CACHE_TARGETS" ]; then
+            printf '%s\n' "$CACHE_TARGETS" > perf-cache-targets.json
+            echo "DEVHUB_QUALIFICATION_CACHE_TARGETS_FILE=$PWD/perf-cache-targets.json" >> "$GITHUB_ENV"
+          fi
+      - run: npm run db:generate && npm run db:deploy
+      - name: Verify independently measured API replica and physical host identities
+        run: |
+          mkdir -p artifacts/qualification/topology
+          node scripts/qualification/topology-probe.mjs --topology=qualification-topology.json --output=artifacts/qualification/topology/observed.json
+      - name: Establish three independent 10k real-content baselines
+        run: npm run qualification:baseline -- --runs=3 --topology=qualification-topology.json --output=artifacts/qualification/baseline
+      - name: Execute full linked/source-control qualification and compare measured baseline
+        run: npm run qualification:full -- --baseline=artifacts/qualification/baseline/baseline.json --output=artifacts/qualification/full
+      - name: Archive complete raw evidence regardless of failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-qualification-full-${{ github.run_id }}
+          path: artifacts/qualification/full/
+          if-no-files-found: warn
+          retention-days: 90

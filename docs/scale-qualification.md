@@ -1,0 +1,270 @@
+# DevHub native scalability qualification
+
+**Scope:** actual immutable source content and authoritative PostgreSQL, Redis and
+S3-compatible object storage. The qualification gate deliberately reports
+`INCOMPLETE` until *every required stage and workload* has independent
+measured evidence. Passing the smoke job does **not** certify production scale.
+
+## Running the implemented program
+
+CI uses Node 22.18+, PostgreSQL 16 and Redis 7 with real native
+`stageCanonicalBlob`, `createCanonicalChangeset`, derived-index workers,
+review workers and ref CAS. It collects and uploads unmodified stderr/stdout,
+native lifecycle JSON, durable DB measurements and `summary.json`.
+
+```sh
+docker compose up -d --wait
+npm ci --ignore-scripts --no-audit --no-fund
+npm run db:generate && npm run db:deploy
+npm run qualification:smoke -- --output=artifacts/qualification/local-smoke
+node --test tests/qualification.test.mjs
+```
+
+The regular GitHub workflow runs smoke automatically for feature branches and
+pull requests into `develop`. Full scale is `workflow_dispatch` only, restricted
+to the `devhub-performance-isolated` environment and a dedicated
+`self-hosted,linux,x64,devhub-performance` runner. Configure the environment
+variables/secrets shown in `.github/workflows/native-qualification.yml`. The
+topology variable must describe **the deployed topology**, not blindly copy
+`ops/qualification/topology.example.json`. An unverified manifest does not
+constitute independent evidence that replicas exist.
+
+```sh
+# Run manually on an isolated, dedicated benchmark driver attached to test services.
+export DEVHUB_QUALIFICATION_ISOLATED=YES
+export DEVHUB_QUALIFICATION_APPROVAL=RUN_FULL_SCALE
+export DEVHUB_QUALIFICATION_TOPOLOGY_FILE=/secure/path/observed-topology.json
+npm run qualification:full -- --output=artifacts/qualification/full-01
+
+# Selectively rerun one scenario; never call it a complete run.
+npm run qualification:full -- --only=history-1000000 \
+  --output=artifacts/qualification/full-retry-01
+```
+
+Full mode fails closed unless the topology declares two or more independent API,
+index, validation and integration replicas. This checks the submitted manifest,
+**not independent health or physical node identity**; capture node inventory,
+service metrics, configuration hashes and failures separately. Keep each suite on
+an isolated cluster with capacity quotas and locked-down object buckets. Never
+execute fault drills on a production endpoint.
+
+### Disposable multi-process reproduction (not multi-node certification)
+
+The repository includes `ops/qualification/compose.yml`,
+`ops/qualification/Dockerfile`, and an nginx gateway. With disposable
+credentials supplied through the environment, create two API processes,
+indexers, review workers, validation workers and integration workers:
+
+```sh
+export DEVHUB_QUALIFICATION_ISOLATED=YES
+export DEVHUB_QUALIFICATION_APP_SECRET="$(openssl rand -hex 32)"
+export DEVHUB_QUALIFICATION_STORAGE_USER="qual-local"
+export DEVHUB_QUALIFICATION_STORAGE_PASSWORD="$(openssl rand -hex 32)"
+docker compose -f ops/qualification/compose.yml build
+docker compose -f ops/qualification/compose.yml up -d \
+  --scale api=2 --scale index=2 --scale review=2 \
+  --scale validation=2 --scale integration=2
+# From the host, DB localhost:15432, Redis localhost:16379,
+# MinIO localhost:19000, HTTP ingress localhost:18080.
+```
+
+Configure immutable OCI validation images, corresponding signing keys and a
+real test fixture before claiming any validation success. This Compose model
+uses one Docker host, one PostgreSQL primary, one Redis and one MinIO; it
+cannot demonstrate independent physical failures, true regional caching or
+managed-primary failover. The image is for disposable qualification only.
+
+## What is measured and what is not
+
+| Required workload | Driver | Qualification treatment |
+| --- | --- | --- |
+| 1,000 concurrent native submissions, 10,000 independent changesets | `bench:lifecycle`, full parameters | Checks real object grants, persisted immutable revisions, publication p50/p95/p99 and accepted throughput. Native in-process API, not multi-instance HTTP. |
+| 100,000 consecutive revisions, target 1,000,000 | `qualification/seed.ts` and `scale.ts` | Real alternating BLOB content; checkpoint and historical snapshot integrity. 1M is a target, **not a claimed result**. |
+| 100,000 and 1,000,000 path repositories | Same scale driver in paths mode | 4,000 real file operations per batch; verifies persisted file count and snapshot root. Same content can occur at different paths; distinct byte count is reported separately. |
+| Concurrent indexing and review | `qualification/drain.ts` and `evidence.ts` | Executes actual worker functions and measures durable completions. Single-process drain is not a distributed throughput result. |
+| Thousands of validation and integration jobs | `bench:lifecycle` admissions, `evidence.ts` durable audit | **Admission is not execution**. Only signed finished tasks and completed integration results count. Tenant quotas may legitimately reject burst submissions; record errors. |
+| Hundreds of competing ref updates | `bench:integration:db`, `bench:lifecycle` | Exactly one CAS winner with stale generation; not equivalent to successful merges. |
+| Native sparse checkout/hydration | Existing `benchWorkspaces` inside lifecycle | Small content-backed fixture only. Real native CLI and multiple-host counts require separate evidence. |
+| Cold/warm regional caches | `cache:benchmark` | Local deterministic cache control is explicitly `NONQUALIFYING`; regional node measurements remain absent. |
+| S3 upload/verified download | `storage:stress` | Isolated full mode streams and verifies 3 GiB, reports physical encoding, elapsed time, RSS. It is independent from the canonical inline BLOB workload. |
+| Crash/restart, controlled network partition | Existing `fault-drill`, `network-partition`, `reconcile` scripts | **Not automatically certified**. Run with independently measured restart/outage schedule, then check durable recovery and no ref/object corruption. |
+
+Source query latency comes from the existing source-query benchmark; historical
+blame/diff/ancestry p50/p95/p99 need matching dedicated queries with persisted
+artifacts. Existing derived, Git interoperability and related-review benchmarks
+remain separate controls. Semantic retrieval quality must come from labeled
+real-content fixtures with recall and false-positive counts; deterministic
+embedding mock measurements do **not** prove provider quality.
+
+An integration pipeline qualifies only when the real validation runner produces
+signed completed records, the review completes, human/policy approval is
+authoritatively recorded, integration reaches `INTEGRATED`, the ref update is
+consistent with an authorized CAS, and the client verifies the new content
+digest. Current full-mode scripts do not complete all these conditions and
+therefore the aggregate must remain `INCOMPLETE` and exit nonzero. A new driver
+must capture these linked identifiers and timestamps before certification.
+
+## Evidence schema and thresholds
+
+The bundle contains `manifest.json`, `summary.json`, every command's raw
+`.stdout.log` and `.stderr.log`, lifecycle and worker JSON, path/history
+`.jsonl` progress, and resumable checkpoints. A failed or timed-out workload
+must retain its partial logs; do not replace it with an extrapolation. A process
+exit code of zero is only **case success**; the certification result checks
+mandatory stage and workload coverage separately.
+
+Threshold logic in `scripts/qualification/core.mjs` requires at least three
+**completed, matching** prior baseline runs (same workload and topology hash),
+then derives an observed robust ceiling/floor from median and absolute
+deviations. With missing, incompatible or failed baseline data, the result is
+`UNBASELINED`/`INCOMPARABLE`, never PASS. Baselines should be established
+from stable deployments, repeated under identical load generator capacity,
+and complemented with environment-specific safety/integrity acceptance gates.
+
+Generate a baseline from three completed, unique, matching smoke or full
+publication summaries (each run uses identical workload parameters and a
+verified comparable topology). The baseline is only for **native publication**,
+not end-to-end certification:
+
+```sh
+node scripts/qualification/baseline.mjs --output=artifacts/qualification/baseline.json \
+  artifacts/qualification/run1/summary.json \
+  artifacts/qualification/run2/summary.json \
+  artifacts/qualification/run3/summary.json
+npm run qualification:smoke -- --baseline=artifacts/qualification/baseline.json \
+  --output=artifacts/qualification/check
+```
+
+The audit also exposed a reproduced first-claim race in PostgreSQL tenant
+scheduling: concurrent workers were occasionally raising a unique-constraint
+error on `TenantLaneTurn(lane, tenantId)`, even though all 28 review jobs
+eventually completed. This is now handled by atomic
+`INSERT ... ON CONFLICT DO NOTHING` before the existing row-lock gate.
+A parallel first-time-claim regression test was added. Recovered worker
+exceptions are preserved and now fail the qualification smoke rather than
+being silently counted as clean success. Retest artifacts determine whether
+this fix has eliminated the errors; no improvement is assumed without them.
+
+Collect as independent artifacts: physical DB read/write/WAL metrics, storage
+GET/PUT/bytes/dedupe, driver and every worker/node CPU/RSS/disk, Redis queues
+and retries, source query suboperation histogram, review retrieval recall,
+signed validation task timings and cost, tenant-attributed runner CPU/network,
+CAS retries, lease expiry and worker recovery time, per-layer client/node/
+regional cache counters, and native client verified hydration bytes. Null and
+missing fields are **not zero**.
+
+## Full-stack evidence added after the initial harness
+
+The full workflow now refuses to begin 10k/100k/1M-scale load until:
+
+1. A dedicated `self-hosted,linux,x64,devhub-performance` runner is available
+   in the protected `devhub-performance-isolated` environment.
+2. The observed topology manifest contains at least two **direct** API origins
+   in `apiOrigins`. `scripts/qualification/topology-probe.mjs` requests
+   authenticated `/api/ops/identity` at each origin and requires distinct
+   API instance identities **and distinct Linux kernel boot fingerprints**.
+   Two containers sharing one kernel do not qualify as two physical hosts.
+   This does not attest availability zones or other worker roles.
+3. Three independent *real* 10k-content benchmark runs have completed and
+   produced `artifacts/qualification/baseline/baseline.json`. These runs are
+   compared only with equal workload and topology hashes; a regression fails.
+4. Real PostgreSQL, Redis, S3-compatible storage, immutable runner images,
+   validation signing keys and an authenticated HTTPS API endpoint are supplied.
+
+```sh
+# In a dedicated isolated performance environment, with secrets set securely:
+export DEVHUB_QUALIFICATION_ISOLATED=YES
+export DEVHUB_QUALIFICATION_APPROVAL=RUN_FULL_SCALE
+export DEVHUB_QUALIFICATION_TOPOLOGY_FILE=/secure/observed-topology.json
+export OPS_METRICS_TOKEN='<secret of at least 32 bytes>'
+export DEVHUB_QUALIFICATION_API_URL='https://your-direct-qualified-api-gateway'
+
+node scripts/qualification/topology-probe.mjs \
+  --topology="$DEVHUB_QUALIFICATION_TOPOLOGY_FILE" \
+  --output=artifacts/qualification/observed-api.json
+npm run qualification:baseline -- \
+  --topology="$DEVHUB_QUALIFICATION_TOPOLOGY_FILE" \
+  --output=artifacts/qualification/baseline
+npm run qualification:full -- \
+  --baseline=artifacts/qualification/baseline/baseline.json \
+  --output=artifacts/qualification/full
+```
+
+The isolated full coordinator now invokes `linked-lifecycle.ts`: real
+S3-backed objects, immutable root and child revisions, production review
+workers, six real OCI validation kinds per integration stage, public-key
+verification of runner signatures, human-capability approval for the exact
+source/result revisions, an audited atomic integration/ref mutation, and
+authenticated HTTP readback of every integrated object with SHA-256 validation.
+It **fails** if signed tasks, approvals, exact ref generation, or client bytes
+are missing; no pipeline is manually marked PASSED. The approval uses a
+controlled authorized test human identity; it is not a decision made by a
+live human reviewer.
+
+Additional independent evidence:
+- `query-suite.ts` measures real tree/history/blame/ancestry/compare/diff
+  p50/p95/p99 on stored revisions, including the 100k and 1M checkpoints.
+- `resources.ts` gathers PostgreSQL/WAL data, actual stored transfer bytes,
+  signed-runner CPU/network/peak memory observations where present, model costs
+  and per-tenant attribution. Unknown resource measurements remain null.
+- `cache-regions.mjs` requires at least two real node-cache endpoints plus a
+  regional cache endpoint. It refuses to call a warm cache cold and verifies
+  every returned immutable object digest during both phases. The optional
+  `DEVHUB_QUALIFICATION_CACHE_TARGETS_FILE` identifies those endpoints.
+- `eval-related-semantic.ts --mode=provider` evaluates configured provider
+  embeddings on labeled examples and records actual recall, false positives,
+  model cost and latency. The fixed corpus is not equivalent to production
+  retrieval-quality certification.
+- `fault-recovery.ts` uses real Docker stop/restart and network disconnect/
+  reconnect against the disposable Compose dependencies, checking ref
+  generation and verified object bytes after recovery. It refuses to use the
+  local Compose drill to make claims about unrelated remote clusters.
+- `certify-multi-process.mjs` exercises independent real native client
+  processes and API readiness. Its HTTP probes are not HTTP business-request
+  latency; physical node independence is checked separately.
+
+**Certification boundary:** Full-scale runs have not been executed merely by
+committing these drivers. The manual workflow requires provisioned dedicated
+infrastructure and operator-approved credentials. A local container topology,
+nonqualifying synthetic cache test, queued validation, idle outage, or proposed
+million-revision command must never be presented as completed evidence.
+The aggregate remains `INCOMPLETE` until all required cases have real
+results. If a physical throughput limit, unique-key conflict or worker crash
+causes a failure, preserve its stderr/JSONL/checkpoint, repair the bottleneck,
+and rerun that same measured workload without replacing the failed artifact.
+
+## Current validated bounds and blocking gaps
+
+The first smoke run on 29 Oct 2026 exercised 8 actual concurrent immutable
+changesets and 12 additional independent changesets, with 21 persisted
+revisions immediately after the independent phase; ref CAS had one winner and
+seven rejected stale writers. It revealed a **qualification-audit error**:
+the first implementation compared the *final* repository count to the count
+*before* ancestry and monorepo fixtures. This was corrected to verify the
+independent phase's exact count and final count's lower bound. Review and
+indexing rows were QUEUED when first inspected; the added worker drain
+now attempts to complete actual jobs before the durability audit. Full-scale
+multi-node evidence was **not available** from that smoke run.
+
+Known limits and investigation strategy:
+- **PostgreSQL connection pressure:** 1,000 parallel publication calls can
+  exceed the pool/primary capacity. Capture SQL saturation, lock waits and
+  admitted/rejected counts; change bounded admission or pooling, then rerun.
+- **Large histories/trees:** checkpoint processing may bottleneck on persisted
+  snapshot nodes or object grants. Resume from the last verified checkpoint
+  and measure statements, WAL volume, CPU, allocation, and file-count truth.
+- **Validation storm:** tenant quota enforces a backlog cap. Rejection is not
+  throughput success; test fair multi-tenant scheduling with worker capacity.
+- **Hot reference:** only one stale-generation CAS may succeed. Correctness is
+  required, and integration retries must use a fresh target and revalidation.
+- **Review search:** database index performance and semantic retrieval quality
+  need separate real-content, labeled measures and stable embedding providers.
+- **Cache failure:** local synthetic cache hit rates cannot imply regional
+  hit rates, failure recovery, or native client hydration correctness.
+- **Rollback and partitions:** no production-equivalent failure-domain or
+  rollback claim is made without recorded fault injection and reconciliation.
+
+Do not delete the disposable repositories automatically: failures need
+forensic inspection. Remove them only with an explicit audited cleanup plan.
+Never publish signing keys, tokens, credentials, or raw source payloads in
+qualification logs. Do not claim parity with another system from these results.

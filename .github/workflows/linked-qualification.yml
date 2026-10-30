@@ -1,0 +1,119 @@
+name: Real signed native lifecycle
+on:
+  push:
+    branches: ["feature/end-to-end-scale-qualification"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Disposable CI execution provides genuine S3, signed isolated OCI checks,
+# review, integration and HTTP hydration. It is NOT a multi-host scale run.
+concurrency:
+  group: signed-native-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  genuine-signed-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: devhub
+          POSTGRES_PASSWORD: devhub
+          POSTGRES_DB: devhub
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U devhub -d devhub"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://devhub:devhub@127.0.0.1:5432/devhub?schema=public
+      REDIS_URL: redis://127.0.0.1:6379
+      APP_SECRET: isolated-linked-ci-only-randomness-generated-per-workflow
+      OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
+      OBJECT_STORE_BUCKET: devhub-linked-ci
+      OBJECT_STORE_REGION: us-east-1
+      OBJECT_STORE_ACCESS_KEY: linked-ci-user
+      OBJECT_STORE_SECRET_KEY: linked-ci-only-disposable-object-password
+      DEVHUB_QUALIFICATION_ISOLATED: "YES"
+      DEVHUB_QUALIFICATION_APPROVAL: RUN_FULL_SCALE
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22.18", cache: npm }
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run db:generate && npm run db:deploy
+      - name: Start disposable real S3-compatible object storage
+        run: |
+          docker run -d --name qual-linked-minio -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER="$OBJECT_STORE_ACCESS_KEY" \
+            -e MINIO_ROOT_PASSWORD="$OBJECT_STORE_SECRET_KEY" \
+            cgr.dev/chainguard/minio:latest server /data
+          docker run --rm --network host --entrypoint /bin/sh \
+            -e STORE_USER="$OBJECT_STORE_ACCESS_KEY" \
+            -e STORE_PASSWORD="$OBJECT_STORE_SECRET_KEY" \
+            cgr.dev/chainguard/minio-client:latest-dev -ec \
+            'until mc alias set local http://127.0.0.1:9000 "$STORE_USER" "$STORE_PASSWORD"; do sleep 2; done; mc mb --ignore-existing local/devhub-linked-ci'
+      - name: Prepare fully offline, immutable OCI validation images
+        run: |
+          set -Eeuo pipefail
+          docker pull node:22.18-bookworm-slim
+          docker pull ghcr.io/gitleaks/gitleaks:v8.28.0
+          docker build --pull -f ops/qualification/validation-trivy.Dockerfile \
+            -t devhub-trivy-offline:qualification .
+          echo "VALIDATION_NODE_IMAGE=$(docker image inspect node:22.18-bookworm-slim --format '{{.Id}}')" >> "$GITHUB_ENV"
+          echo "VALIDATION_SECRETS_IMAGE=$(docker image inspect ghcr.io/gitleaks/gitleaks:v8.28.0 --format '{{.Id}}')" >> "$GITHUB_ENV"
+          echo "VALIDATION_SCAN_IMAGE=$(docker image inspect devhub-trivy-offline:qualification --format '{{.Id}}')" >> "$GITHUB_ENV"
+      - name: Generate independent ephemeral Ed25519 evidence signing keys
+        run: |
+          node --input-type=module <<'NODE'
+          import {generateKeyPairSync,randomBytes} from 'node:crypto';
+          import {appendFileSync} from 'node:fs';
+          const keys=generateKeyPairSync('ed25519');
+          const sign=Buffer.from(keys.privateKey.export({type:'pkcs8',format:'pem'})).toString('base64');
+          const verify=Buffer.from(keys.publicKey.export({type:'spki',format:'pem'})).toString('base64');
+          const secret=randomBytes(48).toString('base64url');
+          appendFileSync(process.env.GITHUB_ENV,'VALIDATION_SIGNING_PRIVATE_KEY='+sign+'\n');
+          appendFileSync(process.env.GITHUB_ENV,'VALIDATION_SIGNING_PUBLIC_KEY='+verify+'\n');
+          appendFileSync(process.env.GITHUB_ENV,'APP_SECRET='+secret+'\n');
+          NODE
+      - name: Build and launch actual DevHub API
+        run: |
+          npm run build
+          (npm run start -- -H 127.0.0.1 -p 3000 > /tmp/qual-linked-api.log 2>&1 & echo $! > /tmp/qual-linked-api.pid)
+          for i in $(seq 1 75); do
+            if curl -fsS http://127.0.0.1:3000/api/health; then exit 0; fi
+            sleep 2
+          done
+          tail -120 /tmp/qual-linked-api.log
+          exit 1
+      - name: Execute six real signed checks and exact integration/readback
+        run: |
+          mkdir -p artifacts/qualification/linked-ci
+          timeout --signal=TERM 2400s npx tsx scripts/qualification/linked-lifecycle.ts \
+            --api=http://127.0.0.1:3000 --timeout-seconds=2250 \
+            --output=artifacts/qualification/linked-ci/lifecycle.json
+      - name: Preserve independent evidence even on failure
+        if: always()
+        run: |
+          mkdir -p artifacts/qualification/linked-ci
+          cp /tmp/qual-linked-api.log artifacts/qualification/linked-ci/api.log 2>/dev/null || true
+          docker logs qual-linked-minio > artifacts/qualification/linked-ci/minio.log 2>&1 || true
+          if [ -f /tmp/qual-linked-api.pid ]; then kill "$(cat /tmp/qual-linked-api.pid)" 2>/dev/null || true; fi
+      - name: Upload actual signed lifecycle artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: genuine-signed-lifecycle-${{ github.run_id }}
+          path: artifacts/qualification/linked-ci
+          if-no-files-found: warn
+          retention-days: 30

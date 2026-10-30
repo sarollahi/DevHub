@@ -4,7 +4,10 @@ import type { ValidationKind, ValidationTask } from "@prisma/client";
 export const KINDS = ["COMPILE", "TEST", "LINT", "SECURITY", "SECRETS", "DEPENDENCIES"] as const;
 export const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 export type Recipe = { kind: ValidationKind; image: string; command: string; timeoutSeconds: number };
-const imagePattern = new RegExp("^[a-zA-Z0-9._/:-]+@sha256:[0-9a-f]{64}$");
+// Both registry-manifest digests and local Docker image IDs are immutable.
+// Local IDs allow a disposable CI runner to preload scanner databases without
+// publishing the generated image to an external registry.
+const imagePattern = /^(?:[a-zA-Z0-9._/:-]+@sha256:|sha256:)[0-9a-f]{64}$/;
 export function recipes(env: NodeJS.ProcessEnv = process.env): Recipe[] {
   const image = (key: string) => {
     const value = env[key];
@@ -16,14 +19,18 @@ export function recipes(env: NodeJS.ProcessEnv = process.env): Recipe[] {
   const secrets = image("VALIDATION_SECRETS_IMAGE");
   // All executable recipes are controlled by the service. Repository scripts are untrusted
   // and are executed only by the disposable container runner, never by the API process.
-  const install = "cp -a /source/. /work/ && cd /work && npm ci --offline --ignore-scripts --no-audit --no-fund";
+  const install = "cp -R /source/. /work/ && cd /work && npm ci --offline --ignore-scripts --no-audit --no-fund";
+  // Trivy uses SQLite in read-write mode even when network and DB updates are
+  // disabled. Its signed, preloaded vulnerability DB stays immutable in /opt;
+  // each sandbox copies it into its own disposable writable tmpfs.
+  const scan = "mkdir -p /tmp/trivy-cache && cp -R /opt/trivy-cache/. /tmp/trivy-cache/ && TRIVY_CACHE_DIR=/tmp/trivy-cache ";
   return [
     { kind: "COMPILE", image: node, command: install + " && npm run build", timeoutSeconds: 900 },
     { kind: "TEST", image: node, command: install + " && npm test", timeoutSeconds: 900 },
     { kind: "LINT", image: node, command: install + " && npm run lint", timeoutSeconds: 450 },
-    { kind: "SECURITY", image: scanner, command: "trivy fs --offline-scan --scanners misconfig --exit-code 1 /source", timeoutSeconds: 360 },
+    { kind: "SECURITY", image: scanner, command: scan + "trivy fs --offline-scan --skip-db-update --skip-java-db-update --skip-check-update --scanners misconfig --exit-code 1 /source", timeoutSeconds: 360 },
     { kind: "SECRETS", image: secrets, command: "gitleaks dir --no-banner --redact --exit-code 1 /source", timeoutSeconds: 240 },
-    { kind: "DEPENDENCIES", image: scanner, command: "trivy fs --offline-scan --scanners vuln --exit-code 1 /source", timeoutSeconds: 360 },
+    { kind: "DEPENDENCIES", image: scanner, command: scan + "trivy fs --offline-scan --skip-db-update --skip-java-db-update --skip-check-update --scanners vuln --exit-code 1 /source", timeoutSeconds: 360 },
   ];
 }
 export function configurationDigest(input: Recipe[]): string {
